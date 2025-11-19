@@ -188,7 +188,6 @@ const App = () => {
   };
 
   const focusWindow = (id) => {
-    // Move ID to end of array (Highest Z-Index)
     setWindowOrder(prev => [...prev.filter(w => w !== id), id]);
   };
 
@@ -222,14 +221,11 @@ const App = () => {
     // INSTANT UPDATE for smooth animation
     setNodes(prevNodes => prevNodes.map(n => {
       if (n.id === draggedNodeId) {
-        // We mutate a copy of the object logic for rendering purposes, 
-        // but we also need to update the underlying class instance X/Y so physics knows
         n.x = mouseX - dragOffset.x;
         n.y = mouseY - dragOffset.y;
         n.targetX = n.x; // Sync target so it doesn't snap back
         n.targetY = n.y;
-        return n; // Return same instance (mutated) or new object. 
-                  // Since we mutate the class instance, re-render is triggered by setNodes([...prev]) pattern
+        return n; 
       }
       return n;
     }));
@@ -355,9 +351,8 @@ const App = () => {
       }
     });
 
-    // 5. LOG STREAMING (Periodic)
+    // 5. LOG STREAMING
     nodes.forEach(n => {
-      // If moving, and has route, and 1.5 seconds passed since last report
       if (n.isMoving && n.hopsToGw < 999) {
          if (now - n.lastReportTime > 1500) {
             const path = tracePath(n.id, nodes);
@@ -374,7 +369,7 @@ const App = () => {
       }
     });
 
-  }, [nodes, config, addLog, draggedNodeId]); // Dep on draggedNodeId to ensure physics updates respect drag state
+  }, [nodes, config, addLog, draggedNodeId]); 
 
   useEffect(() => {
     let interval;
@@ -383,15 +378,22 @@ const App = () => {
   }, [isPlaying, updateSimulation]);
 
   // --- ACTIONS ---
+  
+  // *** SEQUENTIAL ID FIX IS HERE ***
   const spawn = (type) => {
-    const n = new NodeEntity(Date.now(), type, Math.random() * 1000 + 50, Math.random() * 700 + 50);
+    // Find Max ID
+    const maxId = nodes.length > 0 ? Math.max(...nodes.map(n => n.id)) : 0;
+    const nextId = maxId + 1;
+    
+    const n = new NodeEntity(nextId, type, Math.random() * 1000 + 50, Math.random() * 700 + 50);
     setNodes(prev => [...prev, n]);
-    addLog(`Spawned ${type}`);
+    addLog(`Spawned ${type} (ID: ${nextId})`);
   };
+
   const clearType = (type) => {
     setNodes(prev => prev.filter(n => n.type !== type));
     addLog(`Cleared ${type}s`);
-    setOpenWindows([]); // Close all to prevent stale windows
+    setOpenWindows([]); 
   };
   const nukeAll = () => {
     setNodes([]);
@@ -419,11 +421,10 @@ const App = () => {
       {/* SIDEBAR */}
       <div style={styles.sidebar}>
         <div>
-          <h1 style={{margin:0, color:'#38bdf8', fontSize:'22px', fontWeight:'900'}}>SIMULATOR v8</h1>
-          <p style={{margin:0, color:'#64748b', fontSize:'11px'}}>Multi-Window & Stream Logs</p>
+          <h1 style={{margin:0, color:'#38bdf8', fontSize:'22px', fontWeight:'900'}}>SIMULATOR v9</h1>
+          <p style={{margin:0, color:'#64748b', fontSize:'11px'}}>Clean IDs & Smooth Drag</p>
         </div>
 
-        {/* CONTROLS ... (Same as previous) */}
         <div style={styles.panel}>
           <span style={styles.label}>Spawn</span>
           <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:'8px'}}>
@@ -479,12 +480,12 @@ const App = () => {
         {openWindows.map((id) => {
            const node = nodes.find(n => n.id === id);
            if (!node) return null;
-           const zIndex = windowOrder.indexOf(id) + 20; // Base Z + Order
+           const zIndex = windowOrder.indexOf(id) + 20; 
 
            return (
             <DraggableWindow 
               key={id} id={id} 
-              title={`NODE ${id}`} 
+              title={`NODE ${id} INTERNALS`} 
               icon={Search} 
               initialX={400 + (openWindows.indexOf(id) * 30)} 
               initialY={100 + (openWindows.indexOf(id) * 30)} 
