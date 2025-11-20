@@ -1,0 +1,328 @@
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { Play, Pause, Wifi, Activity, Plus, Trash2, Zap, Database, XCircle, Search, Radio, MessageSquare, Scale, Info } from 'lucide-react';
+import { NodeFirmware } from './logic/NodeFirmware';
+import { DraggableWindow } from './components/DraggableWindow';
+import { NodeConfig, LogEntry, NodeRole, NodeType, Packet, PacketType, VisualPacket } from './types';
+
+const PIXELS_PER_METER = 20;
+const CANVAS_WIDTH = 1200;
+const CANVAS_HEIGHT = 800;
+
+interface Link {
+  source: NodeFirmware;
+  target: NodeFirmware;
+  dist: number;
+}
+
+const App: React.FC = () => {
+  const [nodes, setNodes] = useState<NodeFirmware[]>([]);
+  const [links, setLinks] = useState<Link[]>([]);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [packets, setPackets] = useState<Packet[]>([]); 
+  const [visualPackets, setVisualPackets] = useState<VisualPacket[]>([]); 
+  
+  const [showCloudLogs, setShowCloudLogs] = useState(false);
+  const [showPacketSniffer, setShowPacketSniffer] = useState(false);
+  const [packetFilter, setPacketFilter] = useState<string>('ALL');
+
+  const [tick, setTick] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(true);
+  
+  const [config, setConfig] = useState<NodeConfig>({
+    uwbRange: 15,
+    isolationTimeout: 5,
+    movingSpeed: 0.8,
+    showRange: false,
+    maxLeaders: 1,
+    minClusterSize: 5,
+  });
+
+  const nodesRef = useRef<NodeFirmware[]>([]); 
+  const visualPacketsRef = useRef<VisualPacket[]>([]);
+  const animationRef = useRef<number | undefined>(undefined);
+  const lastTimeRef = useRef<number>(0);
+  
+  const [openWindows, setOpenWindows] = useState<number[]>([]);
+  const [windowOrder, setWindowOrder] = useState<number[]>([]);
+  const draggedNodeIdRef = useRef<number | null>(null);
+  const dragStartPosRef = useRef({ x: 0, y: 0 });
+  const dragOffsetRef = useRef({ x: 0, y: 0 });
+  const svgRef = useRef<SVGSVGElement>(null);
+
+  useEffect(() => { nodesRef.current = nodes; }, [nodes]);
+
+  useEffect(() => {
+    const initial = [
+      new NodeFirmware(1, 'HARDWARE_GW', 200, 200),
+      new NodeFirmware(2, 'TRACKER', 400, 400),
+      new NodeFirmware(3, 'TRACKER', 600, 300),
+    ];
+    setNodes(initial);
+    nodesRef.current = initial;
+  }, []);
+
+  const addLog = useCallback((msg: string, type: LogEntry['type'], category: LogEntry['category']) => {
+    const time = new Date().toLocaleTimeString().split(' ')[0];
+    const entry: LogEntry = { id: Math.random().toString(36), time, msg, type, category };
+    setLogs(prev => [entry, ...prev].slice(0, 100));
+  }, []);
+
+  const capturePacket = useCallback((p: Packet) => {
+    setPackets(prev => [p, ...prev].slice(0, 50));
+  }, []);
+
+  const gameLoop = useCallback((timestamp: number) => {
+    if (!lastTimeRef.current) lastTimeRef.current = timestamp;
+    const deltaTime = (timestamp - lastTimeRef.current) / 1000; 
+    lastTimeRef.current = timestamp;
+
+    if (!isPlaying) {
+      animationRef.current = requestAnimationFrame(gameLoop);
+      return;
+    }
+
+    const currentNodes = nodesRef.current; 
+    const rangePx = config.uwbRange * PIXELS_PER_METER;
+
+    // 1. VISUAL PACKETS
+    let newVisuals = visualPacketsRef.current.map(vp => {
+      vp.progress += vp.speed * deltaTime;
+      
+      if (vp.style === 'LINE') {
+         const targetNode = currentNodes.find(n => n.id === vp.targetId);
+         let tx = vp.x; let ty = vp.y;
+         if (targetNode) {
+            tx = vp.startX + (targetNode.x - vp.startX) * vp.progress;
+            ty = vp.startY + (targetNode.y - vp.startY) * vp.progress;
+         }
+         vp.x = tx; vp.y = ty;
+      }
+      return vp;
+    }).filter(vp => vp.progress < 1.0); 
+
+    // 2. ETHER
+    const rxBuffers = new Map<number, Packet[]>();
+    currentNodes.forEach(n => rxBuffers.set(n.id, []));
+
+    currentNodes.forEach(sender => {
+      while(sender.txQueue.length > 0) {
+        const packet = sender.txQueue.shift();
+        if(!packet) continue;
+        capturePacket(packet);
+
+        if (packet.destId === -1) {
+            let speed = 1.0; 
+            if (packet.type === PacketType.DATA) speed = 2.5;
+            if (packet.type === PacketType.PANIC) speed = 3.0;
+            if (packet.type === PacketType.ELECTION) speed = 2.0;
+
+            newVisuals.push({
+                id: Math.random().toString(),
+                packet: packet,
+                x: sender.x, y: sender.y,
+                startX: sender.x, startY: sender.y,
+                targetId: -1,
+                progress: 0,
+                speed: speed,
+                style: 'RING',
+                maxRadius: rangePx
+            });
+        }
+
+        currentNodes.forEach(receiver => {
+          if (sender.id === receiver.id) return;
+          if (packet.destId !== -1 && packet.destId !== receiver.id) return;
+
+          const dist = Math.sqrt(Math.pow(sender.x - receiver.x, 2) + Math.pow(sender.y - receiver.y, 2));
+          
+          if (dist <= rangePx) {
+             rxBuffers.get(receiver.id)?.push(packet);
+             if (packet.destId !== -1) {
+                 newVisuals.push({
+                    id: Math.random().toString(),
+                    packet: packet,
+                    x: sender.x, y: sender.y,
+                    startX: sender.x, startY: sender.y,
+                    targetId: receiver.id, 
+                    progress: 0,
+                    speed: 2.5,
+                    style: 'LINE'
+                 });
+             }
+          }
+        });
+      }
+    });
+
+    visualPacketsRef.current = newVisuals;
+    setVisualPackets(newVisuals);
+
+    // 3. LINKS
+    const newLinks: Link[] = [];
+    currentNodes.forEach(n1 => {
+      currentNodes.forEach(n2 => {
+        if (n1.id >= n2.id) return; 
+        const dist = Math.sqrt(Math.pow(n1.x - n2.x, 2) + Math.pow(n1.y - n2.y, 2));
+        if (dist <= rangePx) newLinks.push({ source: n1, target: n2, dist });
+      });
+    });
+    setLinks(newLinks);
+
+    // 4. FIRMWARE TICK
+    currentNodes.forEach(node => {
+      node.isDragging = (node.id === draggedNodeIdRef.current);
+      const myPackets = rxBuffers.get(node.id) || [];
+      
+      myPackets.forEach(p => {
+        if (p.type === PacketType.DATA && node.role === NodeRole.ROOT) {
+           addLog(`CLOUD RX: Pos(${p.payload.x},${p.payload.y}) from ID:${p.srcId} via ${node.type==='HARDWARE_GW'?'GW':'LEADER'}:${node.id}`, 'SUCCESS', 'CLOUD');
+        }
+      });
+
+      node.tick(deltaTime, config, myPackets);
+
+      if (node.role === NodeRole.ISOLATED && node.isolationTimer > config.isolationTimeout && Math.random() > 0.99) {
+        addLog(`ID:${node.id} PANIC UPLOAD (LTE)`, 'ERROR', 'CLOUD');
+      }
+    });
+
+    setTick(t => t + 1);
+    setNodes([...currentNodes]); 
+    animationRef.current = requestAnimationFrame(gameLoop);
+  }, [isPlaying, config, addLog, capturePacket]);
+
+  useEffect(() => {
+    animationRef.current = requestAnimationFrame(gameLoop);
+    return () => { if (animationRef.current) cancelAnimationFrame(animationRef.current); };
+  }, [gameLoop]);
+
+  // ... (Same Handlers) ...
+  const handleMouseDown = (e: React.MouseEvent, nodeId: number) => {
+    e.stopPropagation(); if (e.button !== 0) return;
+    if (!svgRef.current) return;
+    const rect = svgRef.current.getBoundingClientRect();
+    const scaleX = CANVAS_WIDTH / rect.width;
+    const scaleY = CANVAS_HEIGHT / rect.height;
+    const mouseX = (e.clientX - rect.left) * scaleX;
+    const mouseY = (e.clientY - rect.top) * scaleY;
+    const node = nodesRef.current.find(n => n.id === nodeId);
+    if (node) {
+      draggedNodeIdRef.current = nodeId;
+      dragStartPosRef.current = { x: mouseX, y: mouseY };
+      dragOffsetRef.current = { x: mouseX - node.x, y: mouseY - node.y };
+    }
+  };
+  const handleMouseMove = (e: React.MouseEvent) => {
+    if (draggedNodeIdRef.current === null || !svgRef.current) return;
+    const rect = svgRef.current.getBoundingClientRect();
+    const scaleX = CANVAS_WIDTH / rect.width;
+    const scaleY = CANVAS_HEIGHT / rect.height;
+    const mouseX = (e.clientX - rect.left) * scaleX;
+    const mouseY = (e.clientY - rect.top) * scaleY;
+    const node = nodesRef.current.find(n => n.id === draggedNodeIdRef.current);
+    if (node) {
+      node.x = mouseX - dragOffsetRef.current.x;
+      node.y = mouseY - dragOffsetRef.current.y;
+      node.targetX = node.x; node.targetY = node.y;
+      setNodes([...nodesRef.current]);
+    }
+  };
+  const handleMouseUp = (e: React.MouseEvent) => {
+    if (draggedNodeIdRef.current !== null && svgRef.current) {
+      const rect = svgRef.current.getBoundingClientRect();
+      const scaleX = CANVAS_WIDTH / rect.width;
+      const scaleY = CANVAS_HEIGHT / rect.height;
+      const mouseX = (e.clientX - rect.left) * scaleX;
+      const mouseY = (e.clientY - rect.top) * scaleY;
+      const distMoved = Math.sqrt(Math.pow(mouseX - dragStartPosRef.current.x, 2) + Math.pow(mouseY - dragStartPosRef.current.y, 2));
+      if (distMoved < 5) {
+         const node = nodesRef.current.find(n => n.id === draggedNodeIdRef.current);
+         if (node) node.toggleMode();
+      }
+      draggedNodeIdRef.current = null;
+    }
+  };
+  const spawn = (type: NodeType) => {
+    const maxId = nodesRef.current.length > 0 ? Math.max(...nodesRef.current.map(n => n.id)) : 0;
+    const n = new NodeFirmware(maxId + 1, type, Math.random() * 1000 + 50, Math.random() * 700 + 50);
+    setNodes(prev => [...prev, n]); nodesRef.current = [...nodesRef.current, n];
+  };
+  const clearType = (type: NodeType) => {
+    const newNodes = nodesRef.current.filter(n => n.type !== type);
+    setNodes(newNodes); nodesRef.current = newNodes; setOpenWindows([]);
+  };
+  const nukeAll = () => { setNodes([]); nodesRef.current = []; setOpenWindows([]); };
+  const openNodeWindow = (id: number) => {
+    if (!openWindows.includes(id)) { setOpenWindows(prev => [...prev, id]); setWindowOrder(prev => [...prev, id]); } else focusWindow(id);
+  };
+  const closeNodeWindow = (id: string | number) => setOpenWindows(prev => prev.filter(w => w !== id));
+  const focusWindow = (id: string | number) => setWindowOrder(prev => [...prev.filter(w => w !== Number(id)), Number(id)]);
+  const getNodeColor = (n: NodeFirmware) => {
+    if (n.role === NodeRole.ISOLATED && n.isolationTimer > config.isolationTimeout) return '#ef4444'; 
+    if (n.role === NodeRole.ISOLATED) return '#f59e0b'; 
+    if (n.role === NodeRole.ROOT) return '#a855f7'; 
+    if (n.role === NodeRole.LEADER) return '#ec4899'; 
+    return '#22c55e'; 
+  };
+  const getPacketColor = (type: PacketType) => {
+    switch (type) {
+      case PacketType.HELLO: return '#38bdf8'; 
+      case PacketType.DATA: return '#4ade80'; 
+      case PacketType.ELECTION: return '#a855f7'; 
+      case PacketType.PANIC: return '#ef4444'; 
+      default: return '#cbd5e1';
+    }
+  };
+  const styles = {
+    container: { display: 'flex', height: '100vh', width: '100vw', backgroundColor: '#0f172a', color: '#f1f5f9', fontFamily: 'sans-serif', overflow: 'hidden', userSelect: 'none' as const },
+    sidebar: { width: '320px', backgroundColor: '#1e293b', borderRight: '1px solid #334155', padding: '20px', display: 'flex', flexDirection: 'column' as const, gap: '15px', zIndex: 10, boxShadow: '4px 0 15px rgba(0,0,0,0.3)' },
+    main: { flex: 1, backgroundColor: '#020617', position: 'relative' as const, overflow: 'hidden' },
+    panel: { backgroundColor: 'rgba(15, 23, 42, 0.5)', padding: '12px', borderRadius: '8px', border: '1px solid #334155', display: 'flex', flexDirection: 'column' as const, gap: '8px' },
+    btn: { padding: '8px', borderRadius: '4px', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'white', gap: '6px', fontSize: '11px', fontWeight: 'bold', transition: '0.2s' },
+    label: { fontSize: '10px', color: '#94a3b8', textTransform: 'uppercase' as const, letterSpacing: '0.5px', fontWeight: 'bold' },
+    inspectorRow: { display: 'flex', justifyContent: 'space-between', padding: '8px 12px', borderBottom: '1px solid #1e293b', fontSize: '11px', fontFamily: 'monospace' },
+  };
+
+  return (
+    <>
+    <style>{`body { margin: 0; padding: 0; overflow: hidden; box-sizing: border-box; }`}</style>
+    <div style={styles.container} onMouseUp={handleMouseUp} onMouseMove={handleMouseMove}>
+      <div style={styles.sidebar}>
+        <div><h1 style={{margin:0, color:'#38bdf8', fontSize:'22px', fontWeight:'900'}}>MESH SIM v17</h1><p style={{margin:0, color:'#64748b', fontSize:'11px'}}>Advanced Election Algo</p></div>
+        
+        <div style={styles.panel}><span style={styles.label}>Control</span><div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:'8px'}}><button style={{...styles.btn, backgroundColor:'#334155'}} onClick={() => spawn('TRACKER')}><Plus size={14} /> Tracker</button><button style={{...styles.btn, backgroundColor:'#334155'}} onClick={() => spawn('HARDWARE_GW')}><Wifi size={14} /> GW</button></div><div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:'8px'}}><button style={{...styles.btn, backgroundColor:'#b91c1c'}} onClick={nukeAll}><XCircle size={14} /> Clear</button><button style={{...styles.btn, backgroundColor: isPlaying ? '#eab308' : '#22c55e'}} onClick={() => setIsPlaying(!isPlaying)}>{isPlaying ? <Pause size={14} /> : <Play size={14} />} {isPlaying ? 'Pause' : 'Run'}</button></div></div>
+        <div style={styles.panel}><span style={styles.label}>Telemetry Windows</span><button style={{...styles.btn, backgroundColor: showCloudLogs ? '#3b82f6' : '#334155'}} onClick={() => setShowCloudLogs(!showCloudLogs)}><Database size={14} /> Cloud Database</button><button style={{...styles.btn, backgroundColor: showPacketSniffer ? '#8b5cf6' : '#334155'}} onClick={() => setShowPacketSniffer(!showPacketSniffer)}><Radio size={14} /> Packet Sniffer</button></div>
+        <div style={styles.panel}>
+          <span style={styles.label}>Configuration</span>
+          <div style={{display:'flex', justifyContent:'space-between', fontSize:'10px', color:'#cbd5e1'}}><span>Range</span> <span>{config.uwbRange}m</span></div>
+          <input type="range" min="5" max="30" value={config.uwbRange} onChange={e => setConfig({...config, uwbRange: Number(e.target.value)})} style={{width:'100%'}} />
+          <div style={{display:'flex', justifyContent:'space-between', fontSize:'10px', color:'#cbd5e1'}}><span>Speed</span> <span>{config.movingSpeed.toFixed(1)}</span></div>
+          <input type="range" min="0.1" max="3.0" step="0.1" value={config.movingSpeed} onChange={e => setConfig({...config, movingSpeed: Number(e.target.value)})} style={{width:'100%'}} />
+          <div style={{display:'flex', justifyContent:'space-between', fontSize:'10px', color:'#f472b6'}}><span>Redundancy</span> <span>{config.maxLeaders} Max</span></div>
+          <input type="range" min="1" max="5" step="1" value={config.maxLeaders} onChange={e => setConfig({...config, maxLeaders: Number(e.target.value)})} style={{width:'100%', accentColor:'#ec4899'}} />
+          
+          {/* MIN SIZE SLIDER */}
+          <div style={{display:'flex', justifyContent:'space-between', fontSize:'10px', color:'#a855f7', marginTop:'5px'}}><span>Min Cluster Size</span> <span>{config.minClusterSize} Nodes</span></div>
+          <input type="range" min="2" max="10" step="1" value={config.minClusterSize} onChange={e => setConfig({...config, minClusterSize: Number(e.target.value)})} style={{width:'100%', accentColor:'#a855f7'}} />
+
+          <div style={{display:'flex', justifyContent:'space-between', fontSize:'10px', color:'#f87171', marginTop:'5px'}}><span>Isolation Time</span> <span>{config.isolationTimeout}s</span></div>
+          <input type="range" min="1" max="20" step="1" value={config.isolationTimeout} onChange={e => setConfig({...config, isolationTimeout: Number(e.target.value)})} style={{width:'100%', accentColor:'#ef4444'}} />
+          <label style={{display:'flex', alignItems:'center', gap:'8px', fontSize:'11px', marginTop:'8px', cursor:'pointer', color:'#cbd5e1'}}><input type="checkbox" checked={config.showRange} onChange={e => setConfig({...config, showRange:e.target.checked})} />Show Radius</label>
+        </div>
+        <div style={styles.panel}><span style={styles.label}>Packet Legend</span><div style={{display:'grid', gridTemplateColumns:'1fr', gap:'4px', fontSize:'10px', color:'#cbd5e1'}}><div style={{display:'flex', alignItems:'center', gap:'6px'}}><div style={{width:8, height:8, borderRadius:'50%', border:'1px solid #38bdf8'}}></div> HELLO (Wave)</div><div style={{display:'flex', alignItems:'center', gap:'6px'}}><div style={{width:8, height:8, borderRadius:'50%', backgroundColor:'#4ade80'}}></div> DATA (Line)</div><div style={{display:'flex', alignItems:'center', gap:'6px'}}><div style={{width:8, height:8, borderRadius:'50%', border:'1px solid #a855f7'}}></div> ELECTION (Wave)</div><div style={{display:'flex', alignItems:'center', gap:'6px'}}><div style={{width:8, height:8, borderRadius:'50%', border:'1px solid #ef4444'}}></div> PANIC (Wave)</div></div></div>
+      </div>
+
+      <div style={styles.main}>
+        {/* Visuals Omitted for Brevity (Same as before) */}
+        <div style={{position:'absolute', top:'15px', left:'15px', color:'#64748b', fontSize:'12px', fontFamily:'monospace'}}>TICKS: {tick} | NODES: {nodes.length}</div>
+        {showCloudLogs && <DraggableWindow id="cloud" title="CLOUD DATABASE" icon={Database} initialX={800} initialY={50} onClose={() => setShowCloudLogs(false)} onFocus={() => focusWindow('cloud')} zIndex={100}><div style={{display:'flex', flexDirection:'column', gap:'4px', padding:'8px'}}>{logs.filter(l => l.category === 'CLOUD').map(l => <div key={l.id} style={{padding:'4px', borderBottom:'1px solid #1e293b', fontFamily:'monospace', fontSize:'10px', color: l.type === 'SUCCESS' ? '#4ade80' : '#f87171'}}><span style={{opacity:0.5}}>[{l.time}]</span> {l.msg}</div>)}</div></DraggableWindow>}
+        {showPacketSniffer && <DraggableWindow id="sniffer" title="AIR GAP SNIFFER" icon={Radio} initialX={800} initialY={400} onClose={() => setShowPacketSniffer(false)} onFocus={() => focusWindow('sniffer')} zIndex={100}><div style={{padding:'8px', borderBottom:'1px solid #334155', display:'flex', gap:'4px'}}>{['ALL', 'HELLO', 'DATA', 'ELECTION', 'PANIC'].map(f => <button key={f} onClick={() => setPacketFilter(f)} style={{fontSize:'9px', padding:'4px 8px', borderRadius:'4px', border:'none', backgroundColor: packetFilter === f ? '#38bdf8' : '#1e293b', color: packetFilter === f ? '#0f172a' : '#94a3b8', cursor:'pointer'}}>{f}</button>)}</div><div style={{display:'flex', flexDirection:'column', gap:'2px', padding:'8px'}}>{packets.filter(p => packetFilter === 'ALL' || p.type === packetFilter).map(p => <div key={p.id} style={{padding:'4px', borderBottom:'1px solid #1e293b', fontFamily:'monospace', fontSize:'9px', color:'#cbd5e1', display:'flex', gap:'8px'}}><span style={{fontWeight:'bold', color: getPacketColor(p.type)}}>{p.type}</span><span>ID:{p.srcId} → {p.destId === -1 ? 'ALL' : `ID:${p.destId}`}</span></div>)}</div></DraggableWindow>}
+        {openWindows.map(id => { const node = nodes.find(n => n.id === id); if (!node) return null; return <DraggableWindow key={id} id={id} title={`NODE ${id}`} icon={Search} initialX={400} initialY={100} onClose={closeNodeWindow} onFocus={focusWindow} zIndex={windowOrder.indexOf(id) + 20}><div style={{padding:'12px'}}><div style={styles.inspectorRow}><span>ROLE</span><span>{node.role}</span></div><div style={styles.inspectorRow}><span>BATTERY</span><span style={{color: node.battery > 30 ? '#4ade80' : '#f87171'}}>{node.battery}%</span></div><div style={styles.inspectorRow}><span>NEXT HOP</span><span>{node.nextHop ? `ID:${node.nextHop}` : 'NONE'}</span></div><div style={{marginTop:'10px', fontSize:'10px', fontWeight:'bold'}}>NEIGHBORS</div><div style={{backgroundColor:'rgba(0,0,0,0.2)', maxHeight:'120px', overflowY:'auto'}}>{Array.from(node.neighbors.values()).map(n => <div key={n.id} style={{...styles.inspectorRow, borderBottom:'1px dashed #334155'}}><span>ID:{n.id}</span><span>{n.role}</span></div>)}</div></div></DraggableWindow> })}
+        <svg width="100%" height="100%" viewBox={`0 0 ${CANVAS_WIDTH} ${CANVAS_HEIGHT}`} onContextMenu={(e) => e.preventDefault()} ref={svgRef}><defs><pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" strokeWidth="1"/></pattern></defs><rect width="100%" height="100%" fill="url(#grid)" />{config.showRange && nodes.map(n => <circle key={`r-${n.id}`} cx={n.x} cy={n.y} r={config.uwbRange * PIXELS_PER_METER} fill="none" stroke="#334155" strokeDasharray="4 4" opacity="0.3" pointerEvents="none" />)}{links.map((l, i) => <line key={i} x1={l.source.x} y1={l.source.y} x2={l.target.x} y2={l.target.y} stroke="#475569" strokeOpacity={0.3} strokeWidth={1} pointerEvents="none" />)}{visualPackets.map(vp => { if (vp.style === 'RING') { const radius = (vp.maxRadius || 100) * vp.progress; const opacity = (1.0 - vp.progress) * 0.3; return <circle key={vp.id} cx={vp.x} cy={vp.y} r={radius} fill="none" stroke={getPacketColor(vp.packet.type)} strokeWidth={2} strokeOpacity={opacity} pointerEvents="none" />; } else { return <circle key={vp.id} cx={vp.x} cy={vp.y} r={3} fill={getPacketColor(vp.packet.type)} pointerEvents="none" />; } })}{nodes.map(n => { const color = getNodeColor(n); let Icon = Activity; if (n.role === NodeRole.ROOT) Icon = Wifi; if (n.role === NodeRole.LEADER) Icon = Zap; if (n.role === NodeRole.ISOLATED && n.isolationTimer > config.isolationTimeout) Icon = Wifi; return <g key={n.id} transform={`translate(${n.x},${n.y})`} onMouseDown={(e) => handleMouseDown(e, n.id)} onClick={() => { if(!n.isDragging) n.toggleMode() }} onContextMenu={(e) => { e.preventDefault(); openNodeWindow(n.id); }} style={{cursor: 'grab'}}>{openWindows.includes(n.id) && <circle r="24" fill="none" stroke="white" strokeWidth="1" strokeDasharray="2 2" opacity="0.8"><animateTransform attributeName="transform" type="rotate" from="0 0 0" to="360 0 0" dur="3s" repeatCount="indefinite" /></circle>}{n.role === NodeRole.ISOLATED && n.isolationTimer > config.isolationTimeout && <circle r="30" fill="none" stroke="#ef4444" strokeWidth="2" opacity="0.5"><animate attributeName="r" from="20" to="50" dur="1s" repeatCount="indefinite" /><animate attributeName="opacity" from="1" to="0" dur="1s" repeatCount="indefinite" /></circle>}{n.isGossiping && <foreignObject x="15" y="-25" width="20" height="20"><MessageSquare size={14} color="#38bdf8" fill="#0f172a" /></foreignObject>}{n.isElecting && <foreignObject x="-30" y="-25" width="20" height="20"><Scale size={14} color="#a855f7" fill="#0f172a" /></foreignObject>}<circle r="18" fill="#0f172a" stroke={color} strokeWidth="3" /><foreignObject x="-10" y="-10" width="20" height="20" style={{pointerEvents:'none'}}><div style={{display:'flex', alignItems:'center', justifyContent:'center', height:'100%', color: color}}><Icon size={14} /></div></foreignObject><text y="32" textAnchor="middle" fill={color} fontSize="10" fontWeight="bold" fontFamily="monospace" pointerEvents="none">{n.type === 'HARDWARE_GW' ? 'HW_GW' : (n.role === NodeRole.LEADER ? 'ELECTED' : `ID:${n.id}`)}</text><text y="44" textAnchor="middle" fill="#64748b" fontSize="9" fontFamily="monospace" pointerEvents="none">{n.state}</text><g transform="translate(12, 12)"><rect x="0" y="0" width="16" height="8" rx="2" fill="#020617" stroke="#475569" strokeWidth="1" /><rect x="2" y="2" width={Math.max(0, (n.battery/100)*12)} height="4" rx="1" fill={n.battery > 30 ? '#22c55e' : '#ef4444'} /><text x="18" y="8" fill="#cbd5e1" fontSize="8" fontFamily="monospace" fontWeight="bold">{n.battery}%</text></g></g> })}</svg>
+      </div>
+    </div>
+    </>
+  );
+};
+
+export default App;
