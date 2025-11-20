@@ -10,9 +10,9 @@ export enum NodeRole {
 
 export enum PacketType {
   HELLO = 'HELLO',
-  DATA = 'DATA',         
-  ELECTION = 'ELECTION', 
-  PANIC = 'PANIC',       
+  DATA = 'DATA',
+  ELECTION = 'ELECTION',
+  PANIC = 'PANIC',
 }
 
 export interface Packet {
@@ -45,11 +45,10 @@ export interface NeighborEntry {
   hopsToGw: number;
   lastSeen: number;
   rssi: number;
-  // --- GOSSIP DATA ---
   leaderId?: number; 
   leaderBat?: number;
   parentId?: number;
-  neighborCount?: number; // <--- NEW: For "Most Neighbors" logic
+  neighborCount?: number;
 }
 
 export interface NodeConfig {
@@ -67,4 +66,13 @@ export interface LogEntry {
   msg: string;
   type: 'INFO' | 'SUCCESS' | 'WARN' | 'ERROR';
   category: 'CLOUD' | 'PACKET' | 'SYS';
+}
+
+// --- NEW: WALLS ---
+export interface Wall {
+  id: string;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
 }

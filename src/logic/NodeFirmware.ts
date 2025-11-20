@@ -55,6 +55,7 @@ export class NodeFirmware {
       this.isGossiping = true;
       this.gossipResetTimer = 0.2; 
       this.isolationTimer = 0; 
+      
       if(this.role === NodeRole.ISOLATED) {
           this.changeRole(NodeRole.IDLE, 999, null, PacketType.HELLO);
       }
@@ -67,7 +68,7 @@ export class NodeFirmware {
     }
 
     // 2. Timers
-    this.updateTimers(dt);
+    this.updateTimers(dt, config);
     if (this.txCooldownTimer > 0) this.txCooldownTimer -= dt;
 
     // 3. Consensus
@@ -89,14 +90,18 @@ export class NodeFirmware {
           leaderId: p.payload.leaderId,
           leaderBat: p.payload.leaderBat,
           parentId: p.payload.parentId,
-          neighborCount: p.payload.neighborCount, // <--- NEW: GOSSIP NEIGHBOR COUNT
+          neighborCount: p.payload.neighborCount,
           lastSeen: 0,
           rssi: -50
         });
         
-        // If my parent panicked or became isolated, I must panic immediately
-        if (this.nextHop === p.srcId && (p.type === PacketType.PANIC || p.payload.hopsToGw >= 999)) {
-             this.changeRole(NodeRole.IDLE, 999, null, PacketType.PANIC);
+        // PARENT FAILURE REACTION
+        if (this.nextHop === p.srcId) {
+            // If parent explicitly panicked or degraded
+            if (p.type === PacketType.PANIC || p.payload.hopsToGw >= 999) {
+                 // My link to the world is gone. I must panic to notify my children.
+                 this.changeRole(NodeRole.IDLE, 999, null, PacketType.PANIC);
+            }
         }
       }
 
@@ -123,48 +128,40 @@ export class NodeFirmware {
     });
   }
 
-  // --- YOUR REQUESTED ALGORITHM ---
   private getSortedCandidates() {
     const candidates = [...Array.from(this.neighbors.values()), {
-      id: this.id, 
-      role: this.role, 
-      battery: this.battery, 
-      hopsToGw: this.hopsToGw, 
-      neighborCount: this.neighbors.size, // My own count
-      lastSeen: 0, rssi: 0
+      id: this.id, role: this.role, battery: this.battery, hopsToGw: this.hopsToGw, neighborCount: this.neighbors.size, lastSeen: 0, rssi: 0
     }];
 
     candidates.sort((a, b) => {
-      // 1. HARDWARE ACCESS (Real Internet Wins)
-      // If someone has a path to a Hardware Gateway (Hops < 100), they win.
+      // 1. HARDWARE (Hops < 100)
       const aHw = a.hopsToGw < 100; const bHw = b.hopsToGw < 100;
       if (aHw && !bHw) return -1;
       if (!aHw && bHw) return 1;
-      if (aHw && bHw) return a.hopsToGw - b.hopsToGw; // Shorter path wins
+      if (aHw && bHw) return a.hopsToGw - b.hopsToGw; 
 
-      // 2. MOST NEIGHBORS (Centrality) - Your Request
-      const aCount = a.neighborCount ?? 0;
-      const bCount = b.neighborCount ?? 0;
-      if (aCount !== bCount) return bCount - aCount; // Higher count wins
+      // 2. MOST NEIGHBORS (Centrality)
+      const aCount = a.neighborCount ?? 0; const bCount = b.neighborCount ?? 0;
+      if (aCount !== bCount) return bCount - aCount;
 
-      // 3. BATTERY (Sustainability)
-      if (a.battery !== b.battery) return b.battery - a.battery; // Higher battery wins
+      // 3. BATTERY
+      if (a.battery !== b.battery) return b.battery - a.battery;
       
-      // 4. LOWEST ID (Atomic Tie-Breaker) - Your Request
-      return a.id - b.id; // Lower ID wins
+      // 4. ID
+      return a.id - b.id; 
     });
     return candidates;
   }
 
   private ensureStability(dt: number, config: NodeConfig) {
-    // Isolation Check
+    // 1. Isolation
     if (this.neighbors.size === 0) {
       this.handleIsolation(dt);
       return;
     }
     this.isolationTimer = 0; 
 
-    // Hardware Gateway Check
+    // 2. Hardware Gateway Check
     let bestHw = null;
     for(const n of this.neighbors.values()) {
         if (n.hopsToGw < 100) {
@@ -180,56 +177,59 @@ export class NodeFirmware {
         return;
     }
 
-    // --- DARK CLUSTER LOGIC ---
-    
-    // 1. Check Cluster Size Constraint
+    // 3. CLUSTER SIZING (CRITICAL FIX)
     const candidates = this.getSortedCandidates();
     const clusterSizeEstimate = this.neighbors.size + 1; 
     
-    let allowedLeaders = 1;
+    // FIX: Default is 1. We ALWAYS want at least 1 leader if no gateway exists.
+    let allowedLeaders = 1; 
+    
+    // Only increase to MaxLeaders (Redundancy) if we meet the size requirement
     if (clusterSizeEstimate >= config.minClusterSize) {
         allowedLeaders = config.maxLeaders;
     }
-    if (allowedLeaders < 1) allowedLeaders = 1;
 
     const rulingCouncil = candidates.slice(0, allowedLeaders);
     const shouldBeLeader = rulingCouncil.some(c => c.id === this.id);
 
-    // 2. Promotion / Demotion
+    // Promotion
     if (shouldBeLeader && this.role !== NodeRole.LEADER) {
         this.runElection(config, allowedLeaders);
         return;
     }
+    // Demotion
     if (!shouldBeLeader && this.role === NodeRole.LEADER) {
         this.runElection(config, allowedLeaders);
         return;
     }
 
-    // 3. Cluster Merge (Incumbent Logic)
+    // 4. Cluster Merge Logic (Incumbent Check)
     if (this.role === NodeRole.LEADER) {
-       // If I see a neighbor who is ALSO a leader, we need to de-conflict
-       const competingLeaders = Array.from(this.neighbors.values()).filter(n => n.role === NodeRole.LEADER);
-       
-       // If there are too many leaders locally, and I am the weakest...
-       if (competingLeaders.length > 0) {
-            // Re-run election to see if I still make the cut in the merged group
-            const mergedCandidates = this.getSortedCandidates();
-            const mergedCouncil = mergedCandidates.slice(0, allowedLeaders);
-            if (!mergedCouncil.some(c => c.id === this.id)) {
-                this.runElection(config, allowedLeaders); // Abdicate
-                return;
-            }
+       let betterLeadersCount = 0;
+       const seenLeaders = new Set<number>();
+
+       for (const n of this.neighbors.values()) {
+           const lBat = n.leaderBat || 0; const lId = n.leaderId || 0;
+           // "Better" means Higher Battery OR Same Battery + Lower ID
+           if ((lBat > (this.battery + 5)) || (lBat === this.battery && lId < this.id)) {
+               if(!seenLeaders.has(lId)) { betterLeadersCount++; seenLeaders.add(lId); }
+           }
+       }
+
+       // If enough better leaders exist to fill the quota, I must step down
+       if (betterLeadersCount >= allowedLeaders) {
+           this.runElection(config, allowedLeaders);
+           return;
        }
     }
 
-    // 4. Relay Optimization
+    // 5. Relay Optimization
     if (this.role === NodeRole.RELAY || this.role === NodeRole.IDLE) {
          let best = null;
          for(const n of this.neighbors.values()) {
              if (n.parentId === this.id) continue; 
              if (n.hopsToGw >= 999) continue;      
              if (!best) best = n;
-             // Use same sorting logic as election to pick parent
              else if (n.hopsToGw < best.hopsToGw) best = n;
              else if (n.hopsToGw === best.hopsToGw && (n.neighborCount||0) > (best.neighborCount||0)) best = n;
          }
@@ -241,6 +241,7 @@ export class NodeFirmware {
              this.isElecting = false;
              return;
          } else {
+             // No valid path found -> I need to check if *I* should be leader
              this.runElection(config, allowedLeaders);
          }
     }
@@ -269,11 +270,9 @@ export class NodeFirmware {
 
   private changeRole(newRole: NodeRole, newHops: number, newNextHop: number | null, packetType: PacketType) {
     const changed = this.role !== newRole || this.hopsToGw !== newHops || this.nextHop !== newNextHop;
-    
     this.role = newRole;
     this.hopsToGw = newHops;
     this.nextHop = newNextHop;
-
     if (changed) {
         this.broadcast(packetType);
         if (newRole !== NodeRole.LEADER) this.isElecting = false;
@@ -287,13 +286,17 @@ export class NodeFirmware {
     this.isolationTimer += dt;
   }
 
-  private updateTimers(dt: number) {
+  private updateTimers(dt: number, config: NodeConfig) {
     for (const [id, entry] of this.neighbors) {
       entry.lastSeen += dt;
       if (entry.lastSeen > this.NEIGHBOR_TIMEOUT) {
         this.neighbors.delete(id);
+        
+        // Parent Death Trigger: FORCE STABILITY CHECK NOW
         if (this.nextHop === id) {
              this.changeRole(NodeRole.IDLE, 999, null, PacketType.PANIC);
+             // This ensures we don't wait 0.5s to find a new parent
+             this.ensureStability(dt, config);
         }
       }
     }
@@ -315,6 +318,7 @@ export class NodeFirmware {
   }
 
   private broadcast(type: PacketType, payload: any = {}) {
+    this.battery = Math.max(0, this.battery - 0.05);
     const fullPayload = {
         role: this.role, 
         battery: this.battery, 
@@ -322,7 +326,7 @@ export class NodeFirmware {
         leaderId: (this.role === NodeRole.LEADER) ? this.id : (this.role === NodeRole.RELAY && this.nextHop ? (this.neighbors.get(this.nextHop)?.leaderId || this.neighbors.get(this.nextHop)?.id) : this.id),
         leaderBat: (this.role === NodeRole.LEADER) ? this.battery : (this.role === NodeRole.RELAY && this.nextHop ? (this.neighbors.get(this.nextHop)?.leaderBat || this.neighbors.get(this.nextHop)?.battery) : this.battery),
         parentId: this.nextHop,
-        neighborCount: this.neighbors.size, // <--- Critical for "Most Neighbors" logic
+        neighborCount: this.neighbors.size, 
         ...payload
     };
 
@@ -343,6 +347,7 @@ export class NodeFirmware {
       this.targetX = Math.random() * 1100 + 50;
       this.targetY = Math.random() * 700 + 50;
     } else {
+      this.battery = Math.max(0, this.battery - (0.01 * dt));
       const moveStep = config.movingSpeed * 100 * dt; 
       this.x += ((this.targetX - this.x) / dist) * moveStep;
       this.y += ((this.targetY - this.y) / dist) * moveStep;
