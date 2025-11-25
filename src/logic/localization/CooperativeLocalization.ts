@@ -156,6 +156,19 @@ export class RelativePoseGraph {
 			if (maxError < 0.01) break;
 		}
 	}
+
+	public removeNode(id: number) {
+		this.nodes.delete(id);
+		// Remove all edges connected to this node
+		for (const key of this.edges.keys()) {
+			const [uStr, vStr] = key.split("-");
+			const u = parseInt(uStr);
+			const v = parseInt(vStr);
+			if (u === id || v === id) {
+				this.edges.delete(key);
+			}
+		}
+	}
 }
 
 /**
@@ -301,5 +314,9 @@ export class CoopLocEngine {
 
 	public getLocalPose(nodeId: number = this.selfId): Pose2D | undefined {
 		return this.graph.getNodePose(nodeId);
+	}
+
+	public removeNeighbor(neighborId: number) {
+		this.graph.removeNode(neighborId);
 	}
 }

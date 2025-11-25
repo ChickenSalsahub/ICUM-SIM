@@ -355,6 +355,7 @@ export class NodeFirmware {
 			entry.lastSeen += dt;
 			if (entry.lastSeen > this.NEIGHBOR_TIMEOUT) {
 				this.neighbors.delete(id);
+				this.coopLoc.removeNeighbor(id);
 
 				// Parent Death Trigger: FORCE STABILITY CHECK NOW
 				if (this.nextHop === id) {
