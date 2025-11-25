@@ -97,6 +97,7 @@ export class NodeFirmware {
 				ranges.push({
 					peerId: n.id,
 					range: n.rangeMeters, // This is in meters
+					aoa: n.aoa,
 					timestamp: Date.now(),
 				});
 			}
@@ -140,6 +141,7 @@ export class NodeFirmware {
 					rssi: -50,
 					// If UWB ranging was attached to the packet, persist it
 					rangeMeters: p.payload && (p.payload.__ranging ? p.payload.__ranging.measuredDistanceMeters : undefined),
+					aoa: p.payload && (p.payload.__ranging ? p.payload.__ranging.aoa : undefined),
 				});
 
 				// PARENT FAILURE REACTION
@@ -437,6 +439,14 @@ export class NodeFirmware {
 
 	public setGlobalPosition(lat: number, lng: number) {
 		this.coopLoc.setGlobalReference(lat, lng);
+	}
+
+	public getEstimatedLocalPosition() {
+		return this.coopLoc.getLocalPose();
+	}
+
+	public getLocalGraph() {
+		return this.coopLoc.graph.nodes;
 	}
 
 	public getEstimatedGlobalPosition() {

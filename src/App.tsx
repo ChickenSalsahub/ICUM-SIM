@@ -833,6 +833,33 @@ const App: React.FC = () => {
 										<span>NEXT HOP</span>
 										<span>{node.nextHop ? `ID:${node.nextHop}` : "NONE"}</span>
 									</div>
+
+									<div style={{ marginTop: "10px", fontSize: "10px", fontWeight: "bold" }}>COOP LOCALIZATION</div>
+									<div style={styles.inspectorRow}>
+										<span>EST. POS (m)</span>
+										<span>
+											{(() => {
+												const pos = node.getEstimatedLocalPosition();
+												if (!pos) return "N/A";
+												return `(${pos.x.toFixed(2)}, ${pos.y.toFixed(2)})`;
+											})()}
+										</span>
+									</div>
+									<div style={{ marginTop: "5px", fontSize: "9px", color: "#94a3b8" }}>RANGING DATA</div>
+									<div style={{ backgroundColor: "rgba(0,0,0,0.2)", maxHeight: "80px", overflowY: "auto" }}>
+										{Array.from(node.neighbors.values()).map((n) => (
+											<div key={n.id} style={{ ...styles.inspectorRow, borderBottom: "1px dashed #334155" }}>
+												<span>ID:{n.id}</span>
+												<div style={{ textAlign: "right" }}>
+													<div>{n.rangeMeters !== undefined ? `${n.rangeMeters.toFixed(2)}m` : "N/A"}</div>
+													{n.aoa !== undefined && (
+														<div style={{ color: "#f472b6" }}>AoA: {((n.aoa * 180) / Math.PI).toFixed(1)}°</div>
+													)}
+												</div>
+											</div>
+										))}
+									</div>
+
 									<div style={{ marginTop: "10px", fontSize: "10px", fontWeight: "bold" }}>NEIGHBORS</div>
 									<div style={{ backgroundColor: "rgba(0,0,0,0.2)", maxHeight: "120px", overflowY: "auto" }}>
 										{Array.from(node.neighbors.values()).map((n) => (
@@ -859,6 +886,54 @@ const App: React.FC = () => {
 							</pattern>
 						</defs>
 						<rect width="100%" height="100%" fill="url(#grid)" />
+						{/* GHOST GRAPH VISUALIZATION (Cooperative Localization Belief) */}
+						{(() => {
+							if (windowOrder.length === 0) return null;
+							const focusedId = windowOrder[windowOrder.length - 1];
+							const node = nodes.find((n) => n.id === focusedId);
+							if (!node) return null;
+
+							const localGraph = node.getLocalGraph();
+							const selfPose = localGraph.get(node.id);
+							if (!selfPose) return null;
+
+							return Array.from(localGraph.entries()).map(([id, pose]) => {
+								if (id === node.id) return null;
+
+								const relX = pose.x - selfPose.x;
+								const relY = pose.y - selfPose.y;
+
+								const screenX = node.x + relX * PIXELS_PER_METER;
+								const screenY = node.y + relY * PIXELS_PER_METER;
+
+								return (
+									<g key={`ghost-${node.id}-${id}`} style={{ pointerEvents: "none" }}>
+										<circle
+											cx={screenX}
+											cy={screenY}
+											r={6}
+											fill="none"
+											stroke="#f472b6"
+											strokeWidth={1}
+											strokeDasharray="3 3"
+										/>
+										<line
+											x1={node.x}
+											y1={node.y}
+											x2={screenX}
+											y2={screenY}
+											stroke="#f472b6"
+											strokeWidth={0.5}
+											strokeDasharray="3 3"
+											opacity={0.5}
+										/>
+										<text x={screenX + 8} y={screenY + 3} fill="#f472b6" fontSize="9" fontFamily="monospace">
+											Est:{id}
+										</text>
+									</g>
+								);
+							});
+						})()}
 						{config.showRange &&
 							nodes.map((n) => (
 								<circle

@@ -9,6 +9,7 @@ export interface IGlobalPosition {
 export interface IRangeMeasurement {
 	peerId: number;
 	range: number; // meters
+	aoa?: number; // Angle of Arrival in radians
 	stdDev?: number; // measurement uncertainty
 	timestamp: number;
 }

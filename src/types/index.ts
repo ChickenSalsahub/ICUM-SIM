@@ -51,6 +51,7 @@ export interface NeighborEntry {
 	neighborCount?: number;
 	// Optional: measured range from UWB simulation (meters)
 	rangeMeters?: number;
+	aoa?: number; // Angle of Arrival
 }
 
 export interface NodeConfig {
@@ -85,6 +86,7 @@ export interface RangingResult {
 	trueDistanceMeters: number; // true geometric distance
 	measuredDistanceMeters: number; // measured distance including noise
 	timeOfFlightSeconds?: number; // simulated TOF
+	aoa?: number; // Angle of Arrival in radians (relative to receiver's heading)
 	los: boolean; // line-of-sight
 	error?: string;
 }

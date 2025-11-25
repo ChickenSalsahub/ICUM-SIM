@@ -54,11 +54,19 @@ export class UWBRanging implements RangingEngine {
 		const c = 299_792_458; // speed of light m/s
 		const tof = measured / c;
 
+		// Calculate AoA (Angle of Arrival)
+		// Assuming receiver is facing East (0 radians) for simulation ground truth
+		// AoA = Angle of vector (Receiver -> Sender)
+		const angle = Math.atan2(dy, dx);
+		const aoaNoise = this.gaussian() * 0.05; // ~3 degrees noise
+		const aoa = angle + aoaNoise;
+
 		return {
 			success: true,
 			trueDistanceMeters: trueDistMeters,
 			measuredDistanceMeters: measured,
 			timeOfFlightSeconds: tof,
+			aoa: aoa,
 			los,
 		};
 	}

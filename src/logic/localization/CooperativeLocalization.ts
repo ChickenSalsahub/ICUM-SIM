@@ -7,7 +7,8 @@ import { IGlobalPosition, IRangeMeasurement, IOdometryMeasurement } from "./type
  */
 export class RelativePoseGraph {
 	public nodes: Map<number, Pose2D> = new Map();
-	private edges: Map<string, { u: number; v: number; dist: number; weight: number }> = new Map();
+	private edges: Map<string, { u: number; v: number; dist: number; weight: number; aoaUV?: number; aoaVU?: number }> =
+		new Map();
 
 	constructor(private selfId: number) {
 		// Initialize self at origin
@@ -22,22 +23,36 @@ export class RelativePoseGraph {
 		return this.nodes.get(id);
 	}
 
-	public addMeasurement(u: number, v: number, dist: number, weight: number = 1.0) {
+	public addMeasurement(u: number, v: number, dist: number, aoa?: number, weight: number = 1.0) {
 		const key = u < v ? `${u}-${v}` : `${v}-${u}`;
-		this.edges.set(key, { u, v, dist, weight });
+		const existing = this.edges.get(key);
+
+		let aoaUV = existing?.aoaUV;
+		let aoaVU = existing?.aoaVU;
+
+		if (aoa !== undefined) {
+			if (u < v) aoaUV = aoa;
+			else aoaVU = aoa;
+		}
+
+		this.edges.set(key, { u: u < v ? u : v, v: u < v ? v : u, dist, weight, aoaUV, aoaVU });
 
 		// Initialize node if unknown (simple heuristic placement)
 		if (!this.nodes.has(u) && this.nodes.has(v)) {
-			this.initializeNode(u, v, dist);
+			this.initializeNode(u, v, dist, aoa);
 		} else if (!this.nodes.has(v) && this.nodes.has(u)) {
-			this.initializeNode(v, u, dist);
+			this.initializeNode(v, u, dist, aoa);
 		}
 	}
 
-	private initializeNode(newId: number, refId: number, dist: number) {
+	private initializeNode(newId: number, refId: number, dist: number, aoa?: number) {
 		const refPose = this.nodes.get(refId)!;
-		// Place randomly on the circle of radius 'dist' around ref
-		const angle = Math.random() * Math.PI * 2;
+		let angle = Math.random() * Math.PI * 2;
+
+		if (aoa !== undefined) {
+			angle = refPose.theta + aoa;
+		}
+
 		this.nodes.set(newId, {
 			x: refPose.x + Math.cos(angle) * dist,
 			y: refPose.y + Math.sin(angle) * dist,
@@ -46,20 +61,9 @@ export class RelativePoseGraph {
 	}
 
 	public applyOdometry(odom: IOdometryMeasurement) {
-		// When self moves, in the LOCAL frame attached to self,
-		// it's equivalent to the world moving in the opposite direction.
-		// OR, we can keep Self at (0,0) and shift everyone else?
-		// EASIER: Update Self's pose in the graph, and let the graph relaxation
-		// pull everyone else along.
-		// BUT: The prompt says "Maintain a local coordinate frame".
-		// Usually this means the frame is fixed to the ground (Odom frame),
-		// and the robot moves within it.
-
 		const selfPose = this.nodes.get(this.selfId);
 		if (!selfPose) return;
 
-		// Update self pose based on odometry
-		// New = Old + Rotate(Delta, Old.Theta)
 		const dxRot = odom.dx * Math.cos(selfPose.theta) - odom.dy * Math.sin(selfPose.theta);
 		const dyRot = odom.dx * Math.sin(selfPose.theta) + odom.dy * Math.cos(selfPose.theta);
 
@@ -76,7 +80,6 @@ export class RelativePoseGraph {
 		for (let i = 0; i < iterations; i++) {
 			let maxError = 0;
 
-			// Iterate over all constraints (springs)
 			for (const edge of this.edges.values()) {
 				const uNode = this.nodes.get(edge.u);
 				const vNode = this.nodes.get(edge.v);
@@ -86,37 +89,70 @@ export class RelativePoseGraph {
 				const vec = VectorUtils.sub(vNode, uNode);
 				const currentDist = VectorUtils.mag(vec);
 
-				if (currentDist === 0) continue; // Avoid division by zero
+				if (currentDist === 0) continue;
 
-				const error = currentDist - edge.dist;
-				maxError = Math.max(maxError, Math.abs(error));
+				// 1. Distance Constraint
+				const distError = currentDist - edge.dist;
+				maxError = Math.max(maxError, Math.abs(distError));
 
-				// Correction vector (spring force)
-				// We want to move nodes closer/further to match edge.dist
-				const correctionMag = error * learningRate * edge.weight;
-				const correction = VectorUtils.scale(VectorUtils.normalize(vec), correctionMag);
+				const distCorrectionMag = distError * learningRate * edge.weight;
+				const distCorrection = VectorUtils.scale(VectorUtils.normalize(vec), distCorrectionMag);
+
+				// 2. Angular Constraint (AoA)
+				let angularCorrectionU = { x: 0, y: 0 };
+				let angularCorrectionV = { x: 0, y: 0 };
+
+				if (edge.aoaUV !== undefined) {
+					const targetAngle = uNode.theta + edge.aoaUV;
+					const currentAngle = Math.atan2(vec.y, vec.x);
+					let angleDiff = targetAngle - currentAngle;
+					while (angleDiff > Math.PI) angleDiff -= 2 * Math.PI;
+					while (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
+
+					const perp = { x: -vec.y, y: vec.x };
+					const perpNorm = VectorUtils.normalize(perp);
+					const arcLen = currentDist * angleDiff * learningRate * 0.5;
+
+					angularCorrectionV = VectorUtils.add(angularCorrectionV, VectorUtils.scale(perpNorm, arcLen));
+				}
+
+				if (edge.aoaVU !== undefined) {
+					const targetAngle = vNode.theta + edge.aoaVU;
+					const currentAngle = Math.atan2(-vec.y, -vec.x);
+					let angleDiff = targetAngle - currentAngle;
+					while (angleDiff > Math.PI) angleDiff -= 2 * Math.PI;
+					while (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
+
+					const perp = { x: vec.y, y: -vec.x };
+					const perpNorm = VectorUtils.normalize(perp);
+					const arcLen = currentDist * angleDiff * learningRate * 0.5;
+
+					angularCorrectionU = VectorUtils.add(angularCorrectionU, VectorUtils.scale(perpNorm, arcLen));
+				}
 
 				const uFixed = fixedNodeIds.includes(edge.u);
 				const vFixed = fixedNodeIds.includes(edge.v);
 
 				if (!uFixed && !vFixed) {
-					// Move both towards each other
-					const newU = VectorUtils.add(uNode, VectorUtils.scale(correction, 0.5));
-					const newV = VectorUtils.sub(vNode, VectorUtils.scale(correction, 0.5));
+					const newU_dist = VectorUtils.add(uNode, VectorUtils.scale(distCorrection, 0.5));
+					const newV_dist = VectorUtils.sub(vNode, VectorUtils.scale(distCorrection, 0.5));
+
+					const newU = VectorUtils.add(newU_dist, angularCorrectionU);
+					const newV = VectorUtils.add(newV_dist, angularCorrectionV);
+
 					this.nodes.set(edge.u, { ...uNode, x: newU.x, y: newU.y });
 					this.nodes.set(edge.v, { ...vNode, x: newV.x, y: newV.y });
 				} else if (!uFixed) {
-					// Move u only
-					const newU = VectorUtils.add(uNode, correction);
+					const newU_dist = VectorUtils.add(uNode, distCorrection);
+					const newU = VectorUtils.add(newU_dist, angularCorrectionU);
 					this.nodes.set(edge.u, { ...uNode, x: newU.x, y: newU.y });
 				} else if (!vFixed) {
-					// Move v only
-					const newV = VectorUtils.sub(vNode, correction);
+					const newV_dist = VectorUtils.sub(vNode, distCorrection);
+					const newV = VectorUtils.add(newV_dist, angularCorrectionV);
 					this.nodes.set(edge.v, { ...vNode, x: newV.x, y: newV.y });
 				}
 			}
 
-			// If converged, break early
 			if (maxError < 0.01) break;
 		}
 	}
@@ -127,12 +163,6 @@ export class RelativePoseGraph {
  */
 export class FrameTransformer {
 	private anchors: Map<number, { local: Pose2D; global: IGlobalPosition }> = new Map();
-
-	// Transform parameters: Global = Scale * Rotation * Local + Translation
-	// We assume Scale = 1.0 (meters to meters), but Lat/Lng conversion requires projection.
-	// For small areas, we can approximate Lat/Lng as a Cartesian plane.
-	// 1 deg Lat ~= 111,111 meters. 1 deg Lng ~= 111,111 * cos(lat) meters.
-
 	private originGlobal: IGlobalPosition | null = null;
 	private rotation: number = 0; // radians
 	private translation: Vector2D = { x: 0, y: 0 };
@@ -146,14 +176,10 @@ export class FrameTransformer {
 	public localToGlobal(local: Pose2D): IGlobalPosition | null {
 		if (!this.isCalibrated || !this.originGlobal) return null;
 
-		// 1. Rotate
 		const rotated = VectorUtils.rotate(local, this.rotation);
-
-		// 2. Translate (in meters)
 		const globalMetersX = rotated.x + this.translation.x;
 		const globalMetersY = rotated.y + this.translation.y;
 
-		// 3. Convert Meters -> Lat/Lng (Inverse Equirectangular approximation)
 		const metersPerDegLat = 111132.92;
 		const metersPerDegLng = 111412.84 * Math.cos((this.originGlobal.lat * Math.PI) / 180);
 
@@ -167,21 +193,13 @@ export class FrameTransformer {
 	private recalibrate() {
 		if (this.anchors.size === 0) return;
 
-		// Simple calibration:
-		// If 1 anchor: Assume North is aligned with Y axis (Rotation = 0), align translation.
-		// If 2+ anchors: Compute best fit rotation.
-
 		const anchorList = Array.from(this.anchors.values());
 		const first = anchorList[0];
-
-		// Set origin to the first anchor's global position
 		this.originGlobal = first.global;
 
-		// Meters per degree at this latitude
 		const metersPerDegLat = 111132.92;
 		const metersPerDegLng = 111412.84 * Math.cos((first.global.lat * Math.PI) / 180);
 
-		// Convert all global anchors to meters relative to originGlobal
 		const points = anchorList.map((a) => {
 			const dLat = a.global.lat - this.originGlobal!.lat;
 			const dLng = a.global.lng - this.originGlobal!.lng;
@@ -195,24 +213,15 @@ export class FrameTransformer {
 		});
 
 		if (points.length === 1) {
-			// 1 Anchor: Assume 0 rotation (Local Y = North)
-			// Global = Local + T  => T = Global - Local
 			this.rotation = 0;
 			this.translation = VectorUtils.sub(points[0].globalMeters, points[0].local);
 		} else {
-			// 2+ Anchors: Procrustes Analysis (Rotation + Translation)
-			// Simplified: Calculate centroids, then rotation.
-
-			// 1. Centroids
 			const cLocal = this.getCentroid(points.map((p) => p.local));
 			const cGlobal = this.getCentroid(points.map((p) => p.globalMeters));
 
-			// 2. Center points
 			const centeredLocal = points.map((p) => VectorUtils.sub(p.local, cLocal));
 			const centeredGlobal = points.map((p) => VectorUtils.sub(p.globalMeters, cGlobal));
 
-			// 3. Compute Rotation (Kabsch algorithm simplified for 2D)
-			// H = Sum(Local_i * Global_i^T)
 			let H_xx = 0,
 				H_xy = 0,
 				H_yx = 0,
@@ -224,11 +233,7 @@ export class FrameTransformer {
 				H_yy += centeredLocal[i].y * centeredGlobal[i].y;
 			}
 
-			// Theta = atan2(H_xy - H_yx, H_xx + H_yy)
 			this.rotation = Math.atan2(H_xy - H_yx, H_xx + H_yy);
-
-			// 4. Compute Translation
-			// T = cGlobal - R * cLocal
 			const rotatedCLocal = VectorUtils.rotate(cLocal, this.rotation);
 			this.translation = VectorUtils.sub(cGlobal, rotatedCLocal);
 		}
@@ -257,32 +262,19 @@ export class CoopLocEngine {
 	}
 
 	public update(_dt: number, ranges: IRangeMeasurement[], odom?: IOdometryMeasurement) {
-		// 1. Apply Odometry (Prediction Step)
 		if (odom) {
 			this.graph.applyOdometry(odom);
 		}
 
-		// 2. Add Range Constraints (Correction Step)
 		for (const m of ranges) {
-			// Add constraint between Self and Peer
-			this.graph.addMeasurement(this.selfId, m.peerId, m.range);
+			this.graph.addMeasurement(this.selfId, m.peerId, m.range, m.aoa);
 		}
 
-		// 3. Optimize Graph
-		// We fix Self in the graph optimization if we trust odometry implicitly,
-		// or if we want to keep the frame attached to Self.
-		// Here we fix Self to prevent the whole world from drifting away from the origin
-		// of the coordinate system arbitrarily.
 		this.graph.optimize(10, [this.selfId]);
 	}
 
-	/**
-	 * Call this when we receive a neighbor's neighbor list (2-hop info).
-	 * This is crucial for rigid graph formation.
-	 */
 	public processNeighborInfo(neighborId: number, neighborNeighbors: { id: number; range: number }[]) {
 		for (const nn of neighborNeighbors) {
-			// Add constraint between Neighbor and Neighbor's Neighbor
 			this.graph.addMeasurement(neighborId, nn.id, nn.range);
 		}
 	}
