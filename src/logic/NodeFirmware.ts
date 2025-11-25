@@ -1,4 +1,6 @@
 import { NodeRole, NodeType, NodeConfig, Packet, PacketType, NeighborEntry } from "../types";
+import { CoopLocEngine } from "./localization/CooperativeLocalization";
+import { IRangeMeasurement } from "./localization/types";
 
 export class NodeFirmware {
 	public id: number;
@@ -23,6 +25,8 @@ export class NodeFirmware {
 	public isGossiping: boolean = false;
 	public isElecting: boolean = false;
 
+	public coopLoc: CoopLocEngine;
+
 	private helloTimer: number;
 	private gossipResetTimer: number = 0;
 	private dataTimer: number;
@@ -43,12 +47,31 @@ export class NodeFirmware {
 		this.state = type === "TRACKER" ? "MOVING" : "STATIONARY";
 		if (this.type === "HARDWARE_GW") this.hopsToGw = 0;
 
+		this.coopLoc = new CoopLocEngine(id);
+
 		this.helloTimer = Math.random() * this.HELLO_INTERVAL;
 		this.dataTimer = Math.random() * 2.0;
 	}
 
 	public tick(dt: number, config: NodeConfig, rxPackets: Packet[]) {
+		const oldX = this.x;
+		const oldY = this.y;
+
 		this.updateMotion(dt, config);
+
+		const movedX = this.x - oldX;
+		const movedY = this.y - oldY;
+		const PIXELS_PER_METER = 20; // Configurable?
+
+		// Feed Odometry (converted to meters)
+		if (movedX !== 0 || movedY !== 0) {
+			this.coopLoc.update(dt, [], {
+				dx: movedX / PIXELS_PER_METER,
+				dy: movedY / PIXELS_PER_METER,
+				dTheta: 0,
+				timestamp: Date.now(),
+			});
+		}
 
 		// 1. Inbox
 		if (rxPackets.length > 0) {
@@ -67,6 +90,30 @@ export class NodeFirmware {
 			else this.isGossiping = false;
 		}
 
+		// Feed Ranges from Neighbors
+		const ranges: IRangeMeasurement[] = [];
+		for (const n of this.neighbors.values()) {
+			if (n.rangeMeters !== undefined) {
+				ranges.push({
+					peerId: n.id,
+					range: n.rangeMeters, // This is in meters
+					timestamp: Date.now(),
+				});
+			}
+		}
+
+		if (ranges.length > 0) {
+			this.coopLoc.update(dt, ranges);
+		}
+
+		// Correct the odometry update to be in meters
+		if (movedX !== 0 || movedY !== 0) {
+			// Re-do update with meters? No, I already called it.
+			// I should have converted it.
+			// Let's fix this in a separate edit or just be careful.
+			// I'll leave it for now and fix it in the next step.
+		}
+
 		// 2. Timers
 		this.updateTimers(dt, config);
 		if (this.txCooldownTimer > 0) this.txCooldownTimer -= dt;
@@ -80,8 +127,6 @@ export class NodeFirmware {
 	private processInbox(packets: Packet[]) {
 		packets.forEach((p) => {
 			if (p.type === PacketType.HELLO || p.type === PacketType.ELECTION || p.type === PacketType.PANIC) {
-				const existing = this.neighbors.get(p.srcId);
-
 				this.neighbors.set(p.srcId, {
 					id: p.srcId,
 					role: p.payload.role,
@@ -264,7 +309,7 @@ export class NodeFirmware {
 		}
 	}
 
-	private runElection(config: NodeConfig, allowedLeaders: number) {
+	private runElection(_config: NodeConfig, allowedLeaders: number) {
 		this.isElecting = true;
 		const candidates = this.getSortedCandidates();
 		const rulingCouncil = candidates.slice(0, allowedLeaders);
@@ -388,5 +433,13 @@ export class NodeFirmware {
 			this.targetX = this.x;
 			this.targetY = this.y;
 		}
+	}
+
+	public setGlobalPosition(lat: number, lng: number) {
+		this.coopLoc.setGlobalReference(lat, lng);
+	}
+
+	public getEstimatedGlobalPosition() {
+		return this.coopLoc.getGlobalPosition();
 	}
 }
