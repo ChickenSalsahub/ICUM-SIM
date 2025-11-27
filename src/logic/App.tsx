@@ -58,7 +58,7 @@ const App: React.FC = () => {
 	const [logs, setLogs] = useState<LogEntry[]>([]);
 	const [packets, setPackets] = useState<Packet[]>([]);
 	const [visualPackets, setVisualPackets] = useState<VisualPacket[]>([]);
-	const [fusedRecords, setFusedRecords] = useState<FusedRecord[]>([]);
+	const [fusedData, setFusedData] = useState<FusedRecord[]>([]);
 
 	const [walls, setWalls] = useState<Wall[]>([]);
 	const [isDrawingWall, setIsDrawingWall] = useState(false);
@@ -70,7 +70,6 @@ const App: React.FC = () => {
 	const [showCloudLogs, setShowCloudLogs] = useState(false);
 	const [showPacketSniffer, setShowPacketSniffer] = useState(false);
 	const [showBatteryMonitor, setShowBatteryMonitor] = useState(false);
-	const [cloudViewMode, setCloudViewMode] = useState<"RAW" | "FUSED" | "TOPOLOGY">("FUSED");
 
 	const [packetFilter, setPacketFilter] = useState<string>("ALL");
 	const [tick, setTick] = useState(0);
@@ -86,10 +85,10 @@ const App: React.FC = () => {
 	});
 
 	const nodesRef = useRef<NodeFirmware[]>([]);
-	const cloudBackendRef = useRef<CloudBackend>(new CloudBackend());
 	const visualPacketsRef = useRef<VisualPacket[]>([]);
 	const wallsRef = useRef<Wall[]>([]);
 	const uwbRef = useRef(new UWBRanging(PIXELS_PER_METER));
+	const cloudBackendRef = useRef(new CloudBackend());
 	const animationRef = useRef<number | undefined>(undefined);
 	const lastTimeRef = useRef<number>(0);
 	const energyTimerRef = useRef<number>(0);
@@ -183,25 +182,6 @@ const App: React.FC = () => {
 					const packet = sender.txQueue.shift();
 					if (!packet) continue;
 					capturePacket(packet);
-
-					// SELF-INGESTION FOR LEADERS/ROOTS
-					// If I am a Leader/Root and I am broadcasting DATA, I should also ingest it into the cloud
-					// because I am the gateway (or connected to it) and I don't "receive" my own packets.
-					if (packet.type === PacketType.DATA) {
-						if (sender.role === NodeRole.ROOT || sender.role === NodeRole.LEADER) {
-							const report = {
-								nodeId: packet.srcId,
-								timestamp: Date.now(),
-								x: sender.role === NodeRole.ROOT ? packet.payload.x : undefined,
-								y: sender.role === NodeRole.ROOT ? packet.payload.y : undefined,
-								lat: packet.payload.imu?.globalPos?.lat,
-								lng: packet.payload.imu?.globalPos?.lng,
-								battery: packet.payload.battery || 0,
-								neighbors: packet.payload.neighbors,
-							};
-							cloudBackendRef.current.ingest(report);
-						}
-					}
 
 					if (packet.destId === -1) {
 						let speed = 1.0;
@@ -313,24 +293,17 @@ const App: React.FC = () => {
 				myPackets.forEach((p) => {
 					if (p.type === PacketType.DATA) {
 						if (node.role === NodeRole.ROOT || node.role === NodeRole.LEADER) {
-							// Construct RawReport for Cloud Backend
-							// SIMULATION REALISM: Only ROOT (Gateway) nodes know their absolute position (GPS/Fixed).
-							// Others only know relative neighbors. We hide X/Y from the cloud for non-root nodes
-							// to force the cloud to reconstruct topology from neighbor data.
-							const report = {
-								nodeId: p.srcId,
-								timestamp: Date.now(),
-								x: node.role === NodeRole.ROOT ? p.payload.x : undefined,
-								y: node.role === NodeRole.ROOT ? p.payload.y : undefined,
-								lat: p.payload.imu?.globalPos?.lat,
-								lng: p.payload.imu?.globalPos?.lng,
-								battery: p.payload.battery || 0,
-								neighbors: p.payload.neighbors,
-							};
-							cloudBackendRef.current.ingest(report);
+							// Ingest into Cloud Backend
+							cloudBackendRef.current.ingest(p);
 
-							// Keep the log for debug visibility if needed
 							addLog(`CLOUD RX: Pos(${p.payload.x},${p.payload.y}) via ${node.role}:${node.id}`, "SUCCESS", "CLOUD");
+							console.log("SEND TO CLOUD:", {
+								type: "DATA",
+								nodeId: node.id,
+								role: node.role,
+								payload: p.payload,
+								timestamp: Date.now(),
+							});
 						}
 					}
 				});
@@ -340,18 +313,16 @@ const App: React.FC = () => {
 
 				if (node.role === NodeRole.ISOLATED && node.isolationTimer > config.isolationTimeout && Math.random() > 0.99) {
 					addLog(`ID:${node.id} PANIC UPLOAD (LTE)`, "ERROR", "CLOUD");
-					// Also feed panic uploads to cloud
-					// We need to construct a partial payload or handle it in ingest
-					// For now, let's just log it as before
+					console.log("PANIC UPLOAD (LTE):", {
+						type: "PANIC",
+						nodeId: node.id,
+						msg: "PANIC UPLOAD (LTE)",
+						timestamp: Date.now(),
+					});
 				}
 			});
 
-			// 5. CLOUD BACKEND TICK
-			if (cloudBackendRef.current.tick(Date.now())) {
-				setFusedRecords([...cloudBackendRef.current.getRecords()]);
-			}
-
-			// 6. ENERGY
+			// 5. ENERGY
 			energyTimerRef.current += deltaTime;
 			if (energyTimerRef.current > 1.0) {
 				const avgBat = currentNodes.length > 0 ? totalBat / currentNodes.length : 0;
@@ -360,6 +331,7 @@ const App: React.FC = () => {
 			}
 
 			setTick((t) => t + 1);
+			setFusedData(cloudBackendRef.current.getDatabaseView());
 			setNodes([...currentNodes]);
 			animationRef.current = requestAnimationFrame(gameLoop);
 		},
@@ -762,255 +734,61 @@ const App: React.FC = () => {
 					{showCloudLogs && (
 						<DraggableWindow
 							id="cloud"
-							title={`CLOUD DATABASE (${cloudViewMode})`}
+							title="CLOUD DATABASE (FUSED)"
 							icon={Database}
 							initialX={800}
 							initialY={50}
-							initialWidth={450}
-							initialHeight={350}
-							resizable={true}
 							onClose={() => setShowCloudLogs(false)}
 							onFocus={() => focusWindow("cloud")}
 							zIndex={100}
 						>
-							<div style={{ padding: "8px", borderBottom: "1px solid #334155", display: "flex", gap: "4px" }}>
-								<button
-									onClick={() => setCloudViewMode("FUSED")}
-									style={{
-										fontSize: "9px",
-										padding: "4px 8px",
-										borderRadius: "4px",
-										border: "none",
-										backgroundColor: cloudViewMode === "FUSED" ? "#38bdf8" : "#1e293b",
-										color: cloudViewMode === "FUSED" ? "#0f172a" : "#94a3b8",
-										cursor: "pointer",
-									}}
-								>
-									FUSED DATA
-								</button>
-								<button
-									onClick={() => setCloudViewMode("RAW")}
-									style={{
-										fontSize: "9px",
-										padding: "4px 8px",
-										borderRadius: "4px",
-										border: "none",
-										backgroundColor: cloudViewMode === "RAW" ? "#38bdf8" : "#1e293b",
-										color: cloudViewMode === "RAW" ? "#0f172a" : "#94a3b8",
-										cursor: "pointer",
-									}}
-								>
-									RAW LOGS
-								</button>
-								<button
-									onClick={() => setCloudViewMode("TOPOLOGY")}
-									style={{
-										fontSize: "9px",
-										padding: "4px 8px",
-										borderRadius: "4px",
-										border: "none",
-										backgroundColor: cloudViewMode === "TOPOLOGY" ? "#38bdf8" : "#1e293b",
-										color: cloudViewMode === "TOPOLOGY" ? "#0f172a" : "#94a3b8",
-										cursor: "pointer",
-									}}
-								>
-									TOPOLOGY
-								</button>
-							</div>
-							{cloudViewMode === "FUSED" ? (
-								<div style={{ padding: "8px", overflowX: "auto" }}>
-									<table
-										style={{ width: "100%", borderCollapse: "collapse", fontSize: "10px", fontFamily: "monospace" }}
-									>
-										<thead>
-											<tr style={{ borderBottom: "1px solid #475569", color: "#94a3b8", textAlign: "left" }}>
-												<th style={{ padding: "4px" }}>ID</th>
-												<th style={{ padding: "4px" }}>POS (m)</th>
-												<th style={{ padding: "4px" }}>GLOBAL</th>
-												<th style={{ padding: "4px" }}>BAT</th>
-												<th style={{ padding: "4px" }}>STATUS</th>
-												<th style={{ padding: "4px" }}>UPDATED</th>
-											</tr>
-										</thead>
-										<tbody>
-											{fusedRecords.map((r) => (
-												<tr key={r.id} style={{ borderBottom: "1px solid #1e293b", color: "#e2e8f0" }}>
-													<td style={{ padding: "4px" }}>{r.nodeId}</td>
-													<td style={{ padding: "4px" }}>
-														{r.position.x.toFixed(0)}, {r.position.y.toFixed(0)}
-													</td>
-													<td style={{ padding: "4px" }}>
-														{r.position.lat ? r.position.lat.toFixed(6) : "-"},{" "}
-														{r.position.lng ? r.position.lng.toFixed(6) : "-"}
-													</td>
-													<td style={{ padding: "4px" }}>{r.avgBattery.toFixed(1)}%</td>
-													<td
-														style={{
-															padding: "4px",
-															color: r.status === "STABLE" ? "#4ade80" : r.status === "MOVING" ? "#facc15" : "#94a3b8",
-														}}
-													>
-														{r.status}
-													</td>
-													<td style={{ padding: "4px", opacity: 0.7 }}>
-														{((Date.now() - r.timestamp) / 1000).toFixed(1)}s ago
-													</td>
-												</tr>
-											))}
-											{fusedRecords.length === 0 && (
-												<tr>
-													<td colSpan={6} style={{ padding: "8px", textAlign: "center", color: "#64748b" }}>
-														Waiting for data...
-													</td>
-												</tr>
-											)}
-										</tbody>
-									</table>
-								</div>
-							) : cloudViewMode === "TOPOLOGY" ? (
+							<div style={{ display: "flex", flexDirection: "column", gap: "4px", padding: "8px", minWidth: "300px" }}>
 								<div
 									style={{
-										width: "100%",
-										height: "100%",
-										minHeight: "200px",
-										position: "relative",
-										backgroundColor: "#0f172a",
+										display: "grid",
+										gridTemplateColumns: "1fr 2fr 1fr 1fr",
+										fontSize: "10px",
+										fontWeight: "bold",
+										borderBottom: "1px solid #475569",
+										paddingBottom: "4px",
+										marginBottom: "4px",
+										color: "#94a3b8",
 									}}
 								>
-									{(() => {
-										// Filter to get only the latest record per node for the topology
-										const uniqueRecordsMap = new Map<number, FusedRecord>();
-										for (const r of fusedRecords) {
-											if (!uniqueRecordsMap.has(r.nodeId)) {
-												uniqueRecordsMap.set(r.nodeId, r);
-											}
-										}
-										const uniqueRecords = Array.from(uniqueRecordsMap.values());
-
-										if (uniqueRecords.length === 0)
-											return (
-												<div style={{ padding: 20, color: "#64748b", fontSize: "10px", textAlign: "center" }}>
-													No topology data
-												</div>
-											);
-
-										// Calculate bounds
-										const xs = uniqueRecords.map((r) => r.position.x);
-										const ys = uniqueRecords.map((r) => r.position.y);
-										const minX = Math.min(...xs);
-										const maxX = Math.max(...xs);
-										const minY = Math.min(...ys);
-										const maxY = Math.max(...ys);
-
-										const padding = 40;
-										const width = 400; // internal SVG width
-										const height = 300; // internal SVG height
-
-										const rangeX = maxX - minX || 1;
-										const rangeY = maxY - minY || 1;
-										const scaleX = (width - padding * 2) / rangeX;
-										const scaleY = (height - padding * 2) / rangeY;
-										const scale = Math.min(scaleX, scaleY);
-
-										const transform = (x: number, y: number) => ({
-											x: padding + (x - minX) * scale + (width - padding * 2 - rangeX * scale) / 2,
-											y: padding + (y - minY) * scale + (height - padding * 2 - rangeY * scale) / 2,
-										});
-
-										return (
-											<svg
-												width="100%"
-												height="100%"
-												viewBox={`0 0 ${width} ${height}`}
-												preserveAspectRatio="xMidYMid meet"
-											>
-												{/* Edges */}
-												{uniqueRecords.map((r) => {
-													const start = transform(r.position.x, r.position.y);
-													return r.neighbors.map((n) => {
-														const target = uniqueRecords.find((t) => t.nodeId === n.id);
-														if (!target) return null;
-														const end = transform(target.position.x, target.position.y);
-
-														// Calculate midpoint for text
-														const midX = start.x + (end.x - start.x) * 0.3; // 30% from source
-														const midY = start.y + (end.y - start.y) * 0.3;
-
-														return (
-															<g key={`${r.nodeId}-${n.id}`}>
-																<line
-																	x1={start.x}
-																	y1={start.y}
-																	x2={end.x}
-																	y2={end.y}
-																	stroke="#334155"
-																	strokeWidth="1"
-																	opacity="0.5"
-																/>
-																<text
-																	x={midX}
-																	y={midY}
-																	fill="#94a3b8"
-																	fontSize="8"
-																	fontFamily="monospace"
-																	textAnchor="middle"
-																	style={{ pointerEvents: "none" }}
-																>
-																	{n.range.toFixed(1)}m / {((n.aoa * 180) / Math.PI).toFixed(0)}°
-																</text>
-															</g>
-														);
-													});
-												})}
-
-												{/* Nodes */}
-												{uniqueRecords.map((r) => {
-													const pos = transform(r.position.x, r.position.y);
-													return (
-														<g key={r.nodeId} transform={`translate(${pos.x}, ${pos.y})`}>
-															<circle r="6" fill={r.status === "STABLE" ? "#4ade80" : "#facc15"} />
-															<text
-																y="-10"
-																textAnchor="middle"
-																fill="#cbd5e1"
-																fontSize="10"
-																fontFamily="monospace"
-																fontWeight="bold"
-															>
-																{r.nodeId}
-															</text>
-														</g>
-													);
-												})}
-											</svg>
-										);
-									})()}
+									<span>NODE</span>
+									<span>LAT/LNG</span>
+									<span>CONF</span>
+									<span>AGE</span>
 								</div>
-							) : (
-								<div style={{ display: "flex", flexDirection: "column", gap: "4px", padding: "8px" }}>
-									{logs
-										.filter((l) => l.category === "CLOUD")
-										.map((l) => (
-											<div
-												key={l.id}
-												style={{
-													padding: "4px",
-													borderBottom: "1px solid #1e293b",
-													fontFamily: "monospace",
-													fontSize: "10px",
-													color: l.type === "SUCCESS" ? "#4ade80" : "#f87171",
-												}}
-											>
-												<span style={{ opacity: 0.5 }}>[{l.time}]</span> {l.msg}
-											</div>
-										))}
-									{logs.filter((l) => l.category === "CLOUD").length === 0 && (
-										<div style={{ padding: "8px", textAlign: "center", color: "#64748b", fontSize: "10px" }}>
-											No logs yet.
-										</div>
-									)}
-								</div>
-							)}
+								{fusedData.map((record) => (
+									<div
+										key={record.nodeId}
+										style={{
+											display: "grid",
+											gridTemplateColumns: "1fr 2fr 1fr 1fr",
+											fontSize: "10px",
+											fontFamily: "monospace",
+											color: "#cbd5e1",
+											padding: "2px 0",
+											borderBottom: "1px dashed #1e293b",
+										}}
+									>
+										<span>ID:{record.nodeId}</span>
+										<span>
+											{record.lat.toFixed(5)}, {record.lng.toFixed(5)}
+										</span>
+										<span style={{ color: record.confidence === "HIGH" ? "#4ade80" : "#facc15" }}>
+											{record.confidence}
+										</span>
+										<span>{((Date.now() - record.lastUpdated) / 1000).toFixed(1)}s</span>
+									</div>
+								))}
+								{fusedData.length === 0 && (
+									<div style={{ fontSize: "10px", color: "#64748b", textAlign: "center", padding: "10px" }}>
+										WAITING FOR DATA...
+									</div>
+								)}
+							</div>
 						</DraggableWindow>
 					)}
 					{showPacketSniffer && (

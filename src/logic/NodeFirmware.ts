@@ -1,6 +1,6 @@
 import { NodeRole, NodeType, NodeConfig, Packet, PacketType, NeighborEntry } from "../types";
 import { CoopLocEngine } from "./localization/CooperativeLocalization";
-import { IRangeMeasurement } from "./localization/types";
+import { IRangeMeasurement, IGlobalPosition } from "./localization/types";
 
 export class NodeFirmware {
 	public id: number;
@@ -146,21 +146,6 @@ export class NodeFirmware {
 				});
 			}
 		}
-
-		if (nodes.length > 0) {
-			try {
-				// In a real scenario, this URL would be in config
-				await fetch("http://localhost:3000/api/locations", {
-					method: "POST",
-					headers: { "Content-Type": "application/json" },
-					body: JSON.stringify({ timestamp: Date.now(), nodes }),
-				});
-				// console.log("Reported to backend:", nodes.length, "nodes");
-			} catch (e) {
-				// Ignore connection errors in simulation
-				// console.warn("Backend report failed", e);
-			}
-		}
 	}
 
 	private processInbox(packets: Packet[]) {
@@ -181,6 +166,12 @@ export class NodeFirmware {
 					rangeMeters: p.payload && (p.payload.__ranging ? p.payload.__ranging.measuredDistanceMeters : undefined),
 					aoa: p.payload && (p.payload.__ranging ? p.payload.__ranging.aoa : undefined),
 				});
+
+				// ANCHOR PROPAGATION: If neighbor has a global position, use it to calibrate myself
+				if (p.payload.globalPos) {
+					const gp = p.payload.globalPos as IGlobalPosition;
+					this.coopLoc.addExternalAnchor(p.srcId, gp.lat, gp.lng);
+				}
 
 				// PARENT FAILURE REACTION
 				if (this.nextHop === p.srcId) {
@@ -414,7 +405,27 @@ export class NodeFirmware {
 		const interval = this.state === "MOVING" ? 1.5 : 5.0;
 		if (this.dataTimer >= interval) {
 			if (this.hopsToGw < 999) {
-				this.broadcast(PacketType.DATA, { x: Math.round(this.x), y: Math.round(this.y), status: "OK" });
+				const neighborsData = Array.from(this.neighbors.values()).map((n) => ({
+					id: n.id,
+					range: n.rangeMeters,
+					aoa: n.aoa,
+				}));
+				const localPose = this.coopLoc.getLocalPose();
+				const globalOrigin = this.coopLoc.getGlobalOrigin();
+				const computedGlobal = this.coopLoc.getGlobalPosition();
+
+				this.broadcast(PacketType.DATA, {
+					x: Math.round(this.x),
+					y: Math.round(this.y),
+					battery: parseFloat(this.battery.toFixed(1)),
+					status: "OK",
+					neighbors: neighborsData,
+					imu: {
+						...localPose,
+						origin: globalOrigin,
+						globalPos: computedGlobal,
+					},
+				});
 			}
 			this.dataTimer = Math.random() * 0.5 - 0.25;
 		}
@@ -422,6 +433,10 @@ export class NodeFirmware {
 
 	private broadcast(type: PacketType, payload: any = {}) {
 		this.battery = Math.max(0, this.battery - 0.05);
+
+		// Include my global position if I am calibrated
+		const myGlobalPos = this.coopLoc.getGlobalPosition();
+
 		const fullPayload = {
 			role: this.role,
 			battery: this.battery,
@@ -440,6 +455,7 @@ export class NodeFirmware {
 					: this.battery,
 			parentId: this.nextHop,
 			neighborCount: this.neighbors.size,
+			globalPos: myGlobalPos,
 			...payload,
 		};
 

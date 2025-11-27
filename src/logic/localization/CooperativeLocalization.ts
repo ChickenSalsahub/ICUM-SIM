@@ -203,6 +203,10 @@ export class FrameTransformer {
 		};
 	}
 
+	public getGlobalOrigin(): IGlobalPosition | null {
+		return this.originGlobal;
+	}
+
 	private recalibrate() {
 		if (this.anchors.size === 0) return;
 
@@ -304,6 +308,10 @@ export class CoopLocEngine {
 		if (nodePose) {
 			this.transformer.addAnchor(nodeId, nodePose, { lat, lng });
 		}
+	}
+
+	public getGlobalOrigin(): IGlobalPosition | null {
+		return this.transformer.getGlobalOrigin();
 	}
 
 	public getGlobalPosition(nodeId: number = this.selfId): IGlobalPosition | null {
