@@ -31,9 +31,13 @@ export class NodeFirmware {
 	private gossipResetTimer: number = 0;
 	private dataTimer: number;
 	private txCooldownTimer: number = 0;
+	private backendReportTimer: number = 0;
 
 	private HELLO_INTERVAL = 1.0;
 	private NEIGHBOR_TIMEOUT = 3.0;
+
+	private lastX: number;
+	private lastY: number;
 
 	constructor(id: number, type: NodeType, x: number, y: number) {
 		this.id = id;
@@ -42,6 +46,8 @@ export class NodeFirmware {
 		this.y = y;
 		this.targetX = x;
 		this.targetY = y;
+		this.lastX = x;
+		this.lastY = y;
 		this.battery = Math.floor(Math.random() * 40) + 60;
 		this.role = type === "HARDWARE_GW" ? NodeRole.ROOT : NodeRole.IDLE;
 		this.state = type === "TRACKER" ? "MOVING" : "STATIONARY";
@@ -54,13 +60,10 @@ export class NodeFirmware {
 	}
 
 	public tick(dt: number, config: NodeConfig, rxPackets: Packet[]) {
-		const oldX = this.x;
-		const oldY = this.y;
-
 		this.updateMotion(dt, config);
 
-		const movedX = this.x - oldX;
-		const movedY = this.y - oldY;
+		const movedX = this.x - this.lastX;
+		const movedY = this.y - this.lastY;
 		const PIXELS_PER_METER = 20; // Configurable?
 
 		// Feed Odometry (converted to meters)
@@ -72,6 +75,9 @@ export class NodeFirmware {
 				timestamp: Date.now(),
 			});
 		}
+
+		this.lastX = this.x;
+		this.lastY = this.y;
 
 		// 1. Inbox
 		if (rxPackets.length > 0) {
@@ -107,14 +113,6 @@ export class NodeFirmware {
 			this.coopLoc.update(dt, ranges);
 		}
 
-		// Correct the odometry update to be in meters
-		if (movedX !== 0 || movedY !== 0) {
-			// Re-do update with meters? No, I already called it.
-			// I should have converted it.
-			// Let's fix this in a separate edit or just be careful.
-			// I'll leave it for now and fix it in the next step.
-		}
-
 		// 2. Timers
 		this.updateTimers(dt, config);
 		if (this.txCooldownTimer > 0) this.txCooldownTimer -= dt;
@@ -122,6 +120,46 @@ export class NodeFirmware {
 		// 3. Consensus
 		if (this.type !== "HARDWARE_GW") {
 			this.ensureStability(dt, config);
+		}
+
+		// 4. Backend Reporting (Supernode only)
+		if (this.type === "HARDWARE_GW") {
+			this.backendReportTimer += dt;
+			if (this.backendReportTimer >= 5.0) {
+				this.backendReportTimer = 0;
+				this.reportToBackend();
+			}
+		}
+	}
+
+	private async reportToBackend() {
+		const nodes = [];
+		// Iterate over all nodes in the local graph (including self)
+		for (const [id, _pose] of this.coopLoc.graph.nodes) {
+			const globalPos = this.coopLoc.getGlobalPosition(id);
+			if (globalPos) {
+				nodes.push({
+					id,
+					lat: globalPos.lat,
+					lng: globalPos.lng,
+					alt: globalPos.alt,
+				});
+			}
+		}
+
+		if (nodes.length > 0) {
+			try {
+				// In a real scenario, this URL would be in config
+				await fetch("http://localhost:3000/api/locations", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ timestamp: Date.now(), nodes }),
+				});
+				// console.log("Reported to backend:", nodes.length, "nodes");
+			} catch (e) {
+				// Ignore connection errors in simulation
+				// console.warn("Backend report failed", e);
+			}
 		}
 	}
 

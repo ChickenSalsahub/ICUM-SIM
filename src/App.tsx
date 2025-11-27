@@ -97,6 +97,8 @@ const App: React.FC = () => {
 	const dragOffsetRef = useRef({ x: 0, y: 0 });
 	const svgRef = useRef<SVGSVGElement>(null);
 
+	const [contextMenu, setContextMenu] = useState<{ x: number; y: number; nodeId: number } | null>(null);
+
 	useEffect(() => {
 		nodesRef.current = nodes;
 	}, [nodes]);
@@ -529,6 +531,29 @@ const App: React.FC = () => {
 		},
 	};
 
+	const handleSetGlobalPosition = () => {
+		if (!contextMenu) return;
+		const latStr = prompt("Enter Latitude (e.g. 52.5200):");
+		const lngStr = prompt("Enter Longitude (e.g. 13.4050):");
+		if (latStr && lngStr) {
+			const lat = parseFloat(latStr);
+			const lng = parseFloat(lngStr);
+			if (!isNaN(lat) && !isNaN(lng)) {
+				const node = nodesRef.current.find((n) => n.id === contextMenu.nodeId);
+				if (node) {
+					node.setGlobalPosition(lat, lng);
+
+					// Hack: Tell the Gateway about this anchor so it can compute the graph
+					const gateway = nodesRef.current.find((n) => n.type === "HARDWARE_GW");
+					if (gateway && gateway.id !== node.id) {
+						gateway.coopLoc.addExternalAnchor(node.id, lat, lng);
+					}
+				}
+			}
+		}
+		setContextMenu(null);
+	};
+
 	return (
 		<>
 			<style>{`body { margin: 0; padding: 0; overflow: hidden; box-sizing: border-box; }`}</style>
@@ -835,16 +860,32 @@ const App: React.FC = () => {
 									</div>
 
 									<div style={{ marginTop: "10px", fontSize: "10px", fontWeight: "bold" }}>COOP LOCALIZATION</div>
-									<div style={styles.inspectorRow}>
-										<span>EST. POS (m)</span>
-										<span>
-											{(() => {
-												const pos = node.getEstimatedLocalPosition();
-												if (!pos) return "N/A";
-												return `(${pos.x.toFixed(2)}, ${pos.y.toFixed(2)})`;
-											})()}
-										</span>
-									</div>
+									{(() => {
+										const globalPos = node.getEstimatedGlobalPosition();
+										if (globalPos) {
+											return (
+												<div style={styles.inspectorRow}>
+													<span>GLOBAL POS</span>
+													<div style={{ textAlign: "right" }}>
+														<div>
+															{globalPos.lat.toFixed(5)}, {globalPos.lng.toFixed(5)}
+														</div>
+														<div style={{ color: "#64748b", fontSize: "9px" }}>
+															Alt: {globalPos.alt?.toFixed(1) ?? 0}m
+														</div>
+													</div>
+												</div>
+											);
+										} else {
+											const localPos = node.getEstimatedLocalPosition();
+											return (
+												<div style={styles.inspectorRow}>
+													<span>LOCAL POS (Rel)</span>
+													<span>{localPos ? `(${localPos.x.toFixed(2)}, ${localPos.y.toFixed(2)})` : "N/A"}</span>
+												</div>
+											);
+										}
+									})()}
 									<div style={{ marginTop: "5px", fontSize: "9px", color: "#94a3b8" }}>RANGING DATA</div>
 									<div style={{ backgroundColor: "rgba(0,0,0,0.2)", maxHeight: "80px", overflowY: "auto" }}>
 										{Array.from(node.neighbors.values()).map((n) => (
@@ -897,42 +938,92 @@ const App: React.FC = () => {
 							const selfPose = localGraph.get(node.id);
 							if (!selfPose) return null;
 
-							return Array.from(localGraph.entries()).map(([id, pose]) => {
-								if (id === node.id) return null;
+							// Calculate Screen Position of Local Origin (0,0)
+							const originRelX = 0 - selfPose.x;
+							const originRelY = 0 - selfPose.y;
+							const originScreenX = node.x + originRelX * PIXELS_PER_METER;
+							const originScreenY = node.y + originRelY * PIXELS_PER_METER;
 
-								const relX = pose.x - selfPose.x;
-								const relY = pose.y - selfPose.y;
-
-								const screenX = node.x + relX * PIXELS_PER_METER;
-								const screenY = node.y + relY * PIXELS_PER_METER;
-
-								return (
-									<g key={`ghost-${node.id}-${id}`} style={{ pointerEvents: "none" }}>
-										<circle
-											cx={screenX}
-											cy={screenY}
-											r={6}
-											fill="none"
-											stroke="#f472b6"
-											strokeWidth={1}
-											strokeDasharray="3 3"
+							return (
+								<g key={`ghost-group-${node.id}`}>
+									{/* LOCAL ORIGIN MARKER */}
+									<g style={{ pointerEvents: "none" }}>
+										<line
+											x1={originScreenX - 5}
+											y1={originScreenY}
+											x2={originScreenX + 5}
+											y2={originScreenY}
+											stroke="#38bdf8"
+											strokeWidth={2}
 										/>
+										<line
+											x1={originScreenX}
+											y1={originScreenY - 5}
+											x2={originScreenX}
+											y2={originScreenY + 5}
+											stroke="#38bdf8"
+											strokeWidth={2}
+										/>
+										<text
+											x={originScreenX + 6}
+											y={originScreenY + 3}
+											fill="#38bdf8"
+											fontSize="9"
+											fontFamily="monospace"
+											fontWeight="bold"
+										>
+											ORIGIN
+										</text>
 										<line
 											x1={node.x}
 											y1={node.y}
-											x2={screenX}
-											y2={screenY}
-											stroke="#f472b6"
-											strokeWidth={0.5}
-											strokeDasharray="3 3"
-											opacity={0.5}
+											x2={originScreenX}
+											y2={originScreenY}
+											stroke="#38bdf8"
+											strokeWidth={1}
+											strokeDasharray="2 2"
+											opacity={0.3}
 										/>
-										<text x={screenX + 8} y={screenY + 3} fill="#f472b6" fontSize="9" fontFamily="monospace">
-											Est:{id}
-										</text>
 									</g>
-								);
-							});
+
+									{Array.from(localGraph.entries()).map(([id, pose]) => {
+										if (id === node.id) return null;
+
+										const relX = pose.x - selfPose.x;
+										const relY = pose.y - selfPose.y;
+
+										const screenX = node.x + relX * PIXELS_PER_METER;
+										const screenY = node.y + relY * PIXELS_PER_METER;
+
+										return (
+											<g key={`ghost-${node.id}-${id}`} style={{ pointerEvents: "none" }}>
+												<circle
+													cx={screenX}
+													cy={screenY}
+													r={6}
+													fill="none"
+													stroke="#f472b6"
+													strokeWidth={1}
+													strokeDasharray="3 3"
+												/>
+												<line
+													x1={node.x}
+													y1={node.y}
+													x2={screenX}
+													y2={screenY}
+													stroke="#f472b6"
+													strokeWidth={0.5}
+													strokeDasharray="3 3"
+													opacity={0.5}
+												/>
+												<text x={screenX + 8} y={screenY + 3} fill="#f472b6" fontSize="9" fontFamily="monospace">
+													Est:{id}
+												</text>
+											</g>
+										);
+									})}
+								</g>
+							);
 						})()}
 						{config.showRange &&
 							nodes.map((n) => (
@@ -1030,7 +1121,7 @@ const App: React.FC = () => {
 									}}
 									onContextMenu={(e) => {
 										e.preventDefault();
-										openNodeWindow(n.id);
+										setContextMenu({ x: e.clientX, y: e.clientY, nodeId: n.id });
 									}}
 									style={{ cursor: "grab" }}
 								>
@@ -1117,6 +1208,61 @@ const App: React.FC = () => {
 					</svg>
 				</div>
 			</div>
+			{contextMenu && (
+				<div
+					style={{
+						position: "fixed",
+						top: contextMenu.y,
+						left: contextMenu.x,
+						backgroundColor: "#1e293b",
+						border: "1px solid #334155",
+						borderRadius: "4px",
+						padding: "4px",
+						zIndex: 1000,
+						display: "flex",
+						flexDirection: "column",
+						gap: "2px",
+						boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.1)",
+					}}
+				>
+					<button
+						style={{
+							...styles.btn,
+							justifyContent: "flex-start",
+							backgroundColor: "transparent",
+							color: "#f1f5f9",
+						}}
+						onClick={() => {
+							openNodeWindow(contextMenu.nodeId);
+							setContextMenu(null);
+						}}
+					>
+						<Search size={12} /> Inspect Node
+					</button>
+					<button
+						style={{
+							...styles.btn,
+							justifyContent: "flex-start",
+							backgroundColor: "transparent",
+							color: "#f1f5f9",
+						}}
+						onClick={handleSetGlobalPosition}
+					>
+						<Wifi size={12} /> Set Global Position
+					</button>
+					<button
+						style={{
+							...styles.btn,
+							justifyContent: "flex-start",
+							backgroundColor: "transparent",
+							color: "#ef4444",
+						}}
+						onClick={() => setContextMenu(null)}
+					>
+						<XCircle size={12} /> Cancel
+					</button>
+				</div>
+			)}
 		</>
 	);
 };
