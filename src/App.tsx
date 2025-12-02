@@ -102,6 +102,33 @@ const App: React.FC = () => {
 	const svgRef = useRef<SVGSVGElement>(null);
 
 	const [contextMenu, setContextMenu] = useState<{ x: number; y: number; nodeId: number } | null>(null);
+	
+	const [ useIMU, setUseIMU ] = useState(false);
+	const toggleSetUseIMU = () => {
+		setUseIMU(prev => !prev)
+	}
+
+	let [ messages, updateMessages] = useState(0);
+	const upUpdateMessages = () => {
+		updateMessages(messages++);
+	}
+
+	const [messageTimestamps, setMessageTimestamps] = useState<number[]>([]);
+	const mps = messageTimestamps.length;
+
+	const onIncomingMessage = () => {
+		setMessageTimestamps(ts => [...ts, Date.now()]);
+	}
+
+	useEffect(() => {
+		const interval = setInterval(() => {
+		const now = Date.now();
+		setMessageTimestamps(ts =>
+			ts.filter(t => t >= now - 1000)
+		);
+		}, 200);
+		return () => clearInterval(interval);
+	}, []);
 
 	useEffect(() => {
 		nodesRef.current = nodes;
@@ -202,26 +229,54 @@ const App: React.FC = () => {
 							cloudBackendRef.current.ingest(report);
 						}
 					}
+					if (useIMURef.current) {
+						if (sender.state == "MOVING") {
+							upUpdateMessages()
+							onIncomingMessage()
+							if (packet.destId === -1) {
+								let speed = 1.0;
+								if (packet.type === PacketType.DATA) speed = 2.5;
+								if (packet.type === PacketType.PANIC) speed = 3.0;
+								if (packet.type === PacketType.ELECTION) speed = 2.0;
 
-					if (packet.destId === -1) {
-						let speed = 1.0;
-						if (packet.type === PacketType.DATA) speed = 2.5;
-						if (packet.type === PacketType.PANIC) speed = 3.0;
-						if (packet.type === PacketType.ELECTION) speed = 2.0;
+								newVisuals.push({
+									id: Math.random().toString(),
+									packet: packet,
+									x: sender.x,
+									y: sender.y,
+									startX: sender.x,
+									startY: sender.y,
+									targetId: -1,
+									progress: 0,
+									speed: speed,
+									style: "RING",
+									maxRadius: rangePx,
+								});
+							}
+						}
+					} else {
+						if (packet.destId === -1) {
+							upUpdateMessages()
+							onIncomingMessage()
+							let speed = 1.0;
+							if (packet.type === PacketType.DATA) speed = 2.5;
+							if (packet.type === PacketType.PANIC) speed = 3.0;
+							if (packet.type === PacketType.ELECTION) speed = 2.0;
 
-						newVisuals.push({
-							id: Math.random().toString(),
-							packet: packet,
-							x: sender.x,
-							y: sender.y,
-							startX: sender.x,
-							startY: sender.y,
-							targetId: -1,
-							progress: 0,
-							speed: speed,
-							style: "RING",
-							maxRadius: rangePx,
-						});
+							newVisuals.push({
+								id: Math.random().toString(),
+								packet: packet,
+								x: sender.x,
+								y: sender.y,
+								startX: sender.x,
+								startY: sender.y,
+								targetId: -1,
+								progress: 0,
+								speed: speed,
+								style: "RING",
+								maxRadius: rangePx,
+							});
+						}
 					}
 
 					currentNodes.forEach((receiver) => {
@@ -261,7 +316,60 @@ const App: React.FC = () => {
 
 								rxBuffers.get(receiver.id)?.push(packet);
 
-								if (packet.destId !== -1) {
+								if (useIMURef.current) {
+									if (receiver.state == "MOVING") {
+										upUpdateMessages()
+										onIncomingMessage()
+										newVisuals.push({
+											id: Math.random().toString(),
+											packet: packet,
+											x: sender.x,
+											y: sender.y,
+											startX: sender.x,
+											startY: sender.y,
+											targetId: receiver.id,
+											progress: 0,
+											speed: 2.5,
+											style: "LINE",
+										});
+
+										currentNodes.forEach(romanian => { 
+											if (romanian.state == "MOVING") {
+												const leaderId = Object.values(currentNodes)
+												.filter((node): node is NodeFirmware => node.role == "ROOT" )
+												.reduce<{ node: NodeFirmware; distance: number } | null>((closest, node) => {
+													const distance = Math.hypot(romanian.x - node.x, romanian.y - node.y);
+													if (!closest || distance < closest.distance) {
+														console.log(sender)
+													return { node, distance };
+													}
+													return closest;
+												}, null)?.node;
+
+												console.log(leaderId)
+
+												if (leaderId) {
+													upUpdateMessages()
+													onIncomingMessage()
+													newVisuals.push({
+														id: Math.random().toString(),
+														packet: packet,
+														x: romanian.x,
+														y: romanian.y,
+														startX: romanian.x,
+														startY: romanian.y,
+														targetId: leaderId.id,
+														progress: 0,
+														speed: 2.5,
+														style: "LINE",
+													});
+												}
+											}
+										});
+									}
+								} else{
+									upUpdateMessages()
+									onIncomingMessage()
 									newVisuals.push({
 										id: Math.random().toString(),
 										packet: packet,
@@ -372,6 +480,12 @@ const App: React.FC = () => {
 			if (animationRef.current) cancelAnimationFrame(animationRef.current);
 		};
 	}, [gameLoop]);
+
+	const useIMURef = useRef(useIMU);
+	useEffect(() => {
+		useIMURef.current = useIMU;
+	}, [useIMU]);
+
 
 	// --- INTERACTION ---
 	const handleMouseDown = (e: React.MouseEvent, nodeId: number | "bg") => {
@@ -577,6 +691,33 @@ const App: React.FC = () => {
 			fontSize: "11px",
 			fontFamily: "monospace",
 		},
+		toggleContainer: {
+			width: "35px",
+			height: "15px",
+			background: "#aaa",
+			borderRadius: "12px",
+			display: "flex",
+			alignItems: "center",
+			cursor: "pointer",
+			padding: "2px",
+			transition: "background 0.2s",
+		},
+		thumbOff: {
+			width: "13px",
+			height: "13px",
+			background: "white",
+			borderRadius: "50%",
+			transform: "translateX(0)",
+			transition: "transform 0.2s",
+		},
+		thumbOn: {
+			width: "13px",
+			height: "13px",
+			background: "white",
+			borderRadius: "50%",
+			transform: "translateX(21px)",
+			transition: "transform 0.2s",
+		}
 	};
 
 	const handleSetGlobalPosition = () => {
@@ -742,6 +883,21 @@ const App: React.FC = () => {
 								<div style={{ width: 8, height: 8, borderRadius: "50%", border: "1px solid #ef4444" }}></div> PANIC
 								(Wave)
 							</div>
+						</div>
+					</div>
+
+					<div style={styles.panel}>
+						<div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+							<span style={styles.label}>IMU-optimized messaging</span>
+							<div style={{ ...styles.toggleContainer, background: useIMU ? "#38bdf8" : "#aaa", }} onClick={toggleSetUseIMU}>
+							<div style={useIMU ? styles.thumbOn : styles.thumbOff}/>
+						</div>
+					</div>
+					<div style={{ display: "grid", gridTemplateColumns: "1fr", gap: "4px", fontSize: "10px", color: "#cbd5e1" }}></div>
+						<div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+							Number of Messages: {messages}
+						</div><div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+							Avg messages pr second: {mps}
 						</div>
 					</div>
 				</div>
