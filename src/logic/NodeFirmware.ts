@@ -27,19 +27,18 @@ export class NodeFirmware {
 	private movingSince: number = 0;
 	private readonly HYSTERESIS_MS = 2000;
 
-	// Application State
-	private blinkTimer: number = 0;
-	private readonly BLINK_INTERVAL_MS = 500;
-
 	// Election & Gossip State
 	private helloTimer: number = 0;
 	private dataTimer: number = 0;
+	private rangingTimer: number = 0;
+	private panicUntil: number = 0;
 	private readonly HELLO_INTERVAL_MS = 1000;
 	private readonly NEIGHBOR_TIMEOUT_MS = 3000;
 	public hopsToGw: number = 999;
 
 	// Sighting Queue (for backend reporting)
 	public sightingQueue: { targetId: number; distance: number; timestamp: number }[] = [];
+	public cloudQueue: { nodeId: number; timestamp: number; neighbors: any[]; battery: number }[] = [];
 
 	// --- Legacy/UI State (Kept for compatibility with App.tsx visualization) ---
 	public isDragging: boolean = false;
@@ -71,14 +70,21 @@ export class NodeFirmware {
 		this.hal.onTxComplete = () => this.handleTxComplete();
 
 		// Initial random offset for blink to avoid synchronization
-		this.blinkTimer = this.hal.getTimeMs() + this.hal.getRandom() * 1000;
 		this.helloTimer = this.hal.getTimeMs() + this.hal.getRandom() * 1000;
 		this.dataTimer = this.hal.getTimeMs() + this.hal.getRandom() * 2000;
+		this.rangingTimer = this.hal.getTimeMs() + this.hal.getRandom() * 1000;
 	}
 
 	// The main loop, called periodically by the scheduler (App.tsx)
 	public tick(dt: number) {
 		const now = this.hal.getTimeMs();
+
+		// Update Isolation Timer (for UI visualization of Panic Mode)
+		if (this.role === NodeRole.ISOLATED) {
+			this.isolationTimer += dt;
+		} else {
+			this.isolationTimer = 0;
+		}
 
 		// 1. Update State Machine (Hysteresis)
 		this.updateRoleState(now);
@@ -86,12 +92,9 @@ export class NodeFirmware {
 		// 2. Localization Optimization (Continuous Relaxation)
 		this.coopLoc.graph.optimize(1, [this.id]);
 
-		// 3. Application Logic
-		if (this.state === "MOVING") {
-			this.runTagLogic(now);
-		} else {
-			this.runAnchorLogic(now, dt);
-		}
+		// 3. Application Logic (Unified Mesh Logic)
+		// Even moving nodes participate in the mesh now (Mobile Ad-hoc Network)
+		this.runMeshLogic(now, dt);
 	}
 
 	private updateRoleState(now: number) {
@@ -104,8 +107,8 @@ export class NodeFirmware {
 			if (this.state === "STATIONARY" && now - this.movingSince > 100) {
 				// Quick transition to moving
 				this.state = "MOVING";
-				this.role = NodeRole.IDLE; // Reset role
-				this.hal.log(`[${this.id}] Motion detected -> MOVING`);
+				// We do NOT reset role to IDLE anymore, allowing moving nodes to be leaders/relays
+				this.hal.log(`[${this.id}] Motion detected -> MOVING (Mesh Active)`);
 			}
 		} else {
 			this.stationarySince = this.stationarySince || now;
@@ -114,22 +117,13 @@ export class NodeFirmware {
 			if (this.state === "MOVING" && now - this.stationarySince > this.HYSTERESIS_MS) {
 				// Delayed transition to stationary
 				this.state = "STATIONARY";
-				this.role = NodeRole.LEADER; // Assume anchor role
+				// If we were IDLE, we might want to become LEADER candidate, but ensureStability handles that
 				this.hal.log(`[${this.id}] Stable for ${this.HYSTERESIS_MS}ms -> STATIONARY`);
 			}
 		}
 	}
 
-	private runTagLogic(now: number) {
-		// Tags broadcast BLINKs periodically
-		if (now >= this.blinkTimer) {
-			this.sendBlink();
-			// Next blink with random jitter
-			this.blinkTimer = now + this.BLINK_INTERVAL_MS + this.hal.getRandom() * 100;
-		}
-	}
-
-	private runAnchorLogic(now: number, _dt: number) {
+	private runMeshLogic(now: number, _dt: number) {
 		// 1. Neighbor Maintenance
 		this.updateNeighbors(now);
 
@@ -146,13 +140,58 @@ export class NodeFirmware {
 
 		// 4. Periodic DATA (Gossip)
 		if (now >= this.dataTimer) {
-			if (this.hopsToGw < 999) {
+			const neighborList = Array.from(this.neighbors.values())
+				.filter((n) => n.rangeMeters !== undefined)
+				.map((n) => ({
+					id: n.id,
+					range: n.rangeMeters,
+					aoa: n.aoa,
+				}));
+
+			if (this.role === NodeRole.ROOT || this.role === NodeRole.LEADER) {
+				// I am the sink (Gateway or Cluster Leader). Log my own data directly.
+				this.cloudQueue.push({
+					nodeId: this.id,
+					timestamp: now,
+					neighbors: neighborList,
+					battery: this.battery,
+				});
+			} else if (this.hopsToGw < 999 && this.nextHop) {
 				this.broadcast(PacketType.DATA, {
-					status: "STATIONARY",
-					// Include sightings if any?
+					type: "GOSSIP",
+					originId: this.id,
+					status: this.state,
+					neighbors: neighborList,
+					battery: this.battery,
 				});
 			}
 			this.dataTimer = now + 5000 + this.hal.getRandom() * 1000;
+		}
+
+		// 5. Periodic Ranging (Mesh Maintenance)
+		if (now >= this.rangingTimer) {
+			let nextInterval = 2000 + this.hal.getRandom() * 1000; // Default: Low frequency for static mesh
+
+			// Only STATIONARY nodes initiate ranging
+			if (this.state === "STATIONARY") {
+				const neighbors = Array.from(this.neighbors.values());
+				if (neighbors.length > 0) {
+					// Prefer ranging MOVING nodes, but fall back to any neighbor
+					const movingNeighbors = neighbors.filter((n) => n.status === "MOVING");
+
+					if (movingNeighbors.length > 0) {
+						// High frequency tracking for moving nodes
+						const target = movingNeighbors[Math.floor(this.hal.getRandom() * movingNeighbors.length)];
+						this.initiateRanging(target.id);
+						nextInterval = 250 + this.hal.getRandom() * 250; // 250-500ms (Fast tracking)
+					} else {
+						// Low frequency maintenance for static neighbors
+						const target = neighbors[Math.floor(this.hal.getRandom() * neighbors.length)];
+						this.initiateRanging(target.id);
+					}
+				}
+			}
+			this.rangingTimer = now + nextInterval;
 		}
 	}
 
@@ -165,14 +204,14 @@ export class NodeFirmware {
 				this.coopLoc.removeNeighbor(id);
 
 				if (this.nextHop === id) {
-					this.changeRole(NodeRole.IDLE, 999, null, PacketType.PANIC);
-					this.ensureStability(now);
+					this.changeRole(NodeRole.ISOLATED, 999, null, PacketType.PANIC);
+					this.panicUntil = now + 2000; // Hold-down timer to allow network to settle
 				}
 			}
 		}
 	}
 
-	private ensureStability(_now: number) {
+	private ensureStability(now: number) {
 		// 1. Isolation
 		if (this.neighbors.size === 0) {
 			if (this.role !== NodeRole.ISOLATED) {
@@ -197,19 +236,101 @@ export class NodeFirmware {
 			return;
 		}
 
-		// 3. Cluster Election (Simplified)
+		// 3. CLUSTER SIZING (CRITICAL FIX)
 		const candidates = this.getSortedCandidates();
-		const best = candidates[0];
+		const clusterSizeEstimate = this.neighbors.size + 1;
 
-		if (best.id === this.id) {
-			// I should be leader
+		// FIX: Default is 1. We ALWAYS want at least 1 leader if no gateway exists.
+		let allowedLeaders = 1;
+
+		// Only increase to MaxLeaders (Redundancy) if we meet the size requirement
+		// Hardcoded config values for now as they are not passed in
+		const minClusterSize = 5;
+		const maxLeaders = 1;
+
+		if (clusterSizeEstimate >= minClusterSize) {
+			allowedLeaders = maxLeaders;
+		}
+
+		const rulingCouncil = candidates.slice(0, allowedLeaders);
+		const shouldBeLeader = rulingCouncil.some((c) => c.id === this.id);
+
+		// Promotion
+		if (shouldBeLeader && this.role !== NodeRole.LEADER) {
+			this.runElection(allowedLeaders);
+			return;
+		}
+		// Demotion
+		if (!shouldBeLeader && this.role === NodeRole.LEADER) {
+			this.runElection(allowedLeaders);
+			return;
+		}
+
+		// 4. Cluster Merge Logic (Incumbent Check)
+		if (this.role === NodeRole.LEADER) {
+			let betterLeadersCount = 0;
+			const seenLeaders = new Set<number>();
+
+			for (const n of this.neighbors.values()) {
+				const lBat = n.leaderBat || 0;
+				const lId = n.leaderId || 0;
+				// "Better" means Higher Battery OR Same Battery + Lower ID
+				if (lBat > this.battery + 5 || (lBat === this.battery && lId < this.id)) {
+					if (!seenLeaders.has(lId)) {
+						betterLeadersCount++;
+						seenLeaders.add(lId);
+					}
+				}
+			}
+
+			// If enough better leaders exist to fill the quota, I must step down
+			if (betterLeadersCount >= allowedLeaders) {
+				this.runElection(allowedLeaders);
+				return;
+			}
+		}
+
+		// 5. Relay Optimization
+		if (this.role === NodeRole.RELAY || this.role === NodeRole.IDLE || this.role === NodeRole.ISOLATED) {
+			let best = null;
+			for (const n of this.neighbors.values()) {
+				if (n.parentId === this.id) continue;
+				if (n.hopsToGw >= 999) continue;
+				if (!best) best = n;
+				else if (n.hopsToGw < best.hopsToGw) best = n;
+				else if (n.hopsToGw === best.hopsToGw && (n.neighborCount || 0) > (best.neighborCount || 0)) best = n;
+			}
+
+			if (best) {
+				if (this.nextHop !== best.id || this.hopsToGw !== best.hopsToGw + 1) {
+					this.changeRole(NodeRole.RELAY, best.hopsToGw + 1, best.id, PacketType.HELLO);
+				}
+				this.isElecting = false;
+				return;
+			} else {
+				// No valid path found -> I need to check if *I* should be leader
+				this.runElection(allowedLeaders);
+			}
+		}
+	}
+
+	private runElection(allowedLeaders: number) {
+		this.isElecting = true;
+		const candidates = this.getSortedCandidates();
+		const rulingCouncil = candidates.slice(0, allowedLeaders);
+		const amICouncil = rulingCouncil.some((c) => c.id === this.id);
+
+		if (amICouncil) {
 			if (this.role !== NodeRole.LEADER) {
 				this.changeRole(NodeRole.LEADER, 100, null, PacketType.ELECTION);
 			}
 		} else {
-			// Someone else is leader
-			if (this.nextHop !== best.id) {
-				this.changeRole(NodeRole.RELAY, Math.min(best.hopsToGw + 1, 999), best.id, PacketType.HELLO);
+			const best = candidates[0];
+			if (best.id !== this.id) {
+				const safeHops = Math.min(best.hopsToGw + 1, 999);
+				if (this.nextHop !== best.id) {
+					this.changeRole(NodeRole.RELAY, safeHops, best.id, PacketType.HELLO);
+				}
 			}
 		}
 	}
@@ -288,58 +409,62 @@ export class NodeFirmware {
 		this.hal.radioSend(packet);
 	}
 
-	private sendBlink() {
-		const packet: Packet = {
-			id: `${this.id}-${this.hal.getTimeMs()}`,
-			type: PacketType.HELLO, // Using HELLO as BLINK for now
-			srcId: this.id,
-			destId: -1, // Broadcast
-			payload: { type: "BLINK" },
-			timestamp: this.hal.getTimeMs(),
-		};
-		this.hal.radioSend(packet);
-	}
-
 	private handleRx(packet: Packet) {
 		const now = this.hal.getTimeMs();
 
-		// Filter packets based on state
-		if (this.state === "MOVING") {
-			// Tags only care about config/control, ignoring for now
-			return;
+		// 1. Handle Blinks (Ranging Trigger)
+		if (packet.type === PacketType.HELLO && packet.payload?.type === "BLINK") {
+			this.initiateRanging(packet.srcId);
 		}
 
-		if (this.state === "STATIONARY") {
-			// 1. Handle Blinks (Ranging Trigger)
-			if (packet.type === PacketType.HELLO && packet.payload?.type === "BLINK") {
-				this.initiateRanging(packet.srcId);
-			}
+		// 2. Handle Ranging Response
+		if (packet.type === PacketType.DATA && packet.payload?.type === "RANGING_RESPONSE") {
+			this.handleRangingResponse(packet);
+		}
 
-			// 2. Handle Ranging Response
-			if (packet.type === PacketType.DATA && packet.payload?.type === "RANGING_RESPONSE") {
-				this.handleRangingResponse(packet);
-			}
-
-			// 3. Handle Infrastructure Packets (Election/Gossip)
-			if (packet.type === PacketType.HELLO || packet.type === PacketType.ELECTION || packet.type === PacketType.PANIC) {
-				this.neighbors.set(packet.srcId, {
-					id: packet.srcId,
-					role: packet.payload.role,
+		// 3. Handle Gossip / Data Forwarding
+		if (packet.type === PacketType.DATA && packet.destId === this.id && packet.payload?.type === "GOSSIP") {
+			if (this.role === NodeRole.ROOT || this.role === NodeRole.LEADER) {
+				// Reached Gateway or Cluster Leader -> Add to Cloud Queue
+				this.cloudQueue.push({
+					nodeId: packet.payload.originId,
+					timestamp: packet.timestamp,
+					neighbors: packet.payload.neighbors,
 					battery: packet.payload.battery,
-					hopsToGw: packet.payload.hopsToGw,
-					leaderId: packet.payload.leaderId,
-					leaderBat: packet.payload.leaderBat,
-					parentId: packet.payload.parentId,
-					neighborCount: packet.payload.neighborCount,
-					lastSeen: now, // Timestamp
-					rssi: -50,
 				});
+			} else if (this.nextHop) {
+				// Relay -> Forward Upstream
+				const fwdPacket: Packet = {
+					...packet,
+					id: `fwd-${this.id}-${this.hal.getTimeMs()}-${Math.random()}`,
+					srcId: this.id,
+					destId: this.nextHop,
+					timestamp: this.hal.getTimeMs(),
+				};
+				this.hal.radioSend(fwdPacket);
+			}
+		}
 
-				// ANCHOR PROPAGATION: If neighbor has a global position, use it to calibrate myself
-				if (packet.payload.globalPos) {
-					const gp = packet.payload.globalPos as IGlobalPosition;
-					this.coopLoc.addExternalAnchor(packet.srcId, gp.lat, gp.lng);
-				}
+		// 4. Handle Infrastructure Packets (Election/Gossip)
+		if (packet.type === PacketType.HELLO || packet.type === PacketType.ELECTION || packet.type === PacketType.PANIC) {
+			this.neighbors.set(packet.srcId, {
+				id: packet.srcId,
+				role: packet.payload.role,
+				battery: packet.payload.battery,
+				hopsToGw: packet.payload.hopsToGw,
+				leaderId: packet.payload.leaderId,
+				leaderBat: packet.payload.leaderBat,
+				parentId: packet.payload.parentId,
+				neighborCount: packet.payload.neighborCount,
+				lastSeen: now, // Timestamp
+				rssi: -50,
+				status: packet.payload.status, // Capture status (MOVING/STATIONARY)
+			});
+
+			// ANCHOR PROPAGATION: If neighbor has a global position, use it to calibrate myself
+			if (packet.payload.globalPos) {
+				const gp = packet.payload.globalPos as IGlobalPosition;
+				this.coopLoc.addExternalAnchor(packet.srcId, gp.lat, gp.lng);
 			}
 		}
 	}

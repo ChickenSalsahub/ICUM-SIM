@@ -49,6 +49,7 @@ export interface NeighborEntry {
 	leaderBat?: number;
 	parentId?: number;
 	neighborCount?: number;
+	status?: "MOVING" | "STATIONARY";
 	// Optional: measured range from UWB simulation (meters)
 	rangeMeters?: number;
 	aoa?: number; // Angle of Arrival

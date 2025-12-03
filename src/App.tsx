@@ -366,12 +366,12 @@ const App: React.FC = () => {
 				node.tick(deltaTime);
 				totalBat += node.battery;
 
-				// Cloud Ingestion (Simplified)
-				if (node.sightingQueue.length > 0) {
+				// Cloud Ingestion
+				if (node.role === NodeRole.ROOT || node.role === NodeRole.LEADER) {
+					// 1. Gateway/Leader's Own Sightings
 					while (node.sightingQueue.length > 0) {
 						const sighting = node.sightingQueue.shift();
-						if (sighting && node.role === NodeRole.ROOT) {
-							// Gateway reports sighting
+						if (sighting) {
 							cloudBackendRef.current.ingest({
 								nodeId: node.id,
 								timestamp: sighting.timestamp,
@@ -380,6 +380,23 @@ const App: React.FC = () => {
 							});
 						}
 					}
+
+					// 2. Forwarded Reports from Mesh (Gossip)
+					while (node.cloudQueue.length > 0) {
+						const report = node.cloudQueue.shift();
+						if (report) {
+							cloudBackendRef.current.ingest({
+								nodeId: report.nodeId,
+								timestamp: report.timestamp,
+								neighbors: report.neighbors,
+								battery: report.battery,
+							});
+						}
+					}
+				} else {
+					// Non-Gateway nodes just clear their local sighting queue (simulating storage limit)
+					// In reality, they would aggregate these into the GOSSIP packet sent in runAnchorLogic
+					if (node.sightingQueue.length > 50) node.sightingQueue.shift();
 				}
 			});
 
