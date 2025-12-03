@@ -11,6 +11,7 @@ export interface RawReport {
 	lat?: number;
 	lng?: number;
 	battery: number;
+	status?: "MOVING" | "STATIONARY";
 	neighbors?: { id: number; range?: number; aoa?: number }[];
 }
 
@@ -58,6 +59,9 @@ export class CloudBackend {
 	private FUSION_WINDOW_MS = 1000; // Fuse data every 1 second
 	private lastFusionTime = 0;
 
+	// Track how long nodes have been in the graph to avoid fixing them too early
+	private nodeStabilityCounter: Map<number, number> = new Map();
+
 	/**
 	 * Ingests a raw report from the network.
 	 */
@@ -94,8 +98,60 @@ export class CloudBackend {
 	private runFusion() {
 		const activeNodeIds = new Set<number>();
 		const fixedNodeIds: number[] = [];
+		const supernodeIds = new Set<number>();
 
-		// 1. Process Buffers & Update Graph Constraints
+		// 0. Identify Supernodes (Anchors)
+		this.buffer.forEach((reports, nodeId) => {
+			if (reports.length === 0) return;
+			const latest = reports[reports.length - 1];
+			if (latest.x !== undefined && latest.y !== undefined) {
+				supernodeIds.add(nodeId);
+			}
+		});
+
+		// RESET GRAPH EDGES
+		// We clear old constraints because the topology might have changed.
+		// We only want to enforce constraints that are currently observed.
+		this.graph.clearEdges();
+
+		// 1. Pre-calculate average distances AND ANGLES for bidirectional links
+		const distMap = new Map<string, { val: number; weight: number }[]>();
+		const angleMap = new Map<string, { x: number; y: number; weight: number }[]>();
+
+		this.buffer.forEach((reports, nodeId) => {
+			if (reports.length === 0) return;
+			const latest = reports[reports.length - 1];
+			if (latest.neighbors) {
+				latest.neighbors.forEach((n) => {
+					if (n.range) {
+						const key = nodeId < n.id ? `${nodeId}-${n.id}` : `${n.id}-${nodeId}`;
+						const weight = supernodeIds.has(nodeId) ? 10 : 1;
+
+						// Distance
+						if (!distMap.has(key)) distMap.set(key, []);
+						distMap.get(key)!.push({ val: n.range, weight });
+
+						// Angle (Normalize to Smaller -> Larger direction)
+						if (n.aoa !== undefined) {
+							if (!angleMap.has(key)) angleMap.set(key, []);
+							let angle = n.aoa;
+							// If we are the larger ID, our 'aoa' is Larger->Smaller.
+							// We want Smaller->Larger, so add PI.
+							if (nodeId > n.id) {
+								angle += Math.PI;
+							}
+							angleMap.get(key)!.push({
+								x: Math.cos(angle),
+								y: Math.sin(angle),
+								weight,
+							});
+						}
+					}
+				});
+			}
+		});
+
+		// 2. Process Buffers & Update Graph Constraints
 		this.buffer.forEach((reports, nodeId) => {
 			if (reports.length === 0) return;
 			activeNodeIds.add(nodeId);
@@ -106,13 +162,43 @@ export class CloudBackend {
 			if (latest.neighbors) {
 				latest.neighbors.forEach((n) => {
 					if (n.range) {
-						// Add measurement to the graph: u, v, dist, aoa
-						// Note: range is in meters. We convert to pixels for visualization (x20)
-						// OR we keep it in meters and scale the view?
-						// The RelativePoseGraph works in arbitrary units.
-						// Let's use PIXELS to match the simulation view (20px = 1m)
-						const distPx = n.range * 20;
-						this.graph.addMeasurement(nodeId, n.id, distPx, n.aoa);
+						const key = nodeId < n.id ? `${nodeId}-${n.id}` : `${n.id}-${nodeId}`;
+
+						// Weighted Averaged Distance
+						const dists = distMap.get(key);
+						let finalRange = n.range;
+						if (dists && dists.length > 0) {
+							const totalWeight = dists.reduce((sum, d) => sum + d.weight, 0);
+							const weightedSum = dists.reduce((sum, d) => sum + d.val * d.weight, 0);
+							finalRange = weightedSum / totalWeight;
+						}
+
+						// Weighted Averaged Angle
+						let finalAoA = n.aoa;
+						const vecs = angleMap.get(key);
+						if (vecs && vecs.length > 0) {
+							let sumX = 0;
+							let sumY = 0;
+							vecs.forEach((v) => {
+								sumX += v.x * v.weight;
+								sumY += v.y * v.weight;
+							});
+							// This is the average angle for Smaller -> Larger
+							const avgAngle = Math.atan2(sumY, sumX);
+
+							if (nodeId < n.id) {
+								finalAoA = avgAngle;
+							} else {
+								finalAoA = avgAngle + Math.PI;
+							}
+						}
+
+						const distPx = finalRange * 20;
+						// If either node is a supernode, give the edge high weight in the graph optimizer
+						const isSuperLink = supernodeIds.has(nodeId) || supernodeIds.has(n.id);
+						const edgeWeight = isSuperLink ? 5.0 : 1.0;
+
+						this.graph.addMeasurement(nodeId, n.id, distPx, finalAoA, edgeWeight);
 					}
 				});
 			}
@@ -124,6 +210,7 @@ export class CloudBackend {
 				// For simulation, fixing theta=0 for the Gateway is fine.
 				this.graph.setNodePose(nodeId, { x: latest.x, y: latest.y, theta: 0 });
 				fixedNodeIds.push(nodeId);
+				this.nodeStabilityCounter.set(nodeId, 999); // Always stable
 			} else {
 				// Ensure node exists in graph even if not fixed
 				if (!this.graph.getNodePose(nodeId)) {
@@ -133,6 +220,17 @@ export class CloudBackend {
 						y: Math.random() * 600,
 						theta: 0,
 					});
+					this.nodeStabilityCounter.set(nodeId, 0);
+				} else {
+					// Increment stability counter
+					const count = this.nodeStabilityCounter.get(nodeId) || 0;
+					this.nodeStabilityCounter.set(nodeId, count + 1);
+
+					// If node reports STATIONARY and has been stable for > 5 ticks, fix it
+					// This prevents jitter for stationary nodes
+					if (latest.status === "STATIONARY" && count > 5) {
+						fixedNodeIds.push(nodeId);
+					}
 				}
 			}
 		});
@@ -170,11 +268,43 @@ export class CloudBackend {
 
 			const latestReport = reports[reports.length - 1];
 			const neighbors = latestReport.neighbors
-				? latestReport.neighbors.map((n) => ({
-						id: n.id,
-						range: n.range || 0,
-						aoa: n.aoa || 0,
-				  }))
+				? latestReport.neighbors.map((n) => {
+						// Use consensus values if available
+						const key = nodeId < n.id ? `${nodeId}-${n.id}` : `${n.id}-${nodeId}`;
+						let finalRange = n.range || 0;
+						let finalAoA = n.aoa || 0;
+
+						// Weighted Averaged Distance
+						const dists = distMap.get(key);
+						if (dists && dists.length > 0) {
+							const totalWeight = dists.reduce((sum, d) => sum + d.weight, 0);
+							const weightedSum = dists.reduce((sum, d) => sum + d.val * d.weight, 0);
+							finalRange = weightedSum / totalWeight;
+						}
+
+						// Weighted Averaged Angle
+						const vecs = angleMap.get(key);
+						if (vecs && vecs.length > 0) {
+							let sumX = 0;
+							let sumY = 0;
+							vecs.forEach((v) => {
+								sumX += v.x * v.weight;
+								sumY += v.y * v.weight;
+							});
+							const avgAngle = Math.atan2(sumY, sumX);
+							if (nodeId < n.id) {
+								finalAoA = avgAngle;
+							} else {
+								finalAoA = avgAngle + Math.PI;
+							}
+						}
+
+						return {
+							id: n.id,
+							range: finalRange,
+							aoa: finalAoA,
+						};
+				  })
 				: [];
 
 			const record: FusedRecord = {

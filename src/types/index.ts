@@ -54,6 +54,23 @@ export interface NeighborEntry {
 	aoa?: number; // Angle of Arrival
 }
 
+export interface HardwareInterface {
+	// Radio
+	radioSend(packet: Packet): void;
+
+	// System
+	getTimeMs(): number;
+	getRandom(): number; // For backoff
+	isMoving(): boolean; // Virtual IMU
+
+	// Debug/Serial
+	log(message: string): void;
+
+	// Callbacks (Firmware registers these)
+	onRx?: (packet: Packet) => void;
+	onTxComplete?: () => void;
+}
+
 export interface NodeConfig {
 	uwbRange: number;
 	isolationTimeout: number;

@@ -9,7 +9,7 @@ export class UWBRanging implements RangingEngine {
 	private rng: () => number;
 	private noiseStdMeters: number;
 
-	constructor(pixelsPerMeter: number, opts?: { rng?: () => number; noiseStdMeters?: number }) {
+	constructor(_pixelsPerMeter: number, opts?: { rng?: () => number; noiseStdMeters?: number }) {
 		// Default RNG: Math.random
 		this.rng = opts?.rng ?? Math.random;
 		this.noiseStdMeters = opts?.noiseStdMeters ?? 0.05; // 5cm default noise

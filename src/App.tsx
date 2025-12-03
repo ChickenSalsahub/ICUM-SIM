@@ -13,15 +13,23 @@ import {
 	Radio,
 	MessageSquare,
 	Scale,
-	Info,
 	TrendingDown,
 	BrickWall,
 } from "lucide-react";
 import { NodeFirmware } from "./logic/NodeFirmware";
-import { UWBRanging } from "./logic/UWBRanging";
 import { CloudBackend, FusedRecord } from "./logic/CloudBackend";
 import { DraggableWindow } from "./components/DraggableWindow";
-import { NodeConfig, LogEntry, NodeRole, NodeType, Packet, PacketType, VisualPacket, Wall } from "./types";
+import {
+	NodeConfig,
+	LogEntry,
+	NodeRole,
+	NodeType,
+	Packet,
+	PacketType,
+	VisualPacket,
+	Wall,
+	HardwareInterface,
+} from "./types";
 
 const PIXELS_PER_METER = 20;
 const CANVAS_WIDTH = 1200;
@@ -89,7 +97,7 @@ const App: React.FC = () => {
 	const cloudBackendRef = useRef<CloudBackend>(new CloudBackend());
 	const visualPacketsRef = useRef<VisualPacket[]>([]);
 	const wallsRef = useRef<Wall[]>([]);
-	const uwbRef = useRef(new UWBRanging(PIXELS_PER_METER));
+	// const uwbRef = useRef(new UWBRanging(PIXELS_PER_METER));
 	const animationRef = useRef<number | undefined>(undefined);
 	const lastTimeRef = useRef<number>(0);
 	const energyTimerRef = useRef<number>(0);
@@ -101,7 +109,32 @@ const App: React.FC = () => {
 	const dragOffsetRef = useRef({ x: 0, y: 0 });
 	const svgRef = useRef<SVGSVGElement>(null);
 
+	// Global Ether Queue (Simulating the Air)
+	const txQueueRef = useRef<{ senderId: number; packet: Packet }[]>([]);
+
 	const [contextMenu, setContextMenu] = useState<{ x: number; y: number; nodeId: number } | null>(null);
+
+	const createNode = (id: number, type: NodeType, x: number, y: number) => {
+		const hal: HardwareInterface = {
+			radioSend: (packet) => {
+				txQueueRef.current.push({ senderId: id, packet });
+				// Simulate TX Complete callback immediately or next tick?
+				// For now, we assume fire-and-forget or immediate completion
+			},
+			getTimeMs: () => Date.now(),
+			getRandom: () => Math.random(),
+			isMoving: () => {
+				const node = nodesRef.current.find((n) => n.id === id);
+				if (!node) return false;
+				const dist = Math.sqrt(Math.pow(node.targetX - node.x, 2) + Math.pow(node.targetY - node.y, 2));
+				return dist > 10.0;
+			},
+			log: (_msg) => {
+				// console.log(`[Node ${id}] ${msg}`);
+			},
+		};
+		return new NodeFirmware(id, type, x, y, hal);
+	};
 
 	useEffect(() => {
 		nodesRef.current = nodes;
@@ -174,92 +207,98 @@ const App: React.FC = () => {
 				})
 				.filter((vp): vp is VisualPacket => vp !== null && vp.progress < 1.0);
 
-			// 2. ETHER
-			const rxBuffers = new Map<number, Packet[]>();
-			currentNodes.forEach((n) => rxBuffers.set(n.id, []));
+			// 2. ETHER & PHYSICS
+			while (txQueueRef.current.length > 0) {
+				const item = txQueueRef.current.shift();
+				if (!item) continue;
 
-			currentNodes.forEach((sender) => {
-				while (sender.txQueue.length > 0) {
-					const packet = sender.txQueue.shift();
-					if (!packet) continue;
-					capturePacket(packet);
+				const sender = currentNodes.find((n) => n.id === item.senderId);
+				if (!sender) continue;
 
-					// SELF-INGESTION FOR LEADERS/ROOTS
-					// If I am a Leader/Root and I am broadcasting DATA, I should also ingest it into the cloud
-					// because I am the gateway (or connected to it) and I don't "receive" my own packets.
-					if (packet.type === PacketType.DATA) {
-						if (sender.role === NodeRole.ROOT || sender.role === NodeRole.LEADER) {
-							const report = {
-								nodeId: packet.srcId,
-								timestamp: Date.now(),
-								x: sender.role === NodeRole.ROOT ? packet.payload.x : undefined,
-								y: sender.role === NodeRole.ROOT ? packet.payload.y : undefined,
-								lat: packet.payload.imu?.globalPos?.lat,
-								lng: packet.payload.imu?.globalPos?.lng,
-								battery: packet.payload.battery || 0,
-								neighbors: packet.payload.neighbors,
-							};
-							cloudBackendRef.current.ingest(report);
-						}
-					}
+				const packet = item.packet;
+				capturePacket(packet);
 
-					if (packet.destId === -1) {
-						let speed = 1.0;
-						if (packet.type === PacketType.DATA) speed = 2.5;
-						if (packet.type === PacketType.PANIC) speed = 3.0;
-						if (packet.type === PacketType.ELECTION) speed = 2.0;
+				// Visuals
+				if (packet.destId === -1) {
+					newVisuals.push({
+						id: Math.random().toString(),
+						packet: packet,
+						x: sender.x,
+						y: sender.y,
+						startX: sender.x,
+						startY: sender.y,
+						targetId: -1,
+						progress: 0,
+						speed: packet.type === PacketType.DATA ? 2.5 : 2.0,
+						style: "RING",
+						maxRadius: rangePx,
+					});
+				}
 
-						newVisuals.push({
-							id: Math.random().toString(),
-							packet: packet,
-							x: sender.x,
-							y: sender.y,
-							startX: sender.x,
-							startY: sender.y,
-							targetId: -1,
-							progress: 0,
-							speed: speed,
-							style: "RING",
-							maxRadius: rangePx,
-						});
-					}
+				// Propagation
+				currentNodes.forEach((receiver) => {
+					if (sender.id === receiver.id) return;
+					if (packet.destId !== -1 && packet.destId !== receiver.id) return;
 
-					currentNodes.forEach((receiver) => {
-						if (sender.id === receiver.id) return;
-						if (packet.destId !== -1 && packet.destId !== receiver.id) return;
+					const dist = Math.sqrt(Math.pow(sender.x - receiver.x, 2) + Math.pow(sender.y - receiver.y, 2));
 
-						const dist = Math.sqrt(Math.pow(sender.x - receiver.x, 2) + Math.pow(sender.y - receiver.y, 2));
-
-						if (dist <= rangePx) {
-							let blocked = false;
-							for (const w of currentWalls) {
-								if (
-									doIntersect(
-										{ x: sender.x, y: sender.y },
-										{ x: receiver.x, y: receiver.y },
-										{ x: w.x1, y: w.y1 },
-										{ x: w.x2, y: w.y2 }
-									)
-								) {
-									blocked = true;
-									break;
-								}
+					if (dist <= rangePx) {
+						let blocked = false;
+						for (const w of currentWalls) {
+							if (
+								doIntersect(
+									{ x: sender.x, y: sender.y },
+									{ x: receiver.x, y: receiver.y },
+									{ x: w.x1, y: w.y1 },
+									{ x: w.x2, y: w.y2 }
+								)
+							) {
+								blocked = true;
+								break;
 							}
+						}
 
-							if (!blocked) {
-								// Attach simulated UWB ranging measurement to the payload so firmware can use it
-								try {
-									const meas = uwbRef.current.measure(sender, receiver, {
-										pixelsPerMeter: PIXELS_PER_METER,
-										maxRangeMeters: config.uwbRange,
-										walls: currentWalls,
-									});
-									(packet.payload as any).__ranging = meas;
-								} catch (e) {
-									// ignore measurement errors in the UI loop
+						if (!blocked) {
+							// Packet Loss (10%)
+							if (Math.random() > 0.1) {
+								// Ranging Simulation
+								if (packet.payload?.type === "RANGING_POLL") {
+									// Generate Response
+									const trueDist = dist / PIXELS_PER_METER;
+									const noise = (Math.random() - 0.5) * 0.6; // +/- 30cm
+									const measuredDist = Math.max(0, trueDist + noise);
+
+									// Calculate AoA (Angle of Arrival) at the Initiator (sender)
+									// Vector from Initiator (sender) to Responder (receiver)
+									const dx = receiver.x - sender.x;
+									const dy = receiver.y - sender.y;
+									const trueAngle = Math.atan2(dy, dx);
+									const angleNoise = (Math.random() - 0.5) * (10 * (Math.PI / 180)); // +/- 5 degrees
+									const measuredAoA = trueAngle + angleNoise;
+
+									const responsePacket: Packet = {
+										id: `resp-${receiver.id}-${sender.id}-${Date.now()}`,
+										type: PacketType.DATA,
+										srcId: receiver.id,
+										destId: sender.id,
+										payload: {
+											type: "RANGING_RESPONSE",
+											distance: measuredDist,
+											aoa: measuredAoA,
+										},
+										timestamp: Date.now(),
+									};
+
+									// Schedule Response
+									setTimeout(() => {
+										txQueueRef.current.push({ senderId: receiver.id, packet: responsePacket });
+									}, 10);
+								} else {
+									// Normal Delivery
+									if (receiver.hal.onRx) {
+										receiver.hal.onRx(packet);
+									}
 								}
-
-								rxBuffers.get(receiver.id)?.push(packet);
 
 								if (packet.destId !== -1) {
 									newVisuals.push({
@@ -277,9 +316,9 @@ const App: React.FC = () => {
 								}
 							}
 						}
-					});
-				}
-			});
+					}
+				});
+			}
 
 			visualPacketsRef.current = newVisuals;
 			setVisualPackets(newVisuals);
@@ -304,45 +343,43 @@ const App: React.FC = () => {
 			});
 			setLinks(newLinks);
 
-			// 4. FIRMWARE
+			// 4. FIRMWARE & PHYSICS
 			let totalBat = 0;
 			currentNodes.forEach((node) => {
 				node.isDragging = node.id === draggedNodeIdRef.current;
-				const myPackets = rxBuffers.get(node.id) || [];
 
-				myPackets.forEach((p) => {
-					if (p.type === PacketType.DATA) {
-						if (node.role === NodeRole.ROOT || node.role === NodeRole.LEADER) {
-							// Construct RawReport for Cloud Backend
-							// SIMULATION REALISM: Only ROOT (Gateway) nodes know their absolute position (GPS/Fixed).
-							// Others only know relative neighbors. We hide X/Y from the cloud for non-root nodes
-							// to force the cloud to reconstruct topology from neighbor data.
-							const report = {
-								nodeId: p.srcId,
-								timestamp: Date.now(),
-								x: node.role === NodeRole.ROOT ? p.payload.x : undefined,
-								y: node.role === NodeRole.ROOT ? p.payload.y : undefined,
-								lat: p.payload.imu?.globalPos?.lat,
-								lng: p.payload.imu?.globalPos?.lng,
-								battery: p.payload.battery || 0,
-								neighbors: p.payload.neighbors,
-							};
-							cloudBackendRef.current.ingest(report);
-
-							// Keep the log for debug visibility if needed
-							addLog(`CLOUD RX: Pos(${p.payload.x},${p.payload.y}) via ${node.role}:${node.id}`, "SUCCESS", "CLOUD");
-						}
+				// Physics Update
+				if (node.state === "MOVING" && !node.isDragging) {
+					const dist = Math.sqrt(Math.pow(node.targetX - node.x, 2) + Math.pow(node.targetY - node.y, 2));
+					if (dist < 10) {
+						node.targetX = Math.random() * 1100 + 50;
+						node.targetY = Math.random() * 700 + 50;
+					} else {
+						node.battery = Math.max(0, node.battery - 0.01 * deltaTime);
+						const moveStep = config.movingSpeed * 100 * deltaTime;
+						node.x += ((node.targetX - node.x) / dist) * moveStep;
+						node.y += ((node.targetY - node.y) / dist) * moveStep;
 					}
-				});
+				}
 
-				node.tick(deltaTime, config, myPackets);
+				// Firmware Tick
+				node.tick(deltaTime);
 				totalBat += node.battery;
 
-				if (node.role === NodeRole.ISOLATED && node.isolationTimer > config.isolationTimeout && Math.random() > 0.99) {
-					addLog(`ID:${node.id} PANIC UPLOAD (LTE)`, "ERROR", "CLOUD");
-					// Also feed panic uploads to cloud
-					// We need to construct a partial payload or handle it in ingest
-					// For now, let's just log it as before
+				// Cloud Ingestion (Simplified)
+				if (node.sightingQueue.length > 0) {
+					while (node.sightingQueue.length > 0) {
+						const sighting = node.sightingQueue.shift();
+						if (sighting && node.role === NodeRole.ROOT) {
+							// Gateway reports sighting
+							cloudBackendRef.current.ingest({
+								nodeId: node.id,
+								timestamp: sighting.timestamp,
+								neighbors: [{ id: sighting.targetId, range: sighting.distance }],
+								battery: node.battery,
+							});
+						}
+					}
 				}
 			});
 
@@ -470,16 +507,18 @@ const App: React.FC = () => {
 	// Actions
 	const spawn = (type: NodeType) => {
 		const maxId = nodesRef.current.length > 0 ? Math.max(...nodesRef.current.map((n) => n.id)) : 0;
-		const n = new NodeFirmware(maxId + 1, type, Math.random() * 1000 + 50, Math.random() * 700 + 50);
+		const n = createNode(maxId + 1, type, Math.random() * 1000 + 50, Math.random() * 700 + 50);
 		setNodes((prev) => [...prev, n]);
 		nodesRef.current = [...nodesRef.current, n];
 	};
+	/*
 	const clearType = (type: NodeType) => {
 		const newNodes = nodesRef.current.filter((n) => n.type !== type);
 		setNodes(newNodes);
 		nodesRef.current = newNodes;
 		setOpenWindows([]);
 	};
+	*/
 	const nukeAll = () => {
 		setNodes([]);
 		nodesRef.current = [];

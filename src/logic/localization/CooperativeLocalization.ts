@@ -169,6 +169,10 @@ export class RelativePoseGraph {
 			}
 		}
 	}
+
+	public clearEdges() {
+		this.edges.clear();
+	}
 }
 
 /**
