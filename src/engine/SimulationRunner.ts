@@ -130,7 +130,11 @@ export class SimulationRunner {
 			if (this.isBlocked(senderId, recipient.id)) continue;
 
 			const cloned: Packet = { ...packet, destId: packet.destId, srcId: senderId };
-			if (cloned.payload?.type === "RANGING_POLL") {
+			if (
+				cloned.payload?.type === "RANGING_POLL" ||
+				cloned.payload?.type === "RANGING_RESP" ||
+				cloned.payload?.type === "HELLO"
+			) {
 				const measurement = this.uwbMeasure(senderId, recipient.id);
 				cloned.payload.range = measurement.measuredDistanceMeters;
 				cloned.payload.angle = measurement.aoa;
