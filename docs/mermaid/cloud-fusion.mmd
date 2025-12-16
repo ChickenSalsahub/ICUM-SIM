@@ -1,0 +1,17 @@
+flowchart TD
+  A[Raw reports buffered\nper nodeId] --> B{Fusion window\n(1s) elapsed?}
+  B -- no --> A
+  B -- yes --> C[Build undirected constraints\nrange + AoA]
+  C --> D[Seed/ensure pose graph]
+  D --> E{Any real anchors\n(report x/y)?}
+  E -- yes --> F[Pin anchors in graph]
+  E -- no --> G[Virtual anchor: pin seed node\n(to fix translation)]
+  F --> H[Optimize warmup iterations]
+  G --> H
+  H --> I{robustFusion?}
+  I -- no --> J[Optimize final iterations]
+  I -- yes --> K[Compute residuals\n(dist + angle)]
+  K --> L[Huber weights per edge]
+  L --> J
+  J --> M[Emit fused records\nfrom graph node poses]
+  M --> N[Clear buffer]

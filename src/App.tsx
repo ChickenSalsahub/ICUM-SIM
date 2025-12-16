@@ -17,6 +17,7 @@ import {
 	BrickWall,
 } from "lucide-react";
 import { CloudBackend, FusedRecord } from "./logic/CloudBackend";
+import { CloudPublishTracker } from "./logic/cloudPublishPolicy";
 import { DraggableWindow } from "./components/DraggableWindow";
 import { NodeConfig, LogEntry, NodeRole, NodeType, Packet, PacketType, VisualPacket, Wall } from "./types";
 import { SimulationRunner } from "./engine/SimulationRunner";
@@ -226,6 +227,7 @@ const App: React.FC = () => {
 	const lastTimeRef = useRef<number>(0);
 	const energyTimerRef = useRef<number>(0);
 	const lastCloudTickRef = useRef<number>(0);
+	const cloudPublishRef = useRef<CloudPublishTracker>(new CloudPublishTracker({ staleMs: 30_000 }));
 
 	const [openWindows, setOpenWindows] = useState<number[]>([]);
 	const [windowOrder, setWindowOrder] = useState<number[]>([]);
@@ -453,13 +455,25 @@ const App: React.FC = () => {
 				for (const sn of snap.nodes) {
 					const node = currentNodes.find((n) => n.id === sn.id);
 					if (!node) continue;
+
+					const isGateway = node.type === "HARDWARE_GW";
+					const isMoving = node.firmwareState === "MOVING";
+					const shouldPublish = cloudPublishRef.current.shouldPublish({
+						nodeId: node.id,
+						nowMs,
+						isAnchor: isGateway,
+						isMoving,
+						neighborIds: sn.firmware.neighbors.map((nb) => nb.id),
+					});
+					if (!shouldPublish) continue;
+
 					const report = {
 						nodeId: node.id,
 						timestamp: nowMs,
 						battery: node.battery,
 						status: node.firmwareState === "ISOLATED" ? "STATIONARY" : node.firmwareState,
 						neighbors: sn.firmware.neighbors.map((nb) => ({ id: nb.id, range: nb.rangeMeters, aoa: nb.angleRad })),
-						...(node.type === "HARDWARE_GW" ? { x: sn.trueX, y: sn.trueY } : {}),
+						...(isGateway ? { x: sn.trueX, y: sn.trueY } : {}),
 					};
 					baselineCloud.ingest(report);
 					robustCloud.ingest(report);
@@ -622,6 +636,7 @@ const App: React.FC = () => {
 		cloudBackendRobustRef.current = new CloudBackend({ robustFusion: true });
 		setFusedRecordsBaseline([]);
 		setFusedRecordsRobust([]);
+		cloudPublishRef.current = new CloudPublishTracker({ staleMs: 30_000 });
 		setOpenWindows([]);
 		setWalls([]);
 	};

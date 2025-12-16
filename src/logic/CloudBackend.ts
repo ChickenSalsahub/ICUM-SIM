@@ -1,4 +1,4 @@
-import { RelativePoseGraph } from "./localization/CooperativeLocalization";
+import { RelativePoseGraph } from "./localization/CooperativeLocalization.ts";
 
 export interface CloudBackendOptions {
 	robustFusion?: boolean;
@@ -63,9 +63,10 @@ export class CloudBackend {
 	private db: FusedRecord[] = [];
 
 	// Topology Engine (Relative Pose Graph)
-	// We use a persistent graph to track the network topology over time.
-	// This allows us to use "distance" and "angles" (AoA) to reconstruct the layout.
-	private graph: RelativePoseGraph = new RelativePoseGraph(1); // Initialize with ID 1 (Gateway)
+	// We keep a persistent graph so the layout is continuous over time.
+	// IMPORTANT: Do not assume a hardware gateway exists; seed the graph lazily.
+	private graph: RelativePoseGraph | null = null;
+	private graphSeedId: number | null = null;
 
 	private readonly opts: Required<CloudBackendOptions>;
 
@@ -75,6 +76,15 @@ export class CloudBackend {
 
 	// Track how long nodes have been in the graph to avoid fixing them too early
 	private nodeStabilityCounter: Map<number, number> = new Map();
+
+	private ensureGraph(seedId: number) {
+		if (!this.graph) {
+			this.graph = new RelativePoseGraph(seedId);
+			this.graphSeedId = seedId;
+			this.nodeStabilityCounter.clear();
+		}
+		return this.graph;
+	}
 
 	constructor(opts?: CloudBackendOptions) {
 		this.opts = {
@@ -121,6 +131,8 @@ export class CloudBackend {
 	 * 3. Anchor Positions (Fixed nodes like Gateways)
 	 */
 	private runFusion() {
+		if (this.buffer.size === 0) return;
+
 		const activeNodeIds = new Set<number>();
 		const fixedNodeIds: number[] = [];
 		const supernodeIds = new Set<number>();
@@ -135,11 +147,27 @@ export class CloudBackend {
 		// 0. Identify Supernodes (Anchors)
 		this.buffer.forEach((reports, nodeId) => {
 			if (reports.length === 0) return;
+			activeNodeIds.add(nodeId);
 			const latest = reports[reports.length - 1];
 			if (latest.x !== undefined && latest.y !== undefined) {
 				supernodeIds.add(nodeId);
 			}
 		});
+
+		// If there's no explicit anchor (e.g., no HARDWARE_GW), create a deterministic
+		// virtual anchor by pinning one node in-place to fix translation.
+		const hasRealAnchors = supernodeIds.size > 0;
+		const seedId =
+			this.graphSeedId ??
+			(hasRealAnchors
+				? Math.min(...Array.from(supernodeIds.values()))
+				: Math.min(...Array.from(activeNodeIds.values())));
+		const graph = this.ensureGraph(seedId);
+		if (!hasRealAnchors) {
+			const pose = graph.getNodePose(seedId);
+			if (!pose) graph.setNodePose(seedId, { x: 0, y: 0, theta: 0 });
+			fixedNodeIds.push(seedId);
+		}
 
 		// 1. Pre-calculate average distances AND ANGLES for bidirectional links
 		const distMap = new Map<string, { val: number; weight: number }[]>();
@@ -226,7 +254,6 @@ export class CloudBackend {
 		// 2. Process Buffers & Update Graph Nodes (poses/anchors)
 		this.buffer.forEach((reports, nodeId) => {
 			if (reports.length === 0) return;
-			activeNodeIds.add(nodeId);
 
 			const latest = reports[reports.length - 1];
 
@@ -235,14 +262,14 @@ export class CloudBackend {
 			if (latest.x !== undefined && latest.y !== undefined) {
 				// We assume theta=0 for the anchor to fix rotation, unless we have compass data.
 				// For simulation, fixing theta=0 for the Gateway is fine.
-				this.graph.setNodePose(nodeId, { x: latest.x, y: latest.y, theta: 0 });
+				graph.setNodePose(nodeId, { x: latest.x, y: latest.y, theta: 0 });
 				fixedNodeIds.push(nodeId);
 				this.nodeStabilityCounter.set(nodeId, 999); // Always stable
 			} else {
 				// Ensure node exists in graph even if not fixed
-				if (!this.graph.getNodePose(nodeId)) {
+				if (!graph.getNodePose(nodeId)) {
 					// Initialize at random position to allow physics to converge
-					this.graph.setNodePose(nodeId, {
+					graph.setNodePose(nodeId, {
 						x: Math.random() * 40,
 						y: Math.random() * 30,
 						theta: 0,
@@ -253,9 +280,9 @@ export class CloudBackend {
 					const count = this.nodeStabilityCounter.get(nodeId) || 0;
 					this.nodeStabilityCounter.set(nodeId, count + 1);
 
-					// If node reports STATIONARY and has been stable for > 5 ticks, fix it
-					// This prevents jitter for stationary nodes
-					if (latest.status === "STATIONARY" && count > 5) {
+					// Only apply the "fix stationary" anti-jitter heuristic when we have at least
+					// one real anchor; otherwise we'd be freezing arbitrary random coordinates.
+					if (hasRealAnchors && latest.status === "STATIONARY" && count > 5) {
 						fixedNodeIds.push(nodeId);
 					}
 				}
@@ -266,24 +293,24 @@ export class CloudBackend {
 			// RESET GRAPH EDGES
 			// We clear old constraints because the topology might have changed.
 			// We only want to enforce constraints that are currently observed.
-			this.graph.clearEdges();
+			graph.clearEdges();
 			for (const c of constraints) {
 				const w = c.baseWeight * (perEdgeWeight?.get(c.key) ?? 1.0);
 				// Add both directional AoA constraints if available.
-				this.graph.addMeasurement(c.u, c.v, c.dist, c.aoaUV, w);
-				if (c.aoaVU !== undefined) this.graph.addMeasurement(c.v, c.u, c.dist, c.aoaVU, w);
+				graph.addMeasurement(c.u, c.v, c.dist, c.aoaUV, w);
+				if (c.aoaVU !== undefined) graph.addMeasurement(c.v, c.u, c.dist, c.aoaVU, w);
 			}
 		};
 
 		// 3. Optimize Graph
 		applyConstraints();
-		this.graph.optimize(this.opts.warmupIterations, fixedNodeIds);
+		graph.optimize(this.opts.warmupIterations, fixedNodeIds);
 
 		if (this.opts.robustFusion) {
 			const weights = new Map<string, number>();
 			for (const c of constraints) {
-				const uPose = this.graph.getNodePose(c.u);
-				const vPose = this.graph.getNodePose(c.v);
+				const uPose = graph.getNodePose(c.u);
+				const vPose = graph.getNodePose(c.v);
 				if (!uPose || !vPose) continue;
 				const dx = vPose.x - uPose.x;
 				const dy = vPose.y - uPose.y;
@@ -311,16 +338,16 @@ export class CloudBackend {
 			}
 
 			applyConstraints(weights);
-			this.graph.optimize(this.opts.finalIterations, fixedNodeIds);
+			graph.optimize(this.opts.finalIterations, fixedNodeIds);
 		} else {
-			this.graph.optimize(this.opts.finalIterations, fixedNodeIds);
+			graph.optimize(this.opts.finalIterations, fixedNodeIds);
 		}
 
 		// 4. Generate Fused Records from Graph State
 		this.buffer.forEach((reports, nodeId) => {
 			if (reports.length === 0) return;
 
-			const pose = this.graph.getNodePose(nodeId);
+			const pose = graph.getNodePose(nodeId);
 			if (!pose) return; // Should not happen if initialized
 
 			// Calculate averages for other fields
@@ -414,8 +441,8 @@ export class CloudBackend {
 	public clear() {
 		this.db = [];
 		this.buffer.clear();
-		// We might want to clear the graph too, or keep it for continuity?
-		// Let's clear it to fully reset.
-		this.graph = new RelativePoseGraph(1);
+		this.graph = null;
+		this.graphSeedId = null;
+		this.nodeStabilityCounter.clear();
 	}
 }

@@ -1,7 +1,8 @@
 import { writeFileSync } from "fs";
 import { pathToFileURL } from "url";
 import { SimulationRunner } from "../engine/SimulationRunner.ts";
-import { CloudBackend, type FusedRecord } from "../logic/CloudBackend";
+import { CloudBackend, type FusedRecord } from "../logic/CloudBackend.ts";
+import { CloudPublishTracker } from "../logic/cloudPublishPolicy.ts";
 
 interface ExperimentATimeRow {
 	timeSeconds: number;
@@ -206,6 +207,7 @@ function runExperimentD(): ExperimentDTimeRow[] {
 
 	const cloudBaseline = new CloudBackend({ robustFusion: false });
 	const cloudRobust = new CloudBackend({ robustFusion: true });
+	const publish = new CloudPublishTracker({ staleMs: 30_000 });
 
 	for (let t = 0; t <= simSeconds * 1000; t += logEveryMs) {
 		const snap = runner.snapshot();
@@ -222,15 +224,17 @@ function runExperimentD(): ExperimentDTimeRow[] {
 				status: sn.firmware.state === "ISOLATED" ? "STATIONARY" : (sn.firmware.state as "MOVING" | "STATIONARY"),
 				neighbors,
 			};
-
-			cloudBaseline.ingest({
-				...base,
-				...(sn.id === 1 ? { x: sn.trueX, y: sn.trueY } : {}),
+			const shouldPublish = publish.shouldPublish({
+				nodeId: sn.id,
+				nowMs,
+				isAnchor: false,
+				isMoving: sn.firmware.state === "MOVING",
+				neighborIds: sn.firmware.neighbors.map((nb) => nb.id),
 			});
-			cloudRobust.ingest({
-				...base,
-				...(sn.id === 1 ? { x: sn.trueX, y: sn.trueY } : {}),
-			});
+			if (shouldPublish) {
+				cloudBaseline.ingest(base);
+				cloudRobust.ingest(base);
+			}
 		}
 
 		cloudBaseline.tick(nowMs);

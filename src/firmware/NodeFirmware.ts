@@ -27,6 +27,8 @@ export class NodeFirmware {
 	private lastAckMs = 0;
 	private lastRangePollMs = 0;
 	private lastHelloMs = 0;
+	private lastNeighborSignature: string = "";
+	private lastTopologyChangeMs = 0;
 	private lteCapable: boolean;
 	private leaderId: number | null = null;
 
@@ -49,11 +51,21 @@ export class NodeFirmware {
 		const now = this.hal.getTimeMs();
 		this.consumeRadio(now);
 		this.pruneStaleNeighbors(now);
+		this.detectTopologyChange(now);
 		this.maybeSendRangingPoll(now);
 		this.updateStateFromImu(now);
 		this.runLeaderElection(now);
 		this.maybeSendHello(now);
 		this.runGraphOptimization(dtMs);
+	}
+
+	private detectTopologyChange(now: number) {
+		const ids = Array.from(this.neighbors.keys()).sort((a, b) => a - b);
+		const sig = ids.join(",");
+		if (sig !== this.lastNeighborSignature) {
+			this.lastNeighborSignature = sig;
+			this.lastTopologyChangeMs = now;
+		}
 	}
 
 	private pruneStaleNeighbors(now: number) {
@@ -123,7 +135,17 @@ export class NodeFirmware {
 
 	///Send a ranging poll if enough time has passed since the last one
 	private maybeSendRangingPoll(now: number) {
-		const intervalMs = 1_000;
+		// Adaptive sensing:
+		// - When moving, poll frequently.
+		// - When stationary, poll frequently only if topology changed recently.
+		//   Otherwise, slow down to reduce churn.
+		const FAST_MS = 1_000;
+		const SLOW_MS = 10_000;
+		const TOPOLOGY_RECENT_MS = 5_000;
+
+		const isMoving = this.state === "MOVING";
+		const topologyRecentlyChanged = now - this.lastTopologyChangeMs <= TOPOLOGY_RECENT_MS;
+		const intervalMs = isMoving || topologyRecentlyChanged ? FAST_MS : SLOW_MS;
 		if (now - this.lastRangePollMs < intervalMs) return;
 		this.lastRangePollMs = now;
 		const degree = this.neighbors.size;
@@ -220,7 +242,16 @@ export class NodeFirmware {
 	}
 
 	private maybeSendHello(now: number) {
-		const intervalMs = 1_000;
+		// Keepalive HELLO:
+		// - Fast when moving/topology is changing.
+		// - Slow when stationary and stable, but still frequent enough to prevent
+		//   the whole network from going silent (and timing out into ISOLATED).
+		const FAST_MS = 1_000;
+		const SLOW_MS = 5_000;
+		const TOPOLOGY_RECENT_MS = 5_000;
+		const isMoving = this.state === "MOVING";
+		const topologyRecentlyChanged = now - this.lastTopologyChangeMs <= TOPOLOGY_RECENT_MS;
+		const intervalMs = isMoving || topologyRecentlyChanged ? FAST_MS : SLOW_MS;
 		if (now - this.lastHelloMs < intervalMs) return;
 		this.lastHelloMs = now;
 		const degree = this.neighbors.size;

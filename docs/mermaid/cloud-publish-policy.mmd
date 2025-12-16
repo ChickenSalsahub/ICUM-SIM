@@ -1,0 +1,22 @@
+flowchart TD
+  IN[Snapshot node state]
+  A{isAnchor?}
+  B{isMoving?}
+  C{first report?}
+  D{neighbor set changed?}
+  E{stale > staleMs?}
+
+  IN --> A
+  A -- yes --> PUB[Publish]
+  A -- no --> B
+  B -- yes --> PUB
+  B -- no --> C
+  C -- yes --> PUB
+  C -- no --> D
+  D -- yes --> PUB
+  D -- no --> E
+  E -- yes --> PUB
+  E -- no --> SKIP[Skip publish]
+
+  PUB -->|update tracker state| OUT[(ingest report into CloudBackend)]
+  SKIP -->|update neighbor signature only| OUT2[(no DB churn)]

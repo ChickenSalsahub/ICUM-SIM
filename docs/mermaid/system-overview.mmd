@@ -1,0 +1,13 @@
+flowchart LR
+  UI[React UI\n`src/App.tsx`]
+  ENGINE[Simulation Engine\n`src/engine/SimulationRunner.ts`]
+  FW[Firmware FSM\n`src/firmware/NodeFirmware.ts`]
+  CLOUD[Cloud Fusion\n`src/logic/CloudBackend.ts`]
+
+  UI -->|spawn/move/walls| ENGINE
+  ENGINE -->|HAL: IMU, radio RX, battery, time| FW
+  FW -->|HAL: radio TX| ENGINE
+  ENGINE -->|snapshot(): truth + firmware snapshot| UI
+
+  UI -->|periodic ingest()\n(raw reports)| CLOUD
+  CLOUD -->|fused records\n(topology/positions)| UI

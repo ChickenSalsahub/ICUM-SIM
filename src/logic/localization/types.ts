@@ -1,4 +1,4 @@
-import { Pose2D } from "../math/VectorUtils";
+import { Pose2D } from "../math/VectorUtils.ts";
 
 export interface IGlobalPosition {
 	lat: number;

@@ -1,5 +1,5 @@
-import { Vector2D, Pose2D, VectorUtils } from "../math/VectorUtils";
-import { IGlobalPosition, IRangeMeasurement, IOdometryMeasurement } from "./types";
+import { Vector2D, Pose2D, VectorUtils } from "../math/VectorUtils.ts";
+import { IGlobalPosition, IRangeMeasurement, IOdometryMeasurement } from "./types.ts";
 
 /**
  * Manages the relative positions of nodes in a local coordinate frame.

@@ -142,3 +142,68 @@ describe("Leader Election", () => {
 		expect(fw.getSnapshot().role).toBe("IDLE");
 	});
 });
+
+describe("Adaptive sensing cadence", () => {
+	it("slows ranging when stationary+stable, resumes on topology change", () => {
+		let now = 0;
+		let radioOut: Packet[] = [];
+		let inbound: Packet[] = [];
+		const hal: INodeHAL = {
+			getIMU: () => ({ accel: { x: 0, y: 0, z: 9.81 }, gyro: { x: 0, y: 0, z: 0 } }),
+			pollRadio: () => {
+				const items = inbound;
+				inbound = [];
+				return items;
+			},
+			getBatteryVoltage: () => 3.7,
+			getTimeMs: () => now,
+			radioSend: (p) => radioOut.push(p),
+			log: () => {},
+		};
+
+		const fw = new NodeFirmware(1, hal, { neighborTimeoutMs: 100_000, isolationNoAckMs: 100_000 });
+
+		// Introduce neighbor 2 at t=0 (topology change window begins).
+		inbound = [
+			{
+				id: "hello-2",
+				type: PacketType.DATA,
+				srcId: 2,
+				destId: -1,
+				payload: { type: "HELLO", batteryV: 4.0, degree: 1 },
+				timestamp: now,
+			},
+		];
+		fw.tick(100);
+
+		// At t=1000ms we should be in fast mode: send both HELLO and RANGING_POLL.
+		now = 1_000;
+		radioOut = [];
+		fw.tick(100);
+		expect(radioOut.some((p) => p.payload?.type === "RANGING_POLL")).toBe(true);
+		expect(radioOut.some((p) => p.payload?.type === "HELLO")).toBe(true);
+
+		// After topology recency window passes, ranging should be slowed (10s interval).
+		// At t=6001ms (only ~5s since last ranging poll), we should NOT see another ranging poll.
+		now = 6_001;
+		radioOut = [];
+		fw.tick(100);
+		expect(radioOut.some((p) => p.payload?.type === "RANGING_POLL")).toBe(false);
+
+		// Topology change (neighbor 3 appears) should immediately re-enable fast ranging.
+		now = 7_000;
+		inbound = [
+			{
+				id: "hello-3",
+				type: PacketType.DATA,
+				srcId: 3,
+				destId: -1,
+				payload: { type: "HELLO", batteryV: 4.0, degree: 1 },
+				timestamp: now,
+			},
+		];
+		radioOut = [];
+		fw.tick(100);
+		expect(radioOut.some((p) => p.payload?.type === "RANGING_POLL")).toBe(true);
+	});
+});
