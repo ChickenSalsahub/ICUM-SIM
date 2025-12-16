@@ -1394,19 +1394,35 @@ const App: React.FC = () => {
 									pointerEvents="none"
 								/>
 							))}
-						{links.map((l, i) => (
-							<line
-								key={i}
-								x1={l.source.x}
-								y1={l.source.y}
-								x2={l.target.x}
-								y2={l.target.y}
-								stroke="#475569"
-								strokeOpacity={0.3}
-								strokeWidth={1}
-								pointerEvents="none"
-							/>
-						))}
+						{links.map((l, i) => {
+							const midX = (l.source.x + l.target.x) / 2;
+							const midY = (l.source.y + l.target.y) / 2;
+							const distMeters = l.dist / PIXELS_PER_METER;
+							return (
+								<g key={i} style={{ pointerEvents: "none" }}>
+									<line
+										x1={l.source.x}
+										y1={l.source.y}
+										x2={l.target.x}
+										y2={l.target.y}
+										stroke="#475569"
+										strokeOpacity={0.3}
+										strokeWidth={1}
+									/>
+									<text
+										x={midX}
+										y={midY - 6}
+										fill="#cbd5e1"
+										fontSize="9"
+										fontFamily="monospace"
+										textAnchor="middle"
+										style={{ opacity: 0.8 }}
+									>
+										{distMeters.toFixed(2)}m
+									</text>
+								</g>
+							);
+						})}
 						{walls.map((w) => (
 							<line
 								key={w.id}

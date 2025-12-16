@@ -1,72 +1,16 @@
-# GitHub Copilot Instructions for ICUM-SIM
+# Copilot Instructions for ICUM-SIM
 
-## Project Overview
+- **Stack & commands**: React + TypeScript + Vite (SWC). `npm install`; `npm run dev` (https, basic-ssl), `npm run build` (`tsc -b` then vite), `npm run test` (vitest), `npm run lint` (eslint flat).
+- **Architecture split**: Firmware lives in `src/firmware` (pure TS, no React/DOM). Simulation engine lives in `src/engine` (world truth, physics, RF). UI should consume snapshots only.
+- **Firmware HAL**: `src/firmware/types.ts` defines `INodeHAL` (getIMU, pollRadio, getBatteryVoltage, getTimeMs, radioSend, log) plus firmware configs/snapshots. Firmware must not touch refs or DOM.
+- **NodeFirmware**: `src/firmware/NodeFirmware.ts` holds the FSM (STATIONARY/MOVING/ISOLATED via accel>0.5G), battery-aware leader election (LTE > degree > battery > ID), and graph relaxation cost `J = sum(lambda_d*e_dist^2 + lambda_theta*e_angle^2)` via gradient descent. Uses shared `Packet`/`NodeRole` types only.
+- **SimulationRunner**: `src/engine/SimulationRunner.ts` advances time headlessly, integrates physics (x,y + velocity), does RF propagation with LOS/wall blocking, UWB noise (sigma default 0.05m), and packet loss (default 10%). Owns per-node RX buffers and calls firmware `tick`.
+- **Experiments**: `src/experiments/runner.ts` runs A/B/C headlessly and writes `experiments.csv`. Update metrics there when refining paper results.
+- **Tests**: `src/firmware/__tests__/NodeFirmware.spec.ts` covers FSM accel threshold and leader election battery preference. Keep new tests deterministic (set IMU/radio inputs explicitly).
+- **Legacy UI**: `src/App.tsx` still uses refs + `gameLoop`. When integrating, replace internal physics/radio with `SimulationRunner.snapshot()`; avoid reintroducing state inside firmware.
+- **Units**: Firmware/engine operate in meters; legacy UI still mixes pixels (20 px/m). Convert consistently if bridging to App visuals.
+- **LOS/geometry**: Wall intersection helper duplicated in engine; centralize if you change LOS rules.
+- **Styling/UI**: Dark slate palette, inline styles, monospace metrics; keep `DraggableWindow` ordering (no portals) if adding windows.
+- **Pitfalls**: Forgetting to clear RX buffers will stall nodes; skipping LOS/noise inflates reach; mismatched units between UI and engine cause RMSE drift.
 
-ICUM-SIM is a visual simulator for Indoor Cooperative UWB (Ultra-Wideband) Mesh Networks. It simulates node behavior, packet exchange, ranging, and cooperative localization algorithms.
-
-**Tech Stack:**
-- **Frontend:** React 19, Vite 7, TypeScript 5.9
-- **Styling:** Tailwind CSS (implied by class names) / Lucide React icons
-- **Testing:** Vitest
-- **Linting:** ESLint
-
-## Architecture & Patterns
-
-### 1. Simulation Loop Pattern (Game Loop)
-The project uses a "Game Loop" architecture rather than typical React reactive patterns for the core simulation.
-
-- **Main Loop:** `App.tsx` contains the `requestAnimationFrame` loop.
-- **Tick System:** The loop calculates `dt` (delta time) and calls `.tick(dt)` on every `NodeFirmware` instance.
-- **State Management:**
-  - **Simulation State:** Stored in `useRef` (e.g., `nodesRef`, `packetsRef`) to allow mutable updates without triggering re-renders every frame.
-  - **UI State:** Synced from refs to React state (`useState`) periodically or on specific events for rendering.
-
-### 2. Component Separation
-- **`src/App.tsx` (Physics Engine):** The "God Object". Handles:
-  - Node movement, dragging, and wall intersection (`doIntersect`).
-  - Packet propagation (checking distance and Line-of-Sight).
-  - Rendering the canvas/map.
-- **`src/logic/NodeFirmware.ts` (Firmware):** Simulates the microcontroller code.
-  - **Responsibility:** State machine, packet processing, battery management, localization.
-  - **Constraint:** MUST NOT access global "physics" (like absolute positions of other nodes) directly. It interacts with the world via `HardwareInterface` (HAL).
-- **`src/logic/UWBRanging.ts`:** Simulates UWB hardware layer (distances, noise, wall attenuation).
-- **`src/logic/CloudBackend.ts`:** Simulates the cloud server receiving data from the gateway.
-
-### 3. Coordinate Systems
-- **Canvas Coordinates:** Pixels (x, y). Used for rendering and `App.tsx` physics.
-- **Physical Coordinates:** Meters. Used inside `NodeFirmware` and `CooperativeLocalization`.
-- **Conversion:** `PIXELS_PER_METER = 20` (defined in `App.tsx`). Always convert when passing data between UI and Logic.
-
-## Critical Workflows
-
-### Development
-- **Start:** `npm run dev`
-- **Build:** `npm run build`
-- **Lint:** `npm run lint`
-
-### Testing
-- **Runner:** Vitest
-- **Location:** `src/logic/**/__tests__/*.spec.ts`
-- **Command:** `npm test`
-- **Focus:** Test logic classes (`NodeFirmware`, `CooperativeLocalization`) in isolation from the React UI.
-
-## Coding Conventions
-
-### TypeScript
-- **Strict Typing:** Use interfaces from `src/types/index.ts`.
-- **No `any`:** Avoid `any` unless absolutely necessary for mocking.
-
-### Performance
-- **Avoid React Render Loop:** Do not put high-frequency simulation logic inside `useEffect` or `useState` setters. Use `useRef` and mutate objects.
-- **Batch Updates:** If multiple nodes update, batch the React state update to a single call per frame.
-
-### Simulation Logic
-- **Determinism:** Logic should be deterministic based on `dt`.
-- **Async:** `NodeFirmware` logic is synchronous `tick()`. Async behavior (network delays) is simulated by queuing packets.
-- **HAL Pattern:** `NodeFirmware` uses `HardwareInterface` callbacks (`onRx`, `onTxComplete`) to interact with the simulated radio.
-
-## New Feature Implementation Guide
-1.  **Define Types:** Add new packet types or node roles in `src/types/index.ts`.
-2.  **Update Firmware:** Implement logic in `src/logic/NodeFirmware.ts`. Use `this.hal` for I/O.
-3.  **Update Physics/UI:** Update `src/App.tsx` to handle new visual elements or physics interactions.
-4.  **Test:** Add unit tests in `src/logic/**/__tests__/`.
+Ask for clarification if architecture boundaries need tweaks.
