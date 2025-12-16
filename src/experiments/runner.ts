@@ -20,8 +20,9 @@ interface ExperimentBRow {
 interface ExperimentCTimeRow {
 	timeSeconds: number;
 	nodes: number;
-	tx: number;
-	rmse: number;
+	txPerNodePerMin: number;
+	ale: number;
+	convergenceMs?: number;
 }
 
 const areaSize = { width: 50, height: 50 };
@@ -53,6 +54,16 @@ function rmse(nodes: ReturnType<SimulationRunner["snapshot"]>["nodes"]) {
 }
 
 function mae(nodes: ReturnType<SimulationRunner["snapshot"]>["nodes"]) {
+	let sum = 0;
+	for (const node of nodes) {
+		const est = node.firmware.estPosition;
+		const err = Math.sqrt((est.x - node.trueX) ** 2 + (est.y - node.trueY) ** 2);
+		sum += err;
+	}
+	return sum / nodes.length;
+}
+
+function ale(nodes: ReturnType<SimulationRunner["snapshot"]>["nodes"]) {
 	let sum = 0;
 	for (const node of nodes) {
 		const est = node.firmware.estPosition;
@@ -119,13 +130,30 @@ function runExperimentC(): ExperimentCTimeRow[] {
 	for (const nodeCount of [5, 10, 20, 35, 50]) {
 		const runner = new SimulationRunner({ uwbNoiseSigma: 0.05 });
 		seedNodes(runner, makeSeed(nodeCount));
+		let previousAle = Number.POSITIVE_INFINITY;
+		let stableSamples = 0;
+		let convergenceMs: number | undefined;
 		for (let t = 0; t <= simSeconds * 1000; t += logEveryMs) {
 			const snap = runner.snapshot();
+			const totalTx = snap.nodes.reduce((sum, node) => sum + node.txCount, 0);
+			const currentAle = ale(snap.nodes);
+			const txPerNodePerMin = totalTx / nodeCount / (snap.timeMs / 60000 || 1); // avoid div by zero at t=0
+
+			if (convergenceMs === undefined) {
+				const delta = Math.abs(currentAle - previousAle);
+				stableSamples = delta < 0.01 ? stableSamples + 1 : 0;
+				if (stableSamples >= 5) {
+					convergenceMs = snap.timeMs;
+				}
+				previousAle = currentAle;
+			}
+
 			rows.push({
 				timeSeconds: t / 1000,
 				nodes: nodeCount,
-				tx: snap.nodes.reduce((sum, node) => sum + node.txCount, 0),
-				rmse: rmse(snap.nodes),
+				txPerNodePerMin,
+				ale: currentAle,
+				convergenceMs,
 			});
 			runner.step(logEveryMs);
 		}
@@ -158,7 +186,7 @@ export function main() {
 	write(
 		"experiments_C.csv",
 		headerC,
-		runExperimentC().map((r) => [r.timeSeconds, r.nodes, r.tx, r.rmse].join(","))
+		runExperimentC().map((r) => [r.timeSeconds, r.nodes, r.txPerNodePerMin, r.ale, r.convergenceMs ?? ""].join(","))
 	);
 }
 const isMain = () => import.meta.url === pathToFileURL(process.argv[1]).href;
