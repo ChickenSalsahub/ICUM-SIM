@@ -38,6 +38,7 @@ export interface INodeHAL {
 export interface FirmwareConfig {
 	accelMoveThresholdG: number;
 	isolationNoAckMs: number;
+	neighborTimeoutMs: number;
 	lambdaDistance: number;
 	lambdaAngle: number;
 	learningRate: number;

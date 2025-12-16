@@ -16,29 +16,148 @@ import {
 	TrendingDown,
 	BrickWall,
 } from "lucide-react";
-import { NodeFirmware } from "./logic/NodeFirmware";
 import { CloudBackend, FusedRecord } from "./logic/CloudBackend";
 import { DraggableWindow } from "./components/DraggableWindow";
-import {
-	NodeConfig,
-	LogEntry,
-	NodeRole,
-	NodeType,
-	Packet,
-	PacketType,
-	VisualPacket,
-	Wall,
-	HardwareInterface,
-} from "./types";
-import UWBRanging from "./logic/UWBRanging";
+import { NodeConfig, LogEntry, NodeRole, NodeType, Packet, PacketType, VisualPacket, Wall } from "./types";
+import { SimulationRunner } from "./engine/SimulationRunner";
 
 const PIXELS_PER_METER = 20;
 const CANVAS_WIDTH = 1200;
 const CANVAS_HEIGHT = 800;
 
+type Pose2D = { x: number; y: number; theta: number };
+
+type UiGlobalPosition = { lat: number; lng: number; alt?: number };
+
+class UiNode {
+	public id: number;
+	public type: NodeType;
+	public x: number;
+	public y: number;
+	public spawnX: number;
+	public spawnY: number;
+	public targetX: number;
+	public targetY: number;
+	public battery: number;
+	public role: NodeRole = NodeRole.IDLE;
+	// User-controlled motion mode (drives velocity in the engine).
+	public motionMode: "MOVING" | "STATIONARY" = "STATIONARY";
+	// Firmware-reported state (derived from IMU/connectivity).
+	public firmwareState: "MOVING" | "STATIONARY" | "ISOLATED" = "STATIONARY";
+	public nextHop: number | null = null;
+	public neighbors: Map<number, any> = new Map();
+
+	// UI-only flags
+	public isDragging = false;
+	public isGossiping = false;
+	public isElecting = false;
+	public isolationTimer = 0;
+
+	private globalPos: UiGlobalPosition | null = null;
+	private localGraph: Map<number, Pose2D> = new Map();
+	private estLocal: { x: number; y: number } | null = null;
+
+	constructor(id: number, type: NodeType, x: number, y: number) {
+		this.id = id;
+		this.type = type;
+		this.x = x;
+		this.y = y;
+		this.spawnX = x;
+		this.spawnY = y;
+		this.targetX = x;
+		this.targetY = y;
+		this.battery = 100;
+	}
+
+	public toggleMode() {
+		this.motionMode = this.motionMode === "MOVING" ? "STATIONARY" : "MOVING";
+	}
+
+	public setGlobalPosition(lat: number, lng: number) {
+		this.globalPos = { lat, lng };
+	}
+
+	public getEstimatedGlobalPosition() {
+		return this.globalPos;
+	}
+
+	public getEstimatedLocalPosition() {
+		return this.estLocal;
+	}
+
+	public getLocalGraph() {
+		return this.localGraph;
+	}
+
+	public updateFromEngine(opts: {
+		engineTimeMs?: number;
+		firmwareRole?: string;
+		firmwareState?: "STATIONARY" | "MOVING" | "ISOLATED";
+		estPosition?: { x: number; y: number };
+		neighbors?: Array<{ id: number; rangeMeters: number; angleRad?: number; timestamp?: number }>;
+	}) {
+		// Role semantics: keep HARDWARE_GW as ROOT for UI coloring.
+		if (this.type === "HARDWARE_GW") {
+			this.role = NodeRole.ROOT;
+		} else {
+			const r = opts.firmwareRole;
+			this.role =
+				r === "LEADER"
+					? NodeRole.LEADER
+					: r === "RELAY"
+					? NodeRole.RELAY
+					: r === "ISOLATED"
+					? NodeRole.ISOLATED
+					: NodeRole.IDLE;
+		}
+
+		if (opts.firmwareState) this.firmwareState = opts.firmwareState;
+		if (opts.estPosition) this.estLocal = { ...opts.estPosition };
+
+		// Build a minimal local graph for the ghost overlay:
+		// self at its firmware-estimated pose, neighbors placed via range+bearing in the same frame.
+		// This makes the (0,0) origin marker meaningful again.
+		this.localGraph = new Map();
+		const selfPose: Pose2D = {
+			x: opts.estPosition?.x ?? 0,
+			y: opts.estPosition?.y ?? 0,
+			theta: 0,
+		};
+		this.localGraph.set(this.id, selfPose);
+		const engineNow = opts.engineTimeMs;
+		const staleAfterMs = 2_000;
+		const freshNeighbors = (opts.neighbors ?? []).filter((n) => {
+			if (engineNow === undefined || n.timestamp === undefined) return true;
+			return engineNow - n.timestamp <= staleAfterMs;
+		});
+
+		this.neighbors = new Map();
+		for (const n of freshNeighbors) {
+			const angle = n.angleRad ?? 0;
+			const nx = selfPose.x + Math.cos(angle) * n.rangeMeters;
+			const ny = selfPose.y + Math.sin(angle) * n.rangeMeters;
+			this.localGraph.set(n.id, {
+				x: nx,
+				y: ny,
+				theta: 0,
+			});
+			this.neighbors.set(n.id, {
+				id: n.id,
+				role: NodeRole.IDLE,
+				battery: 0,
+				hopsToGw: 999,
+				lastSeen: Date.now(),
+				rssi: -60,
+				rangeMeters: n.rangeMeters,
+				aoa: n.angleRad,
+			});
+		}
+	}
+}
+
 interface Link {
-	source: NodeFirmware;
-	target: NodeFirmware;
+	source: UiNode;
+	target: UiNode;
 	dist: number;
 }
 
@@ -62,9 +181,9 @@ const doIntersect = (
 };
 
 const App: React.FC = () => {
-	const [nodes, setNodes] = useState<NodeFirmware[]>([]);
+	const [nodes, setNodes] = useState<UiNode[]>([]);
 	const [links, setLinks] = useState<Link[]>([]);
-	const [logs, setLogs] = useState<LogEntry[]>([]);
+	const [logs] = useState<LogEntry[]>([]);
 	const [packets, setPackets] = useState<Packet[]>([]);
 	const [visualPackets, setVisualPackets] = useState<VisualPacket[]>([]);
 	const [fusedRecords, setFusedRecords] = useState<FusedRecord[]>([]);
@@ -94,15 +213,15 @@ const App: React.FC = () => {
 		minClusterSize: 5,
 	});
 
-	const nodesRef = useRef<NodeFirmware[]>([]);
+	const nodesRef = useRef<UiNode[]>([]);
+	const runnerRef = useRef<SimulationRunner | null>(null);
 	const cloudBackendRef = useRef<CloudBackend>(new CloudBackend());
 	const visualPacketsRef = useRef<VisualPacket[]>([]);
 	const wallsRef = useRef<Wall[]>([]);
-	const uwbRef = useRef(new UWBRanging(PIXELS_PER_METER));
-	const prevOdomRef = useRef<Map<number, { x: number; y: number; t: number }>>(new Map());
 	const animationRef = useRef<number | undefined>(undefined);
 	const lastTimeRef = useRef<number>(0);
 	const energyTimerRef = useRef<number>(0);
+	const lastCloudTickRef = useRef<number>(0);
 
 	const [openWindows, setOpenWindows] = useState<number[]>([]);
 	const [windowOrder, setWindowOrder] = useState<number[]>([]);
@@ -111,46 +230,18 @@ const App: React.FC = () => {
 	const dragOffsetRef = useRef({ x: 0, y: 0 });
 	const svgRef = useRef<SVGSVGElement>(null);
 
-	// Global Ether Queue (Simulating the Air)
-	const txQueueRef = useRef<{ senderId: number; packet: Packet }[]>([]);
-
 	const [contextMenu, setContextMenu] = useState<{ x: number; y: number; nodeId: number } | null>(null);
 
-	const createNode = (id: number, type: NodeType, x: number, y: number) => {
-		prevOdomRef.current.set(id, { x, y, t: Date.now() });
-
-		const hal: HardwareInterface = {
-			radioSend: (packet) => {
-				txQueueRef.current.push({ senderId: id, packet });
-				// Simulate TX Complete callback immediately or next tick?
-				// For now, we assume fire-and-forget or immediate completion
-			},
-			getTimeMs: () => Date.now(),
-			getRandom: () => Math.random(),
-			isMoving: () => {
-				const node = nodesRef.current.find((n) => n.id === id);
-				if (!node) return false;
-				const dist = Math.sqrt(Math.pow(node.targetX - node.x, 2) + Math.pow(node.targetY - node.y, 2));
-				return dist > 10.0;
-			},
-			getOdometryMeters: () => {
-				const now = Date.now();
-				const node = nodesRef.current.find((n) => n.id === id);
-				if (!node) return { dx: 0, dy: 0, dTheta: 0, timestamp: now };
-
-				const prev = prevOdomRef.current.get(id) || { x: node.x, y: node.y, t: now };
-				const dxPx = node.x - prev.x;
-				const dyPx = node.y - prev.y;
-				prevOdomRef.current.set(id, { x: node.x, y: node.y, t: now });
-
-				return { dx: dxPx / PIXELS_PER_METER, dy: dyPx / PIXELS_PER_METER, dTheta: 0, timestamp: now };
-			},
-			log: (_msg) => {
-				// console.log(`[Node ${id}] ${msg}`);
-			},
-		};
-		return new NodeFirmware(id, type, x, y, hal);
-	};
+	const ensureRunner = useCallback(() => {
+		if (runnerRef.current) return runnerRef.current;
+		const runner = new SimulationRunner({
+			uwbRangeMeters: config.uwbRange,
+			uwbNoiseSigma: 0.05,
+			packetLoss: 0.1,
+		});
+		runnerRef.current = runner;
+		return runner;
+	}, [config.uwbRange]);
 
 	useEffect(() => {
 		nodesRef.current = nodes;
@@ -160,15 +251,9 @@ const App: React.FC = () => {
 	}, [walls]);
 
 	useEffect(() => {
-		const initial: NodeFirmware[] = [];
+		const initial: UiNode[] = [];
 		setNodes(initial);
 		nodesRef.current = initial;
-	}, []);
-
-	const addLog = useCallback((msg: string, type: LogEntry["type"], category: LogEntry["category"]) => {
-		const time = new Date().toLocaleTimeString().split(" ")[0];
-		const entry: LogEntry = { id: Math.random().toString(36), time, msg, type, category };
-		setLogs((prev) => [entry, ...prev].slice(0, 100));
 	}, []);
 
 	const capturePacket = useCallback((p: Packet) => {
@@ -223,114 +308,112 @@ const App: React.FC = () => {
 				})
 				.filter((vp): vp is VisualPacket => vp !== null && vp.progress < 1.0);
 
-			// 2. ETHER & PHYSICS
-			while (txQueueRef.current.length > 0) {
-				const item = txQueueRef.current.shift();
-				if (!item) continue;
+			// 2. ENGINE STEP (physics + firmware + RF)
+			const runner = ensureRunner();
+			runner.setUwbRangeMeters(config.uwbRange);
+			runner.setWalls(
+				currentWalls.map((w) => ({
+					...w,
+					x1: w.x1 / PIXELS_PER_METER,
+					y1: w.y1 / PIXELS_PER_METER,
+					x2: w.x2 / PIXELS_PER_METER,
+					y2: w.y2 / PIXELS_PER_METER,
+				}))
+			);
 
-				const sender = currentNodes.find((n) => n.id === item.senderId);
-				if (!sender) continue;
-
-				const packet = item.packet;
-				capturePacket(packet);
-
-				// Visuals
-				if (packet.destId === -1) {
-					newVisuals.push({
-						id: Math.random().toString(),
-						packet: packet,
-						x: sender.x,
-						y: sender.y,
-						startX: sender.x,
-						startY: sender.y,
-						targetId: -1,
-						progress: 0,
-						speed: packet.type === PacketType.DATA ? 2.5 : 2.0,
-						style: "RING",
-						maxRadius: rangePx,
-					});
-				}
-
-				// Propagation
-				currentNodes.forEach((receiver) => {
-					if (sender.id === receiver.id) return;
-					if (packet.destId !== -1 && packet.destId !== receiver.id) return;
-
-					const dist = Math.sqrt(Math.pow(sender.x - receiver.x, 2) + Math.pow(sender.y - receiver.y, 2));
-
-					if (dist <= rangePx) {
-						let blocked = false;
-						for (const w of currentWalls) {
-							if (
-								doIntersect(
-									{ x: sender.x, y: sender.y },
-									{ x: receiver.x, y: receiver.y },
-									{ x: w.x1, y: w.y1 },
-									{ x: w.x2, y: w.y2 }
-								)
-							) {
-								blocked = true;
-								break;
-							}
-						}
-
-						if (!blocked) {
-							// Packet Loss (10%)
-							if (Math.random() > 0.1) {
-								// Ranging Simulation
-								if (packet.payload?.type === "RANGING_POLL") {
-									const measurement = uwbRef.current.measure(
-										{ id: sender.id, x: sender.x, y: sender.y },
-										{ id: receiver.id, x: receiver.x, y: receiver.y },
-										{ pixelsPerMeter: PIXELS_PER_METER, maxRangeMeters: config.uwbRange, walls: currentWalls }
-									);
-
-									if (measurement.success) {
-										const responsePacket: Packet = {
-											id: `resp-${receiver.id}-${sender.id}-${Date.now()}`,
-											type: PacketType.DATA,
-											srcId: receiver.id,
-											destId: sender.id,
-											payload: {
-												type: "RANGING_RESPONSE",
-												distance: measurement.measuredDistanceMeters,
-												aoa: measurement.aoa,
-												aod: measurement.aod,
-												tof: measurement.timeOfFlightSeconds,
-												los: measurement.los,
-											},
-											timestamp: Date.now(),
-										};
-
-										// Schedule Response
-										setTimeout(() => {
-											txQueueRef.current.push({ senderId: receiver.id, packet: responsePacket });
-										}, 10);
-									}
-								} else {
-									// Normal Delivery
-									if (receiver.hal.onRx) {
-										receiver.hal.onRx(packet);
-									}
-								}
-
-								if (packet.destId !== -1) {
-									newVisuals.push({
-										id: Math.random().toString(),
-										packet: packet,
-										x: sender.x,
-										y: sender.y,
-										startX: sender.x,
-										startY: sender.y,
-										targetId: receiver.id,
-										progress: 0,
-										speed: 2.5,
-										style: "LINE",
-									});
-								}
-							}
-						}
+			runner.setHooks({
+				onTx: ({ packet, senderPos }) => {
+					capturePacket(packet);
+					if (packet.destId === -1) {
+						newVisuals.push({
+							id: Math.random().toString(),
+							packet,
+							x: senderPos.x * PIXELS_PER_METER,
+							y: senderPos.y * PIXELS_PER_METER,
+							startX: senderPos.x * PIXELS_PER_METER,
+							startY: senderPos.y * PIXELS_PER_METER,
+							targetId: -1,
+							progress: 0,
+							speed: packet.type === PacketType.DATA ? 2.5 : 2.0,
+							style: "RING",
+							maxRadius: rangePx,
+						});
 					}
+				},
+				onDeliver: ({ packet, senderPos }) => {
+					if (packet.destId !== -1) {
+						newVisuals.push({
+							id: Math.random().toString(),
+							packet,
+							x: senderPos.x * PIXELS_PER_METER,
+							y: senderPos.y * PIXELS_PER_METER,
+							startX: senderPos.x * PIXELS_PER_METER,
+							startY: senderPos.y * PIXELS_PER_METER,
+							targetId: packet.destId,
+							progress: 0,
+							speed: 2.5,
+							style: "LINE",
+						});
+					}
+				},
+			});
+
+			// Drive desired motion via velocities; engine integrates true position.
+			let totalBat = 0;
+			for (const node of currentNodes) {
+				node.isDragging = node.id === draggedNodeIdRef.current;
+				if (node.role === NodeRole.ISOLATED) node.isolationTimer += deltaTime;
+				else node.isolationTimer = 0;
+
+				// Sync current UI pose into engine (dragging or external edits).
+				runner.setNodePose(node.id, { x: node.x / PIXELS_PER_METER, y: node.y / PIXELS_PER_METER });
+
+				// Map UI battery percent (0..100) to a plausible Li-ion voltage range.
+				// This voltage is what firmware uses for leader election.
+				const batteryV = 3.0 + 1.2 * Math.max(0, Math.min(1, node.battery / 100));
+				runner.setNodeBatteryV(node.id, batteryV);
+
+				let vxMps = 0;
+				let vyMps = 0;
+				if (node.motionMode === "MOVING" && !node.isDragging) {
+					const dist = Math.sqrt(Math.pow(node.targetX - node.x, 2) + Math.pow(node.targetY - node.y, 2));
+					if (dist < 10) {
+						node.targetX = Math.random() * 1100 + 50;
+						node.targetY = Math.random() * 700 + 50;
+					} else {
+						node.battery = Math.max(0, node.battery - 0.01 * deltaTime);
+						const speedPxPerSec = config.movingSpeed * 100;
+						const vxPx = ((node.targetX - node.x) / dist) * speedPxPerSec;
+						const vyPx = ((node.targetY - node.y) / dist) * speedPxPerSec;
+						vxMps = vxPx / PIXELS_PER_METER;
+						vyMps = vyPx / PIXELS_PER_METER;
+					}
+				}
+				runner.setNodeVelocity(node.id, { vx: vxMps, vy: vyMps });
+				totalBat += node.battery;
+			}
+
+			runner.step(deltaTime * 1000);
+			const snap = runner.snapshot();
+			for (const sn of snap.nodes) {
+				const node = currentNodes.find((n) => n.id === sn.id);
+				if (!node) continue;
+				if (!node.isDragging) {
+					node.x = sn.trueX * PIXELS_PER_METER;
+					node.y = sn.trueY * PIXELS_PER_METER;
+					// keep target position unless we auto-rerolled it above
+				}
+				node.updateFromEngine({
+					engineTimeMs: snap.timeMs,
+					firmwareRole: sn.firmware.role,
+					firmwareState: sn.firmware.state,
+					estPosition: sn.firmware.estPosition,
+					neighbors: sn.firmware.neighbors.map((nb) => ({
+						id: nb.id,
+						rangeMeters: nb.rangeMeters,
+						angleRad: nb.angleRad,
+						timestamp: nb.timestamp,
+					})),
 				});
 			}
 
@@ -357,79 +440,25 @@ const App: React.FC = () => {
 			});
 			setLinks(newLinks);
 
-			// 4. FIRMWARE & PHYSICS
-			let totalBat = 0;
-			currentNodes.forEach((node) => {
-				node.isDragging = node.id === draggedNodeIdRef.current;
-
-				// Physics Update
-				if (node.state === "MOVING" && !node.isDragging) {
-					const dist = Math.sqrt(Math.pow(node.targetX - node.x, 2) + Math.pow(node.targetY - node.y, 2));
-					if (dist < 10) {
-						node.targetX = Math.random() * 1100 + 50;
-						node.targetY = Math.random() * 700 + 50;
-					} else {
-						node.battery = Math.max(0, node.battery - 0.01 * deltaTime);
-						const moveStep = config.movingSpeed * 100 * deltaTime;
-						node.x += ((node.targetX - node.x) / dist) * moveStep;
-						node.y += ((node.targetY - node.y) / dist) * moveStep;
-					}
-				}
-
-				// Firmware Tick
-				node.tick(deltaTime);
-				totalBat += node.battery;
-
-				// Cloud Ingestion
-				if (node.role === NodeRole.ROOT || node.role === NodeRole.LEADER) {
-					// 1. Gateway/Leader's Own Sightings
-					while (node.sightingQueue.length > 0) {
-						const sighting = node.sightingQueue.shift();
-						if (sighting) {
-							cloudBackendRef.current.ingest({
-								nodeId: node.id,
-								timestamp: sighting.timestamp,
-								neighbors: [{ id: sighting.targetId, range: sighting.distance }],
-								battery: node.battery,
-								x: node.x / PIXELS_PER_METER,
-								y: node.y / PIXELS_PER_METER,
-								status: node.state,
-							});
-						}
-					}
-
-					// 2. Forwarded Reports from Mesh (Gossip)
-					while (node.cloudQueue.length > 0) {
-						const report = node.cloudQueue.shift();
-						if (report) {
-							cloudBackendRef.current.ingest({
-								nodeId: report.nodeId,
-								timestamp: report.timestamp,
-								neighbors: report.neighbors,
-								battery: report.battery,
-							});
-						}
-					}
-				} else if (node.role === NodeRole.ISOLATED) {
-					// Internet fallback: isolated node reports its own pose directly
+			// 4. CLOUD BACKEND (fuse snapshots every ~1s)
+			const nowMs = Date.now();
+			if (nowMs - lastCloudTickRef.current > 250) {
+				lastCloudTickRef.current = nowMs;
+				for (const sn of snap.nodes) {
+					const node = currentNodes.find((n) => n.id === sn.id);
+					if (!node) continue;
 					cloudBackendRef.current.ingest({
 						nodeId: node.id,
-						timestamp: Date.now(),
-						x: node.x / PIXELS_PER_METER,
-						y: node.y / PIXELS_PER_METER,
+						timestamp: nowMs,
 						battery: node.battery,
-						status: node.state,
+						status: node.firmwareState === "ISOLATED" ? "STATIONARY" : node.firmwareState,
+						neighbors: sn.firmware.neighbors.map((nb) => ({ id: nb.id, range: nb.rangeMeters, aoa: nb.angleRad })),
+						...(node.type === "HARDWARE_GW" ? { x: sn.trueX, y: sn.trueY } : {}),
 					});
-				} else {
-					// Non-Gateway nodes just clear their local sighting queue (simulating storage limit)
-					// In reality, they would aggregate these into the GOSSIP packet sent in runAnchorLogic
-					if (node.sightingQueue.length > 50) node.sightingQueue.shift();
 				}
-			});
-
-			// 5. CLOUD BACKEND TICK
-			if (cloudBackendRef.current.tick(Date.now())) {
-				setFusedRecords([...cloudBackendRef.current.getRecords()]);
+				if (cloudBackendRef.current.tick(nowMs)) {
+					setFusedRecords([...cloudBackendRef.current.getRecords()]);
+				}
 			}
 
 			// 6. ENERGY
@@ -444,7 +473,7 @@ const App: React.FC = () => {
 			setNodes([...currentNodes]);
 			animationRef.current = requestAnimationFrame(gameLoop);
 		},
-		[isPlaying, config, addLog, capturePacket]
+		[isPlaying, config, capturePacket, ensureRunner]
 	);
 
 	useEffect(() => {
@@ -504,6 +533,11 @@ const App: React.FC = () => {
 				node.y = mouseY - dragOffsetRef.current.y;
 				node.targetX = node.x;
 				node.targetY = node.y;
+				const runner = runnerRef.current;
+				if (runner) {
+					runner.setNodePose(node.id, { x: node.x / PIXELS_PER_METER, y: node.y / PIXELS_PER_METER });
+					runner.setNodeVelocity(node.id, { vx: 0, vy: 0 });
+				}
 				setNodes([...nodesRef.current]);
 			}
 		}
@@ -551,7 +585,17 @@ const App: React.FC = () => {
 	// Actions
 	const spawn = (type: NodeType) => {
 		const maxId = nodesRef.current.length > 0 ? Math.max(...nodesRef.current.map((n) => n.id)) : 0;
-		const n = createNode(maxId + 1, type, Math.random() * 1000 + 50, Math.random() * 700 + 50);
+		const x = Math.random() * 1000 + 50;
+		const y = Math.random() * 700 + 50;
+		const n = new UiNode(maxId + 1, type, x, y);
+		const runner = ensureRunner();
+		runner.addNode(
+			n.id,
+			{ x: x / PIXELS_PER_METER, y: y / PIXELS_PER_METER },
+			{ vx: 0, vy: 0 },
+			3.7,
+			type === "HARDWARE_GW"
+		);
 		setNodes((prev) => [...prev, n]);
 		nodesRef.current = [...nodesRef.current, n];
 	};
@@ -566,7 +610,8 @@ const App: React.FC = () => {
 	const nukeAll = () => {
 		setNodes([]);
 		nodesRef.current = [];
-		prevOdomRef.current.clear();
+		runnerRef.current = null;
+		cloudBackendRef.current = new CloudBackend();
 		setOpenWindows([]);
 		setWalls([]);
 	};
@@ -579,7 +624,7 @@ const App: React.FC = () => {
 	const closeNodeWindow = (id: string | number) => setOpenWindows((prev) => prev.filter((w) => w !== id));
 	const focusWindow = (id: string | number) =>
 		setWindowOrder((prev) => [...prev.filter((w) => w !== Number(id)), Number(id)]);
-	const getNodeColor = (n: NodeFirmware) => {
+	const getNodeColor = (n: UiNode) => {
 		if (n.role === NodeRole.ISOLATED && n.isolationTimer > config.isolationTimeout) return "#ef4444";
 		if (n.role === NodeRole.ISOLATED) return "#f59e0b";
 		if (n.role === NodeRole.ROOT) return "#a855f7";
@@ -674,12 +719,6 @@ const App: React.FC = () => {
 				const node = nodesRef.current.find((n) => n.id === contextMenu.nodeId);
 				if (node) {
 					node.setGlobalPosition(lat, lng);
-
-					// Hack: Tell the Gateway about this anchor so it can compute the graph
-					const gateway = nodesRef.current.find((n) => n.type === "HARDWARE_GW");
-					if (gateway && gateway.id !== node.id) {
-						gateway.coopLoc.addExternalAnchor(node.id, lat, lng);
-					}
 				}
 			}
 		}
@@ -1293,15 +1332,13 @@ const App: React.FC = () => {
 							const selfPose = localGraph.get(node.id);
 							if (!selfPose) return null;
 
-							// Calculate Screen Position of Local Origin (0,0)
-							const originRelX = 0 - selfPose.x;
-							const originRelY = 0 - selfPose.y;
-							const originScreenX = node.x + originRelX * PIXELS_PER_METER;
-							const originScreenY = node.y + originRelY * PIXELS_PER_METER;
+							// Ghost origin = where this node started (spawn position) in screen coordinates.
+							const originScreenX = node.spawnX;
+							const originScreenY = node.spawnY;
 
 							return (
 								<g key={`ghost-group-${node.id}`}>
-									{/* LOCAL ORIGIN MARKER */}
+									{/* GHOST ORIGIN MARKER (spawn position) */}
 									<g style={{ pointerEvents: "none" }}>
 										<line
 											x1={originScreenX - 5}
@@ -1557,7 +1594,7 @@ const App: React.FC = () => {
 										fontFamily="monospace"
 										pointerEvents="none"
 									>
-										{n.state}
+										{n.firmwareState}
 									</text>
 									<g transform="translate(12, 12)">
 										<rect x="0" y="0" width="16" height="8" rx="2" fill="#020617" stroke="#475569" strokeWidth="1" />

@@ -26,8 +26,8 @@ export class NodeFirmware {
 	private neighbors: Map<number, NeighborState> = new Map();
 	private lastAckMs = 0;
 	private lastRangePollMs = 0;
+	private lastHelloMs = 0;
 	private lteCapable: boolean;
-	private hopsToGw = Number.POSITIVE_INFINITY;
 	private leaderId: number | null = null;
 
 	constructor(id: number, hal: INodeHAL, cfg?: Partial<FirmwareConfig>, opts?: { lteCapable?: boolean }) {
@@ -36,6 +36,7 @@ export class NodeFirmware {
 		this.cfg = {
 			accelMoveThresholdG: 0.5,
 			isolationNoAckMs: 30_000,
+			neighborTimeoutMs: 5_000,
 			lambdaDistance: 1.0,
 			lambdaAngle: 0.5,
 			learningRate: 0.2, // spring-relaxation step (matches paper's α)
@@ -47,10 +48,19 @@ export class NodeFirmware {
 	public tick(dtMs: number) {
 		const now = this.hal.getTimeMs();
 		this.consumeRadio(now);
+		this.pruneStaleNeighbors(now);
 		this.maybeSendRangingPoll(now);
 		this.updateStateFromImu(now);
 		this.runLeaderElection(now);
+		this.maybeSendHello(now);
 		this.runGraphOptimization(dtMs);
+	}
+
+	private pruneStaleNeighbors(now: number) {
+		const timeoutMs = this.cfg.neighborTimeoutMs;
+		for (const [id, n] of this.neighbors.entries()) {
+			if (now - n.lastSeenMs > timeoutMs) this.neighbors.delete(id);
+		}
 	}
 	// Handle incoming radio packets
 	private consumeRadio(now: number) {
@@ -58,6 +68,8 @@ export class NodeFirmware {
 		for (const p of packets) {
 			//skip packets not addressed to this node or broadcast
 			if (p.destId !== -1 && p.destId !== this.id) continue;
+			// Any successful reception implies connectivity (prevents everyone timing out into ISOLATED)
+			if (p.srcId !== this.id) this.lastAckMs = now;
 			if (p.type === PacketType.DATA && p.payload?.type === "HELLO") this.recordNeighborObservation(p, now);
 
 			//Ranging packets
@@ -66,12 +78,20 @@ export class NodeFirmware {
 
 				//if someone asked us for ranging, respond
 				if (p.payload?.type === "RANGING_POLL" && p.srcId !== this.id) {
+					const degree = this.neighbors.size;
 					const resp: Packet = {
 						id: `${this.id}-resp-${p.id}`,
 						type: PacketType.DATA,
 						srcId: this.id,
 						destId: p.srcId,
-						payload: { type: "RANGING_RESP", range: 0, angle: 0 },
+						payload: {
+							type: "RANGING_RESP",
+							range: 0,
+							angle: 0,
+							degree,
+							batteryV: this.hal.getBatteryVoltage(),
+							lteCapable: this.lteCapable,
+						},
 						timestamp: now,
 					};
 					this.hal.radioSend(resp);
@@ -87,17 +107,18 @@ export class NodeFirmware {
 	//Record or update a neighbor observation
 	//neighbor observation is a record of a neighboring node's state as observed by this node
 	private recordNeighborObservation(p: Packet, now: number) {
-		const obs: NeighborState = {
+		const prev = this.neighbors.get(p.srcId);
+		const next: NeighborState = {
 			id: p.srcId,
-			rangeMeters: p.payload?.range ?? p.payload?.rangeMeters ?? 0,
-			angleRad: p.payload?.angle,
+			rangeMeters: p.payload?.range ?? p.payload?.rangeMeters ?? prev?.rangeMeters ?? 0,
+			angleRad: p.payload?.angle ?? prev?.angleRad,
 			timestamp: now,
 			lastSeenMs: now,
-			batteryV: p.payload?.batteryV,
-			degree: p.payload?.degree,
-			lteCapable: p.payload?.lteCapable,
+			batteryV: p.payload?.batteryV ?? prev?.batteryV,
+			degree: p.payload?.degree ?? prev?.degree,
+			lteCapable: p.payload?.lteCapable ?? prev?.lteCapable,
 		};
-		this.neighbors.set(p.srcId, obs);
+		this.neighbors.set(p.srcId, next);
 	}
 
 	///Send a ranging poll if enough time has passed since the last one
@@ -105,12 +126,20 @@ export class NodeFirmware {
 		const intervalMs = 1_000;
 		if (now - this.lastRangePollMs < intervalMs) return;
 		this.lastRangePollMs = now;
+		const degree = this.neighbors.size;
 		const poll: Packet = {
 			id: `${this.id}-poll-${now}`,
 			type: PacketType.DATA,
 			srcId: this.id,
 			destId: -1,
-			payload: { type: "RANGING_POLL", range: 0, angle: 0 },
+			payload: {
+				type: "RANGING_POLL",
+				range: 0,
+				angle: 0,
+				degree,
+				batteryV: this.hal.getBatteryVoltage(),
+				lteCapable: this.lteCapable,
+			},
 			timestamp: now,
 		};
 		this.hal.radioSend(poll);
@@ -119,24 +148,47 @@ export class NodeFirmware {
 	///Update the node's state based on IMU readings
 	private updateStateFromImu(now: number) {
 		const imu = this.hal.getIMU();
-		const accelMag = Math.sqrt(imu.accel.x ** 2 + imu.accel.y ** 2 + imu.accel.z ** 2);
-		const accelG = accelMag / 9.81;
+		// Treat IMU accel as including gravity; classify motion by linear acceleration magnitude.
+		const linAx = imu.accel.x;
+		const linAy = imu.accel.y;
+		const linAz = imu.accel.z - 9.81;
+		const linAccelMag = Math.sqrt(linAx ** 2 + linAy ** 2 + linAz ** 2);
+		const linAccelG = linAccelMag / 9.81;
 
-		const isMoving = accelG > this.cfg.accelMoveThresholdG;
+		const isMoving = linAccelG > this.cfg.accelMoveThresholdG;
+		const disconnected = now - this.lastAckMs > this.cfg.isolationNoAckMs;
+
+		// Isolation is a connectivity state: it can happen whether moving or stationary.
+		if (disconnected) {
+			this.state = "ISOLATED";
+			return;
+		}
+
+		// If we were isolated and connectivity is back, recover based on IMU.
+		if (this.state === "ISOLATED") {
+			this.state = isMoving ? "MOVING" : "STATIONARY";
+			return;
+		}
+
+		// Normal motion classification.
 		if (isMoving) {
 			this.state = "MOVING";
 		} else if (this.state === "MOVING") {
 			this.state = "STATIONARY";
 		}
-
-		if (this.state === "MOVING" && now - this.lastAckMs > this.cfg.isolationNoAckMs) {
-			this.state = "ISOLATED";
-		}
 	}
 
 	///if this node is the best candidate for leader, set role to LEADER, else RELAY or ISOLATED
-	private runLeaderElection(now: number) {
+	private runLeaderElection(_now: number) {
 		const degree = this.neighbors.size;
+
+		// A node with no neighbors should not claim cluster leadership.
+		// Keep it IDLE (or ISOLATED if disconnected) until it has at least one neighbor.
+		if (degree === 0) {
+			this.leaderId = null;
+			this.role = this.state === "ISOLATED" ? NodeRole.ISOLATED : NodeRole.IDLE;
+			return;
+		}
 		const score = (input: LeaderScoreInput) => {
 			return (
 				(input.lteCapable ? 1 : 0) * 1_000_000 + input.degree * 10_000 + input.batteryV * 1_000 + (10_000 - input.id)
@@ -165,9 +217,13 @@ export class NodeFirmware {
 		this.leaderId = best.id;
 		this.role = best.id === this.id ? NodeRole.LEADER : NodeRole.RELAY;
 		if (this.state === "ISOLATED") this.role = NodeRole.ISOLATED;
+	}
 
-		// Broadcast HELLO with minimal status
-		//this is how nodes inform neighbors of their status
+	private maybeSendHello(now: number) {
+		const intervalMs = 1_000;
+		if (now - this.lastHelloMs < intervalMs) return;
+		this.lastHelloMs = now;
+		const degree = this.neighbors.size;
 		const hello: Packet = {
 			id: `${this.id}-hello-${now}`,
 			type: PacketType.DATA,

@@ -1,6 +1,7 @@
 import { NodeFirmware } from "../firmware/NodeFirmware.ts";
 import { INodeHAL, ImuSample, FirmwareSnapshot } from "../firmware/types.ts";
 import { Packet, Wall } from "../types/index.ts";
+import UWBRanging from "../logic/UWBRanging.ts";
 
 interface NodeWorldState {
 	id: number;
@@ -33,22 +34,60 @@ export interface SimulationOptions {
 	packetLoss?: number; // 0..1
 }
 
+export interface SimulationHooks {
+	onTx?: (evt: { timeMs: number; senderId: number; packet: Packet; senderPos: { x: number; y: number } }) => void;
+	onDeliver?: (evt: {
+		timeMs: number;
+		senderId: number;
+		recipientId: number;
+		packet: Packet;
+		senderPos: { x: number; y: number };
+		recipientPos: { x: number; y: number };
+		ranging?: {
+			trueDistanceMeters: number;
+			measuredDistanceMeters: number;
+			aoa?: number;
+			aod?: number;
+			los: boolean;
+		};
+	}) => void;
+}
+
 export class SimulationRunner {
 	private nodes: NodeWorldState[] = [];
 	private timeMs = 0;
 	private walls: Wall[] = [];
-	private readonly uwbRangeMeters: number;
-	private readonly uwbNoiseSigma: number;
-	private readonly packetLoss: number;
+	private uwbRangeMeters: number;
+	private packetLoss: number;
+	private readonly uwb: UWBRanging;
+	private hooks: SimulationHooks | undefined;
 
 	constructor(opts?: SimulationOptions) {
 		this.uwbRangeMeters = opts?.uwbRangeMeters ?? 15;
-		this.uwbNoiseSigma = opts?.uwbNoiseSigma ?? 0.0;
 		this.packetLoss = opts?.packetLoss ?? 0.1;
+		// Share the same stochastic UWB model as the UI.
+		// Engine units are meters, so treat them as "pixels" with pixelsPerMeter=1.
+		this.uwb = new UWBRanging(1, { noiseStdMeters: opts?.uwbNoiseSigma ?? 0.05 });
 	}
 
-	public addWall(w: Wall) {
-		this.walls.push(w);
+	public setHooks(hooks: SimulationHooks | undefined) {
+		this.hooks = hooks;
+	}
+
+	public setUwbRangeMeters(rangeMeters: number) {
+		this.uwbRangeMeters = rangeMeters;
+	}
+
+	public setPacketLoss(packetLoss: number) {
+		this.packetLoss = packetLoss;
+	}
+
+	public setWalls(walls: Wall[]) {
+		this.walls = [...walls];
+	}
+
+	public addWall(wall: Wall) {
+		this.walls.push(wall);
 	}
 
 	public addNode(
@@ -59,6 +98,7 @@ export class SimulationRunner {
 		hasLte = false
 	) {
 		const incoming: Packet[] = [];
+		let nodeState: NodeWorldState;
 		const hal: INodeHAL = {
 			getIMU: () => this.syntheticImu(id),
 			pollRadio: () => {
@@ -66,7 +106,7 @@ export class SimulationRunner {
 				incoming.length = 0;
 				return items;
 			},
-			getBatteryVoltage: () => batteryV,
+			getBatteryVoltage: () => nodeState.batteryV,
 			getTimeMs: () => this.timeMs,
 			radioSend: (packet) => this.handleTx(id, packet),
 			log: (_msg) => {
@@ -75,7 +115,7 @@ export class SimulationRunner {
 		};
 
 		const fw = new NodeFirmware(id, hal, undefined, { lteCapable: hasLte });
-		this.nodes.push({
+		nodeState = {
 			id,
 			firmware: fw,
 			x: pos.x,
@@ -86,19 +126,42 @@ export class SimulationRunner {
 			hasLte,
 			incoming,
 			txCount: 0,
-		});
+		};
+		this.nodes.push(nodeState);
+	}
+
+	public setNodeBatteryV(id: number, batteryV: number) {
+		const node = this.nodes.find((n) => n.id === id);
+		if (!node) return;
+		node.batteryV = batteryV;
+	}
+
+	public setNodePose(id: number, pos: { x: number; y: number }) {
+		const node = this.nodes.find((n) => n.id === id);
+		if (!node) return;
+		node.x = pos.x;
+		node.y = pos.y;
+	}
+
+	public setNodeVelocity(id: number, velocity: { vx: number; vy: number }) {
+		const node = this.nodes.find((n) => n.id === id);
+		if (!node) return;
+		node.vx = velocity.vx;
+		node.vy = velocity.vy;
+	}
+
+	public getNodeIds(): number[] {
+		return this.nodes.map((n) => n.id);
 	}
 
 	public step(dtMs: number) {
 		this.timeMs += dtMs;
 
-		// Physics integration
 		for (const node of this.nodes) {
 			node.x += (node.vx * dtMs) / 1000;
 			node.y += (node.vy * dtMs) / 1000;
 		}
 
-		// Advance firmware
 		for (const node of this.nodes) {
 			node.firmware.tick(dtMs);
 		}
@@ -109,124 +172,82 @@ export class SimulationRunner {
 		if (!node) {
 			return { accel: { x: 0, y: 0, z: 9.81 }, gyro: { x: 0, y: 0, z: 0 } };
 		}
-		const accelMag = Math.sqrt(node.vx * node.vx + node.vy * node.vy) * 0.1;
+		// Provide a synthetic *linear* acceleration cue for motion detection.
+		// Firmware subtracts gravity internally, so we embed gravity in z and add a bump in x when moving.
+		const speed = Math.sqrt(node.vx * node.vx + node.vy * node.vy);
+		const linAx = speed > 0.05 ? 6.0 : 0.0; // m/s^2 (~0.61g) when moving
 		return {
-			accel: { x: accelMag, y: 0, z: 9.81 },
+			accel: { x: linAx, y: 0, z: 9.81 },
 			gyro: { x: 0, y: 0, z: 0 },
 		};
 	}
 
-	// Handle transmission from one node to all others
 	private handleTx(senderId: number, packet: Packet) {
-		const sender = this.nodes.find((node) => node.id === senderId);
-		if (sender) sender.txCount += 1;
+		const sender = this.nodes.find((n) => n.id === senderId);
+		if (!sender) return;
+		sender.txCount += 1;
+
+		this.hooks?.onTx?.({
+			timeMs: this.timeMs,
+			senderId,
+			packet,
+			senderPos: { x: sender.x, y: sender.y },
+		});
 
 		for (const recipient of this.nodes) {
 			if (recipient.id === senderId) continue;
+			if (packet.destId !== -1 && packet.destId !== recipient.id) continue;
 			if (Math.random() < this.packetLoss) continue;
 
-			const distanceMeters = this.distance(senderId, recipient.id);
-			if (distanceMeters === null || distanceMeters > this.uwbRangeMeters) continue;
-			if (this.isBlocked(senderId, recipient.id)) continue;
+			const ranging = this.uwb.measure(
+				{ id: sender.id, x: sender.x, y: sender.y },
+				{ id: recipient.id, x: recipient.x, y: recipient.y },
+				{ pixelsPerMeter: 1, maxRangeMeters: this.uwbRangeMeters, walls: this.walls }
+			);
+			if (!ranging.success) continue;
 
-			const cloned: Packet = { ...packet, destId: packet.destId, srcId: senderId };
+			// IMPORTANT: clone payload per-recipient so UWB range/angle injection doesn't
+			// overwrite other recipients' measurements for broadcast packets.
+			const cloned: Packet = {
+				...packet,
+				srcId: senderId,
+				payload: packet.payload && typeof packet.payload === "object" ? { ...packet.payload } : packet.payload,
+			};
 			if (
 				cloned.payload?.type === "RANGING_POLL" ||
 				cloned.payload?.type === "RANGING_RESP" ||
 				cloned.payload?.type === "HELLO"
 			) {
-				const measurement = this.uwbMeasure(senderId, recipient.id);
-				cloned.payload.range = measurement.measuredDistanceMeters;
-				cloned.payload.angle = measurement.aoa;
+				const normalizeAngleRad = (a: number) => {
+					let x = a;
+					while (x > Math.PI) x -= 2 * Math.PI;
+					while (x < -Math.PI) x += 2 * Math.PI;
+					return x;
+				};
+				// UWBRanging returns bearing from sender -> receiver.
+				// Firmware expects bearing from *self(receiver)* -> neighbor(sender), so flip by π.
+				const angleSelfToNeighbor = normalizeAngleRad((ranging.aoa ?? 0) + Math.PI);
+				cloned.payload.range = ranging.measuredDistanceMeters;
+				cloned.payload.angle = angleSelfToNeighbor;
 			}
 
-			const destination = this.nodes.find((node) => node.id === recipient.id);
-			if (destination) {
-				(destination.incoming as Packet[]).push(cloned);
-			}
+			recipient.incoming.push(cloned);
+			this.hooks?.onDeliver?.({
+				timeMs: this.timeMs,
+				senderId,
+				recipientId: recipient.id,
+				packet: cloned,
+				senderPos: { x: sender.x, y: sender.y },
+				recipientPos: { x: recipient.x, y: recipient.y },
+				ranging: {
+					trueDistanceMeters: ranging.trueDistanceMeters,
+					measuredDistanceMeters: ranging.measuredDistanceMeters,
+					aoa: ranging.aoa,
+					aod: ranging.aod,
+					los: ranging.los,
+				},
+			});
 		}
-	}
-
-	private distance(sourceId: number, targetId: number): number | null {
-		const source = this.nodes.find((node) => node.id === sourceId);
-		const target = this.nodes.find((node) => node.id === targetId);
-		if (!source || !target) return null;
-		const dx = source.x - target.x;
-		const dy = source.y - target.y;
-		return Math.sqrt(dx * dx + dy * dy);
-	}
-
-	private uwbMeasure(senderId: number, receiverId: number) {
-		const trueDistanceMeters = this.distance(senderId, receiverId) ?? Infinity;
-		const angle = this.bearing(senderId, receiverId);
-		const noisyDistanceMeters = Math.max(0, trueDistanceMeters + this.gaussian() * this.uwbNoiseSigma);
-		return {
-			measuredDistanceMeters: noisyDistanceMeters,
-			aoa: angle,
-			aod: angle,
-			los: !this.isBlocked(senderId, receiverId),
-		};
-	}
-
-	private bearing(sourceId: number, targetId: number): number {
-		const source = this.nodes.find((node) => node.id === sourceId);
-		const target = this.nodes.find((node) => node.id === targetId);
-		if (!source || !target) return 0;
-		return Math.atan2(target.y - source.y, target.x - source.x);
-	}
-
-	private isBlocked(sourceId: number, targetId: number): boolean {
-		const source = this.nodes.find((node) => node.id === sourceId);
-		const target = this.nodes.find((node) => node.id === targetId);
-		if (!source || !target) return false;
-		for (const wall of this.walls) {
-			if (
-				this.doIntersect(
-					{ x: source.x, y: source.y },
-					{ x: target.x, y: target.y },
-					{ x: wall.x1, y: wall.y1 },
-					{ x: wall.x2, y: wall.y2 }
-				)
-			)
-				return true;
-		}
-		return false;
-	}
-
-	private doIntersect(
-		p1: { x: number; y: number },
-		q1: { x: number; y: number },
-		p2: { x: number; y: number },
-		q2: { x: number; y: number }
-	) {
-		const orientation = (p: any, q: any, r: any) => {
-			const val = (q.y - p.y) * (r.x - q.x) - (q.x - p.x) * (r.y - q.y);
-			if (val === 0) return 0;
-			return val > 0 ? 1 : 2;
-		};
-		const onSegment = (p: any, q: any, r: any) => {
-			return (
-				q.x <= Math.max(p.x, r.x) && q.x >= Math.min(p.x, r.x) && q.y <= Math.max(p.y, r.y) && q.y >= Math.min(p.y, r.y)
-			);
-		};
-		const o1 = orientation(p1, q1, p2);
-		const o2 = orientation(p1, q1, q2);
-		const o3 = orientation(p2, q2, p1);
-		const o4 = orientation(p2, q2, q1);
-		if (o1 !== o2 && o3 !== o4) return true;
-		if (o1 === 0 && onSegment(p1, p2, q1)) return true;
-		if (o2 === 0 && onSegment(p1, q2, q1)) return true;
-		if (o3 === 0 && onSegment(p2, p1, q2)) return true;
-		if (o4 === 0 && onSegment(p2, q1, q2)) return true;
-		return false;
-	}
-
-	private gaussian() {
-		let u = 0;
-		let v = 0;
-		while (u === 0) u = Math.random();
-		while (v === 0) v = Math.random();
-		return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
 	}
 
 	public snapshot(): RunnerSnapshot {

@@ -106,7 +106,7 @@ function runExperimentA(): ExperimentATimeRow[] {
 // Experiment B: Vary UWB noise sigma and measure final accuracy
 function runExperimentB(): ExperimentBRow[] {
 	const rows: ExperimentBRow[] = [];
-	const simSeconds = 10_000;
+	const simSeconds = 300;
 	const nodeCount = 8;
 	for (const sigma of [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]) {
 		const runner = new SimulationRunner({ uwbNoiseSigma: sigma });

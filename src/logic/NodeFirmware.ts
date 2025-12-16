@@ -31,7 +31,6 @@ export class NodeFirmware {
 	private helloTimer: number = 0;
 	private dataTimer: number = 0;
 	private rangingTimer: number = 0;
-	private panicUntil: number = 0;
 	private readonly HELLO_INTERVAL_MS = 1000;
 	private readonly NEIGHBOR_TIMEOUT_MS = 3000;
 	public hopsToGw: number = 999;
@@ -211,13 +210,12 @@ export class NodeFirmware {
 
 				if (this.nextHop === id) {
 					this.changeRole(NodeRole.ISOLATED, 999, null, PacketType.PANIC);
-					this.panicUntil = now + 2000; // Hold-down timer to allow network to settle
 				}
 			}
 		}
 	}
 
-	private ensureStability(now: number) {
+	private ensureStability(_now: number) {
 		// 1. Isolation
 		if (this.neighbors.size === 0) {
 			if (this.role !== NodeRole.ISOLATED) {
