@@ -407,7 +407,6 @@ const App: React.FC = () => {
 								timestamp: report.timestamp,
 								neighbors: report.neighbors,
 								battery: report.battery,
-								status: report.status,
 							});
 						}
 					}
