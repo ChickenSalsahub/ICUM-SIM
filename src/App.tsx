@@ -186,7 +186,10 @@ const App: React.FC = () => {
 	const [logs] = useState<LogEntry[]>([]);
 	const [packets, setPackets] = useState<Packet[]>([]);
 	const [visualPackets, setVisualPackets] = useState<VisualPacket[]>([]);
-	const [fusedRecords, setFusedRecords] = useState<FusedRecord[]>([]);
+	const [fusedRecordsBaseline, setFusedRecordsBaseline] = useState<FusedRecord[]>([]);
+	const [fusedRecordsRobust, setFusedRecordsRobust] = useState<FusedRecord[]>([]);
+	const [cloudAlgoMode, setCloudAlgoMode] = useState<"BASELINE" | "ROBUST">("BASELINE");
+	const fusedRecords = cloudAlgoMode === "ROBUST" ? fusedRecordsRobust : fusedRecordsBaseline;
 
 	const [walls, setWalls] = useState<Wall[]>([]);
 	const [isDrawingWall, setIsDrawingWall] = useState(false);
@@ -215,7 +218,8 @@ const App: React.FC = () => {
 
 	const nodesRef = useRef<UiNode[]>([]);
 	const runnerRef = useRef<SimulationRunner | null>(null);
-	const cloudBackendRef = useRef<CloudBackend>(new CloudBackend());
+	const cloudBackendBaselineRef = useRef<CloudBackend>(new CloudBackend({ robustFusion: false }));
+	const cloudBackendRobustRef = useRef<CloudBackend>(new CloudBackend({ robustFusion: true }));
 	const visualPacketsRef = useRef<VisualPacket[]>([]);
 	const wallsRef = useRef<Wall[]>([]);
 	const animationRef = useRef<number | undefined>(undefined);
@@ -440,25 +444,28 @@ const App: React.FC = () => {
 			});
 			setLinks(newLinks);
 
-			// 4. CLOUD BACKEND (fuse snapshots every ~1s)
+			// 4. CLOUD BACKEND (baseline + robust; fuse snapshots every ~1s)
 			const nowMs = Date.now();
 			if (nowMs - lastCloudTickRef.current > 250) {
 				lastCloudTickRef.current = nowMs;
+				const baselineCloud = cloudBackendBaselineRef.current;
+				const robustCloud = cloudBackendRobustRef.current;
 				for (const sn of snap.nodes) {
 					const node = currentNodes.find((n) => n.id === sn.id);
 					if (!node) continue;
-					cloudBackendRef.current.ingest({
+					const report = {
 						nodeId: node.id,
 						timestamp: nowMs,
 						battery: node.battery,
 						status: node.firmwareState === "ISOLATED" ? "STATIONARY" : node.firmwareState,
 						neighbors: sn.firmware.neighbors.map((nb) => ({ id: nb.id, range: nb.rangeMeters, aoa: nb.angleRad })),
 						...(node.type === "HARDWARE_GW" ? { x: sn.trueX, y: sn.trueY } : {}),
-					});
+					};
+					baselineCloud.ingest(report);
+					robustCloud.ingest(report);
 				}
-				if (cloudBackendRef.current.tick(nowMs)) {
-					setFusedRecords([...cloudBackendRef.current.getRecords()]);
-				}
+				if (baselineCloud.tick(nowMs)) setFusedRecordsBaseline([...baselineCloud.getRecords()]);
+				if (robustCloud.tick(nowMs)) setFusedRecordsRobust([...robustCloud.getRecords()]);
 			}
 
 			// 6. ENERGY
@@ -611,7 +618,10 @@ const App: React.FC = () => {
 		setNodes([]);
 		nodesRef.current = [];
 		runnerRef.current = null;
-		cloudBackendRef.current = new CloudBackend();
+		cloudBackendBaselineRef.current = new CloudBackend({ robustFusion: false });
+		cloudBackendRobustRef.current = new CloudBackend({ robustFusion: true });
+		setFusedRecordsBaseline([]);
+		setFusedRecordsRobust([]);
 		setOpenWindows([]);
 		setWalls([]);
 	};
@@ -885,7 +895,7 @@ const App: React.FC = () => {
 					{showCloudLogs && (
 						<DraggableWindow
 							id="cloud"
-							title={`CLOUD DATABASE (${cloudViewMode})`}
+							title={`CLOUD DATABASE (${cloudViewMode} / ${cloudAlgoMode})`}
 							icon={Database}
 							initialX={800}
 							initialY={50}
@@ -938,6 +948,35 @@ const App: React.FC = () => {
 									}}
 								>
 									TOPOLOGY
+								</button>
+								<div style={{ flex: 1 }} />
+								<button
+									onClick={() => setCloudAlgoMode("BASELINE")}
+									style={{
+										fontSize: "9px",
+										padding: "4px 8px",
+										borderRadius: "4px",
+										border: "none",
+										backgroundColor: cloudAlgoMode === "BASELINE" ? "#38bdf8" : "#1e293b",
+										color: cloudAlgoMode === "BASELINE" ? "#0f172a" : "#94a3b8",
+										cursor: "pointer",
+									}}
+								>
+									BASELINE
+								</button>
+								<button
+									onClick={() => setCloudAlgoMode("ROBUST")}
+									style={{
+										fontSize: "9px",
+										padding: "4px 8px",
+										borderRadius: "4px",
+										border: "none",
+										backgroundColor: cloudAlgoMode === "ROBUST" ? "#38bdf8" : "#1e293b",
+										color: cloudAlgoMode === "ROBUST" ? "#0f172a" : "#94a3b8",
+										cursor: "pointer",
+									}}
+								>
+									ROBUST
 								</button>
 							</div>
 							{cloudViewMode === "FUSED" ? (

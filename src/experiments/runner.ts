@@ -1,6 +1,7 @@
 import { writeFileSync } from "fs";
 import { pathToFileURL } from "url";
 import { SimulationRunner } from "../engine/SimulationRunner.ts";
+import { CloudBackend, type FusedRecord } from "../logic/CloudBackend";
 
 interface ExperimentATimeRow {
 	timeSeconds: number;
@@ -23,6 +24,15 @@ interface ExperimentCTimeRow {
 	txPerNodePerMin: number;
 	ale: number;
 	convergenceMs?: number;
+}
+
+interface ExperimentDTimeRow {
+	timeSeconds: number;
+	nodes: number;
+	cloudBaselineRmse: number;
+	cloudRobustRmse: number;
+	coverageBaseline: number;
+	coverageRobust: number;
 }
 
 const areaSize = { width: 50, height: 50 };
@@ -71,6 +81,28 @@ function ale(nodes: ReturnType<SimulationRunner["snapshot"]>["nodes"]) {
 		sum += err;
 	}
 	return sum / nodes.length;
+}
+
+function latestByNode(records: FusedRecord[]) {
+	const map = new Map<number, FusedRecord>();
+	for (const r of records) {
+		if (!map.has(r.nodeId)) map.set(r.nodeId, r);
+	}
+	return map;
+}
+
+function cloudRmse(latest: Map<number, FusedRecord>, truth: Map<number, { x: number; y: number }>) {
+	let sumSq = 0;
+	let count = 0;
+	for (const [id, t] of truth.entries()) {
+		const r = latest.get(id);
+		if (!r) continue;
+		const dx = r.position.x - t.x;
+		const dy = r.position.y - t.y;
+		sumSq += dx * dx + dy * dy;
+		count += 1;
+	}
+	return { rmse: count > 0 ? Math.sqrt(sumSq / count) : Number.NaN, coverage: count };
 }
 
 // Experiment A: Compare baseline vs ETM over time
@@ -161,6 +193,69 @@ function runExperimentC(): ExperimentCTimeRow[] {
 	return rows;
 }
 
+// Experiment D: Compare cloud baseline vs robust fusion over time
+// The difference is that robust fusion ignores outlier neighbor reports
+function runExperimentD(): ExperimentDTimeRow[] {
+	const rows: ExperimentDTimeRow[] = [];
+	const simSeconds = 300;
+	const logEveryMs = 1_000;
+	const nodeCount = 12;
+
+	const runner = new SimulationRunner({ uwbNoiseSigma: 0.05 });
+	seedNodes(runner, makeSeed(nodeCount));
+
+	const cloudBaseline = new CloudBackend({ robustFusion: false });
+	const cloudRobust = new CloudBackend({ robustFusion: true });
+
+	for (let t = 0; t <= simSeconds * 1000; t += logEveryMs) {
+		const snap = runner.snapshot();
+		const nowMs = t;
+		const truth = new Map<number, { x: number; y: number }>();
+
+		for (const sn of snap.nodes) {
+			truth.set(sn.id, { x: sn.trueX, y: sn.trueY });
+			const neighbors = sn.firmware.neighbors.map((nb) => ({ id: nb.id, range: nb.rangeMeters, aoa: nb.angleRad }));
+			const base = {
+				nodeId: sn.id,
+				timestamp: nowMs,
+				battery: 100,
+				status: sn.firmware.state === "ISOLATED" ? "STATIONARY" : (sn.firmware.state as "MOVING" | "STATIONARY"),
+				neighbors,
+			};
+
+			cloudBaseline.ingest({
+				...base,
+				...(sn.id === 1 ? { x: sn.trueX, y: sn.trueY } : {}),
+			});
+			cloudRobust.ingest({
+				...base,
+				...(sn.id === 1 ? { x: sn.trueX, y: sn.trueY } : {}),
+			});
+		}
+
+		cloudBaseline.tick(nowMs);
+		cloudRobust.tick(nowMs);
+
+		const baselineLatest = latestByNode(cloudBaseline.getRecords());
+		const robustLatest = latestByNode(cloudRobust.getRecords());
+		const baselineStats = cloudRmse(baselineLatest, truth);
+		const robustStats = cloudRmse(robustLatest, truth);
+
+		rows.push({
+			timeSeconds: t / 1000,
+			nodes: nodeCount,
+			cloudBaselineRmse: baselineStats.rmse,
+			cloudRobustRmse: robustStats.rmse,
+			coverageBaseline: baselineStats.coverage,
+			coverageRobust: robustStats.coverage,
+		});
+
+		runner.step(logEveryMs);
+	}
+
+	return rows;
+}
+
 export function main() {
 	const write = (filename: string, header: string, lines: string[]) => {
 		writeFileSync(filename, header + lines.join("\n"));
@@ -187,6 +282,15 @@ export function main() {
 		"experiments_C.csv",
 		headerC,
 		runExperimentC().map((r) => [r.timeSeconds, r.nodes, r.txPerNodePerMin, r.ale, r.convergenceMs ?? ""].join(","))
+	);
+
+	const headerD = "Time,Nodes,CloudBaseline_RMSE,CloudRobust_RMSE,CoverageBaseline,CoverageRobust\n";
+	write(
+		"experiments_D.csv",
+		headerD,
+		runExperimentD().map((r) =>
+			[r.timeSeconds, r.nodes, r.cloudBaselineRmse, r.cloudRobustRmse, r.coverageBaseline, r.coverageRobust].join(",")
+		)
 	);
 }
 const isMain = () => import.meta.url === pathToFileURL(process.argv[1]).href;

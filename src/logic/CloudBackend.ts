@@ -1,5 +1,17 @@
 import { RelativePoseGraph } from "./localization/CooperativeLocalization";
 
+export interface CloudBackendOptions {
+	robustFusion?: boolean;
+	// Huber threshold in normalized residual units.
+	huberK?: number;
+	// Normalization scales for residuals.
+	distanceSigma?: number; // meters
+	angleSigma?: number; // radians
+	// Optimization budget.
+	warmupIterations?: number;
+	finalIterations?: number;
+}
+
 /**
  * Represents a single raw data point received from a node.
  */
@@ -55,12 +67,25 @@ export class CloudBackend {
 	// This allows us to use "distance" and "angles" (AoA) to reconstruct the layout.
 	private graph: RelativePoseGraph = new RelativePoseGraph(1); // Initialize with ID 1 (Gateway)
 
+	private readonly opts: Required<CloudBackendOptions>;
+
 	// Configuration
 	private FUSION_WINDOW_MS = 1000; // Fuse data every 1 second
 	private lastFusionTime = 0;
 
 	// Track how long nodes have been in the graph to avoid fixing them too early
 	private nodeStabilityCounter: Map<number, number> = new Map();
+
+	constructor(opts?: CloudBackendOptions) {
+		this.opts = {
+			robustFusion: opts?.robustFusion ?? false,
+			huberK: opts?.huberK ?? 2.5,
+			distanceSigma: opts?.distanceSigma ?? 0.15,
+			angleSigma: opts?.angleSigma ?? (20 * Math.PI) / 180,
+			warmupIterations: opts?.warmupIterations ?? 15,
+			finalIterations: opts?.finalIterations ?? 50,
+		};
+	}
 
 	/**
 	 * Ingests a raw report from the network.
@@ -100,6 +125,13 @@ export class CloudBackend {
 		const fixedNodeIds: number[] = [];
 		const supernodeIds = new Set<number>();
 
+		const wrapPi = (a: number) => {
+			let x = a;
+			while (x > Math.PI) x -= 2 * Math.PI;
+			while (x < -Math.PI) x += 2 * Math.PI;
+			return x;
+		};
+
 		// 0. Identify Supernodes (Anchors)
 		this.buffer.forEach((reports, nodeId) => {
 			if (reports.length === 0) return;
@@ -108,11 +140,6 @@ export class CloudBackend {
 				supernodeIds.add(nodeId);
 			}
 		});
-
-		// RESET GRAPH EDGES
-		// We clear old constraints because the topology might have changed.
-		// We only want to enforce constraints that are currently observed.
-		this.graph.clearEdges();
 
 		// 1. Pre-calculate average distances AND ANGLES for bidirectional links
 		const distMap = new Map<string, { val: number; weight: number }[]>();
@@ -151,56 +178,57 @@ export class CloudBackend {
 			}
 		});
 
-		// 2. Process Buffers & Update Graph Constraints
+		// Build a consolidated constraint list per undirected edge.
+		type EdgeConstraint = {
+			key: string;
+			u: number;
+			v: number;
+			dist: number;
+			aoaUV?: number; // u->v bearing
+			aoaVU?: number; // v->u bearing
+			baseWeight: number;
+		};
+		const constraints: EdgeConstraint[] = [];
+		for (const [key, dists] of distMap.entries()) {
+			const [aStr, bStr] = key.split("-");
+			const a = Number(aStr);
+			const b = Number(bStr);
+			const u = Math.min(a, b);
+			const v = Math.max(a, b);
+
+			const totalWeight = dists.reduce((sum, d) => sum + d.weight, 0);
+			const weightedSum = dists.reduce((sum, d) => sum + d.val * d.weight, 0);
+			const finalRange = totalWeight > 0 ? weightedSum / totalWeight : dists[dists.length - 1].val;
+
+			let aoaUV: number | undefined;
+			let aoaVU: number | undefined;
+			const vecs = angleMap.get(key);
+			if (vecs && vecs.length > 0) {
+				let sumX = 0;
+				let sumY = 0;
+				let sumW = 0;
+				vecs.forEach((v0) => {
+					sumX += v0.x * v0.weight;
+					sumY += v0.y * v0.weight;
+					sumW += v0.weight;
+				});
+				if (sumW > 0) {
+					const avgAngle = Math.atan2(sumY, sumX);
+					aoaUV = avgAngle;
+					aoaVU = avgAngle + Math.PI;
+				}
+			}
+
+			const isSuperLink = supernodeIds.has(u) || supernodeIds.has(v);
+			const baseWeight = isSuperLink ? 5.0 : 1.0;
+			constraints.push({ key, u, v, dist: finalRange, aoaUV, aoaVU, baseWeight });
+		}
+		// 2. Process Buffers & Update Graph Nodes (poses/anchors)
 		this.buffer.forEach((reports, nodeId) => {
 			if (reports.length === 0) return;
 			activeNodeIds.add(nodeId);
 
 			const latest = reports[reports.length - 1];
-
-			// Update Edges (Measurements)
-			if (latest.neighbors) {
-				latest.neighbors.forEach((n) => {
-					if (n.range) {
-						const key = nodeId < n.id ? `${nodeId}-${n.id}` : `${n.id}-${nodeId}`;
-
-						// Weighted Averaged Distance
-						const dists = distMap.get(key);
-						let finalRange = n.range;
-						if (dists && dists.length > 0) {
-							const totalWeight = dists.reduce((sum, d) => sum + d.weight, 0);
-							const weightedSum = dists.reduce((sum, d) => sum + d.val * d.weight, 0);
-							finalRange = weightedSum / totalWeight;
-						}
-
-						// Weighted Averaged Angle
-						let finalAoA = n.aoa;
-						const vecs = angleMap.get(key);
-						if (vecs && vecs.length > 0) {
-							let sumX = 0;
-							let sumY = 0;
-							vecs.forEach((v) => {
-								sumX += v.x * v.weight;
-								sumY += v.y * v.weight;
-							});
-							// This is the average angle for Smaller -> Larger
-							const avgAngle = Math.atan2(sumY, sumX);
-
-							if (nodeId < n.id) {
-								finalAoA = avgAngle;
-							} else {
-								finalAoA = avgAngle + Math.PI;
-							}
-						}
-
-						// Distances are kept in meters inside the graph; AoA already normalized
-						const isSuperLink = supernodeIds.has(nodeId) || supernodeIds.has(n.id);
-						const edgeWeight = isSuperLink ? 5.0 : 1.0;
-
-						this.graph.addMeasurement(nodeId, n.id, finalRange, finalAoA, edgeWeight);
-					}
-				});
-			}
 
 			// Update Anchors (Fixed Nodes)
 			// If a node reports explicit X/Y (Ground Truth), we pin it.
@@ -234,11 +262,61 @@ export class CloudBackend {
 			}
 		});
 
-		// 2. Optimize Graph
-		// Run a few iterations to relax the spring system
-		this.graph.optimize(50, fixedNodeIds);
+		const applyConstraints = (perEdgeWeight?: Map<string, number>) => {
+			// RESET GRAPH EDGES
+			// We clear old constraints because the topology might have changed.
+			// We only want to enforce constraints that are currently observed.
+			this.graph.clearEdges();
+			for (const c of constraints) {
+				const w = c.baseWeight * (perEdgeWeight?.get(c.key) ?? 1.0);
+				// Add both directional AoA constraints if available.
+				this.graph.addMeasurement(c.u, c.v, c.dist, c.aoaUV, w);
+				if (c.aoaVU !== undefined) this.graph.addMeasurement(c.v, c.u, c.dist, c.aoaVU, w);
+			}
+		};
 
-		// 3. Generate Fused Records from Graph State
+		// 3. Optimize Graph
+		applyConstraints();
+		this.graph.optimize(this.opts.warmupIterations, fixedNodeIds);
+
+		if (this.opts.robustFusion) {
+			const weights = new Map<string, number>();
+			for (const c of constraints) {
+				const uPose = this.graph.getNodePose(c.u);
+				const vPose = this.graph.getNodePose(c.v);
+				if (!uPose || !vPose) continue;
+				const dx = vPose.x - uPose.x;
+				const dy = vPose.y - uPose.y;
+				const currentDist = Math.sqrt(dx * dx + dy * dy);
+				const distErr = currentDist - c.dist;
+				let r2 = (distErr / this.opts.distanceSigma) ** 2;
+
+				if (c.aoaUV !== undefined) {
+					const target = uPose.theta + c.aoaUV;
+					const current = Math.atan2(dy, dx);
+					const angleErr = wrapPi(target - current);
+					r2 += (angleErr / this.opts.angleSigma) ** 2;
+				}
+				if (c.aoaVU !== undefined) {
+					const target = vPose.theta + c.aoaVU;
+					const current = Math.atan2(-dy, -dx);
+					const angleErr = wrapPi(target - current);
+					r2 += (angleErr / this.opts.angleSigma) ** 2;
+				}
+
+				const r = Math.sqrt(r2);
+				const k = this.opts.huberK;
+				const w = r <= k ? 1.0 : k / Math.max(r, 1e-9);
+				weights.set(c.key, w);
+			}
+
+			applyConstraints(weights);
+			this.graph.optimize(this.opts.finalIterations, fixedNodeIds);
+		} else {
+			this.graph.optimize(this.opts.finalIterations, fixedNodeIds);
+		}
+
+		// 4. Generate Fused Records from Graph State
 		this.buffer.forEach((reports, nodeId) => {
 			if (reports.length === 0) return;
 
