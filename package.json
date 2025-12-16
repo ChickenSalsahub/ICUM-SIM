@@ -8,7 +8,8 @@
 		"build": "tsc -b && vite build",
 		"test": "vitest",
 		"lint": "eslint .",
-		"preview": "vite preview"
+		"preview": "vite preview",
+		"experiments": "tsx src/experiments/runner.ts"
 	},
 	"dependencies": {
 		"lucide-react": "^0.554.0",
@@ -16,7 +17,6 @@
 		"react-dom": "^19.2.0"
 	},
 	"devDependencies": {
-		"vitest": "^1.1.5",
 		"@eslint/js": "^9.39.1",
 		"@types/node": "^24.10.0",
 		"@types/react": "^19.2.2",
@@ -27,8 +27,11 @@
 		"eslint-plugin-react-hooks": "^7.0.1",
 		"eslint-plugin-react-refresh": "^0.4.24",
 		"globals": "^16.5.0",
+		"ts-node": "^10.9.2",
+		"tsx": "^4.21.0",
 		"typescript": "~5.9.3",
 		"typescript-eslint": "^8.46.3",
-		"vite": "^7.2.2"
+		"vite": "^7.2.2",
+		"vitest": "^1.1.5"
 	}
 }

@@ -1,6 +1,6 @@
-import { NodeFirmware } from "../firmware/NodeFirmware";
-import { INodeHAL, ImuSample, FirmwareSnapshot } from "../firmware/types";
-import { Packet, PacketType, Wall } from "../types";
+import { NodeFirmware } from "../firmware/NodeFirmware.ts";
+import { INodeHAL, ImuSample, FirmwareSnapshot } from "../firmware/types.ts";
+import { Packet, Wall } from "../types/index.ts";
 
 interface NodeWorldState {
 	id: number;
@@ -12,6 +12,7 @@ interface NodeWorldState {
 	batteryV: number;
 	hasLte: boolean;
 	incoming: Packet[];
+	txCount: number;
 }
 
 export interface RunnerSnapshot {
@@ -22,6 +23,7 @@ export interface RunnerSnapshot {
 		trueY: number;
 		batteryV: number;
 		firmware: FirmwareSnapshot;
+		txCount: number;
 	}>;
 }
 
@@ -41,7 +43,7 @@ export class SimulationRunner {
 
 	constructor(opts?: SimulationOptions) {
 		this.uwbRangeMeters = opts?.uwbRangeMeters ?? 15;
-		this.uwbNoiseSigma = opts?.uwbNoiseSigma ?? 0.05;
+		this.uwbNoiseSigma = opts?.uwbNoiseSigma ?? 0.0;
 		this.packetLoss = opts?.packetLoss ?? 0.1;
 	}
 
@@ -83,6 +85,7 @@ export class SimulationRunner {
 			batteryV,
 			hasLte,
 			incoming,
+			txCount: 0,
 		});
 	}
 
@@ -90,14 +93,14 @@ export class SimulationRunner {
 		this.timeMs += dtMs;
 
 		// Physics integration
-		for (const n of this.nodes) {
-			n.x += (n.vx * dtMs) / 1000;
-			n.y += (n.vy * dtMs) / 1000;
+		for (const node of this.nodes) {
+			node.x += (node.vx * dtMs) / 1000;
+			node.y += (node.vy * dtMs) / 1000;
 		}
 
 		// Advance firmware
-		for (const n of this.nodes) {
-			n.firmware.tick(dtMs);
+		for (const node of this.nodes) {
+			node.firmware.tick(dtMs);
 		}
 	}
 
@@ -113,63 +116,74 @@ export class SimulationRunner {
 		};
 	}
 
+	// Handle transmission from one node to all others
 	private handleTx(senderId: number, packet: Packet) {
-		for (const target of this.nodes) {
-			if (target.id === senderId) continue;
+		const sender = this.nodes.find((node) => node.id === senderId);
+		if (sender) sender.txCount += 1;
+
+		for (const recipient of this.nodes) {
+			if (recipient.id === senderId) continue;
 			if (Math.random() < this.packetLoss) continue;
 
-			const dist = this.distance(senderId, target.id);
-			if (dist === null || dist > this.uwbRangeMeters) continue;
-			if (this.isBlocked(senderId, target.id)) continue;
+			const distanceMeters = this.distance(senderId, recipient.id);
+			if (distanceMeters === null || distanceMeters > this.uwbRangeMeters) continue;
+			if (this.isBlocked(senderId, recipient.id)) continue;
 
 			const cloned: Packet = { ...packet, destId: packet.destId, srcId: senderId };
 			if (cloned.payload?.type === "RANGING_POLL") {
-				const measurement = this.uwbMeasure(senderId, target.id);
+				const measurement = this.uwbMeasure(senderId, recipient.id);
 				cloned.payload.range = measurement.measuredDistanceMeters;
 				cloned.payload.angle = measurement.aoa;
 			}
 
-			const recipient = this.nodes.find((n) => n.id === target.id);
-			if (recipient) {
-				(recipient.incoming as Packet[]).push(cloned);
+			const destination = this.nodes.find((node) => node.id === recipient.id);
+			if (destination) {
+				(destination.incoming as Packet[]).push(cloned);
 			}
 		}
 	}
 
-	private distance(aId: number, bId: number): number | null {
-		const a = this.nodes.find((n) => n.id === aId);
-		const b = this.nodes.find((n) => n.id === bId);
-		if (!a || !b) return null;
-		const dx = a.x - b.x;
-		const dy = a.y - b.y;
+	private distance(sourceId: number, targetId: number): number | null {
+		const source = this.nodes.find((node) => node.id === sourceId);
+		const target = this.nodes.find((node) => node.id === targetId);
+		if (!source || !target) return null;
+		const dx = source.x - target.x;
+		const dy = source.y - target.y;
 		return Math.sqrt(dx * dx + dy * dy);
 	}
 
 	private uwbMeasure(senderId: number, receiverId: number) {
-		const dist = this.distance(senderId, receiverId) ?? Infinity;
+		const trueDistanceMeters = this.distance(senderId, receiverId) ?? Infinity;
 		const angle = this.bearing(senderId, receiverId);
-		const noisy = Math.max(0, dist + this.gaussian() * this.uwbNoiseSigma);
+		const noisyDistanceMeters = Math.max(0, trueDistanceMeters + this.gaussian() * this.uwbNoiseSigma);
 		return {
-			measuredDistanceMeters: noisy,
+			measuredDistanceMeters: noisyDistanceMeters,
 			aoa: angle,
 			aod: angle,
 			los: !this.isBlocked(senderId, receiverId),
 		};
 	}
 
-	private bearing(aId: number, bId: number): number {
-		const a = this.nodes.find((n) => n.id === aId);
-		const b = this.nodes.find((n) => n.id === bId);
-		if (!a || !b) return 0;
-		return Math.atan2(b.y - a.y, b.x - a.x);
+	private bearing(sourceId: number, targetId: number): number {
+		const source = this.nodes.find((node) => node.id === sourceId);
+		const target = this.nodes.find((node) => node.id === targetId);
+		if (!source || !target) return 0;
+		return Math.atan2(target.y - source.y, target.x - source.x);
 	}
 
-	private isBlocked(aId: number, bId: number): boolean {
-		const a = this.nodes.find((n) => n.id === aId);
-		const b = this.nodes.find((n) => n.id === bId);
-		if (!a || !b) return false;
-		for (const w of this.walls) {
-			if (this.doIntersect({ x: a.x, y: a.y }, { x: b.x, y: b.y }, { x: w.x1, y: w.y1 }, { x: w.x2, y: w.y2 }))
+	private isBlocked(sourceId: number, targetId: number): boolean {
+		const source = this.nodes.find((node) => node.id === sourceId);
+		const target = this.nodes.find((node) => node.id === targetId);
+		if (!source || !target) return false;
+		for (const wall of this.walls) {
+			if (
+				this.doIntersect(
+					{ x: source.x, y: source.y },
+					{ x: target.x, y: target.y },
+					{ x: wall.x1, y: wall.y1 },
+					{ x: wall.x2, y: wall.y2 }
+				)
+			)
 				return true;
 		}
 		return false;
@@ -214,19 +228,20 @@ export class SimulationRunner {
 	public snapshot(): RunnerSnapshot {
 		return {
 			timeMs: this.timeMs,
-			nodes: this.nodes.map((n) => ({
-				id: n.id,
-				trueX: n.x,
-				trueY: n.y,
-				batteryV: n.batteryV,
-				firmware: n.firmware.getSnapshot(),
+			nodes: this.nodes.map((node) => ({
+				id: node.id,
+				trueX: node.x,
+				trueY: node.y,
+				batteryV: node.batteryV,
+				firmware: node.firmware.getSnapshot(),
+				txCount: node.txCount,
 			})),
 		};
 	}
 
 	public runFor(simSeconds: number, dtMs = 50) {
 		const steps = Math.ceil((simSeconds * 1000) / dtMs);
-		for (let i = 0; i < steps; i++) {
+		for (let stepIndex = 0; stepIndex < steps; stepIndex++) {
 			this.step(dtMs);
 		}
 		return this.snapshot();
