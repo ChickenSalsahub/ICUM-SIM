@@ -21,8 +21,9 @@ export class UWBRanging implements RangingEngine {
 		opts: RangingOptions
 	): RangingResult {
 		const { pixelsPerMeter, maxRangeMeters, walls } = opts;
-		const dx = sender.x - receiver.x;
-		const dy = sender.y - receiver.y;
+		// Vector from sender -> receiver (bearing as seen by sender)
+		const dx = receiver.x - sender.x;
+		const dy = receiver.y - sender.y;
 		const trueDistMeters = Math.sqrt(dx * dx + dy * dy) / pixelsPerMeter;
 
 		const los = this.isLineOfSight(sender, receiver, walls || []);
@@ -54,19 +55,20 @@ export class UWBRanging implements RangingEngine {
 		const c = 299_792_458; // speed of light m/s
 		const tof = measured / c;
 
-		// Calculate AoA (Angle of Arrival)
-		// Assuming receiver is facing East (0 radians) for simulation ground truth
-		// AoA = Angle of vector (Receiver -> Sender)
-		const angle = Math.atan2(dy, dx);
+		// Bearing from sender to receiver; use as AoD (transmit) and as AoA at sender-side consumer
+		const bearing = Math.atan2(dy, dx);
 		const aoaNoise = this.gaussian() * 0.05; // ~3 degrees noise
-		const aoa = angle + aoaNoise;
+		const aodNoise = this.gaussian() * 0.05;
+		const aoa = bearing + aoaNoise; // what the initiator/firmware cares about (direction to peer)
+		const aod = bearing + aodNoise; // transmitter departure angle (should closely match aoa)
 
 		return {
 			success: true,
 			trueDistanceMeters: trueDistMeters,
 			measuredDistanceMeters: measured,
 			timeOfFlightSeconds: tof,
-			aoa: aoa,
+			aoa,
+			aod,
 			los,
 		};
 	}

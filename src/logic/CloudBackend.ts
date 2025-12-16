@@ -12,7 +12,7 @@ export interface RawReport {
 	lng?: number;
 	battery: number;
 	status?: "MOVING" | "STATIONARY";
-	neighbors?: { id: number; range?: number; aoa?: number }[];
+	neighbors?: { id: number; range?: number; aoa?: number; aod?: number; tof?: number }[];
 }
 
 /**
@@ -193,12 +193,11 @@ export class CloudBackend {
 							}
 						}
 
-						const distPx = finalRange * 20;
-						// If either node is a supernode, give the edge high weight in the graph optimizer
+						// Distances are kept in meters inside the graph; AoA already normalized
 						const isSuperLink = supernodeIds.has(nodeId) || supernodeIds.has(n.id);
 						const edgeWeight = isSuperLink ? 5.0 : 1.0;
 
-						this.graph.addMeasurement(nodeId, n.id, distPx, finalAoA, edgeWeight);
+						this.graph.addMeasurement(nodeId, n.id, finalRange, finalAoA, edgeWeight);
 					}
 				});
 			}
@@ -216,8 +215,8 @@ export class CloudBackend {
 				if (!this.graph.getNodePose(nodeId)) {
 					// Initialize at random position to allow physics to converge
 					this.graph.setNodePose(nodeId, {
-						x: Math.random() * 800,
-						y: Math.random() * 600,
+						x: Math.random() * 40,
+						y: Math.random() * 30,
 						theta: 0,
 					});
 					this.nodeStabilityCounter.set(nodeId, 0);
@@ -313,8 +312,8 @@ export class CloudBackend {
 				timestamp: Date.now(),
 				sampleCount: count,
 				position: {
-					x: Math.round(pose.x),
-					y: Math.round(pose.y),
+					x: parseFloat(pose.x.toFixed(2)),
+					y: parseFloat(pose.y.toFixed(2)),
 					lat: latCount > 0 ? sumLat / latCount : undefined,
 					lng: lngCount > 0 ? sumLng / lngCount : undefined,
 				},

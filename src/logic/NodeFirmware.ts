@@ -79,6 +79,12 @@ export class NodeFirmware {
 	public tick(dt: number) {
 		const now = this.hal.getTimeMs();
 
+		// Integrate local IMU/odometry so movement after anchoring keeps localization consistent
+		const odom = this.hal.getOdometryMeters ? this.hal.getOdometryMeters() : undefined;
+		if (odom) {
+			this.coopLoc.graph.applyOdometry(odom);
+		}
+
 		// Update Isolation Timer (for UI visualization of Panic Mode)
 		if (this.role === NodeRole.ISOLATED) {
 			this.isolationTimer += dt;
@@ -357,15 +363,14 @@ export class NodeFirmware {
 			if (!aHw && bHw) return 1;
 			if (aHw && bHw) return a.hopsToGw - b.hopsToGw;
 
-			// 2. MOST NEIGHBORS (Centrality)
+			// 2. VISIBILITY & BATTERY (combined score so "see-most" then "highest battery")
 			const aCount = (a as any).neighborCount ?? 0;
 			const bCount = (b as any).neighborCount ?? 0;
-			if (aCount !== bCount) return bCount - aCount;
+			const aScore = aCount * 100 + (a.battery || 0);
+			const bScore = bCount * 100 + (b.battery || 0);
+			if (aScore !== bScore) return bScore - aScore;
 
-			// 3. BATTERY
-			if (a.battery !== b.battery) return b.battery - a.battery;
-
-			// 4. ID
+			// 3. ID
 			return a.id - b.id;
 		});
 		return candidates;
@@ -394,6 +399,7 @@ export class NodeFirmware {
 				this.role === NodeRole.LEADER ? this.id : this.nextHop ? this.neighbors.get(this.nextHop)?.leaderId : undefined,
 			parentId: this.nextHop,
 			neighborCount: this.neighbors.size,
+			status: this.state,
 			globalPos: myGlobalPos,
 			...payload,
 		};
@@ -492,6 +498,8 @@ export class NodeFirmware {
 	private handleRangingResponse(packet: Packet) {
 		const dist = packet.payload.distance;
 		const aoa = packet.payload.aoa;
+		const aod = packet.payload.aod;
+		const tof = packet.payload.tof ?? packet.payload.timeOfFlightSeconds;
 
 		if (dist !== undefined) {
 			this.hal.log(`[${this.id}] Ranged Node ${packet.srcId}: ${dist.toFixed(2)}m`);
@@ -501,6 +509,8 @@ export class NodeFirmware {
 			if (neighbor) {
 				neighbor.rangeMeters = dist;
 				neighbor.aoa = aoa;
+				neighbor.aod = aod;
+				neighbor.timeOfFlightSeconds = tof;
 				neighbor.lastSeen = this.hal.getTimeMs();
 			}
 

@@ -53,6 +53,15 @@ export interface NeighborEntry {
 	// Optional: measured range from UWB simulation (meters)
 	rangeMeters?: number;
 	aoa?: number; // Angle of Arrival
+	aod?: number; // Angle of Departure (sender -> receiver)
+	timeOfFlightSeconds?: number; // Measured flight time for diagnostics
+}
+
+export interface OdometrySample {
+	dx: number; // meters since last sample
+	dy: number; // meters since last sample
+	dTheta: number; // radians since last sample
+	timestamp: number; // milliseconds
 }
 
 export interface HardwareInterface {
@@ -63,6 +72,7 @@ export interface HardwareInterface {
 	getTimeMs(): number;
 	getRandom(): number; // For backoff
 	isMoving(): boolean; // Virtual IMU
+	getOdometryMeters?: () => OdometrySample; // Virtual IMU displacement since last tick
 
 	// Debug/Serial
 	log(message: string): void;
@@ -105,6 +115,7 @@ export interface RangingResult {
 	measuredDistanceMeters: number; // measured distance including noise
 	timeOfFlightSeconds?: number; // simulated TOF
 	aoa?: number; // Angle of Arrival in radians (relative to receiver's heading)
+	aod?: number; // Angle of Departure in radians (relative to sender's heading)
 	los: boolean; // line-of-sight
 	error?: string;
 }

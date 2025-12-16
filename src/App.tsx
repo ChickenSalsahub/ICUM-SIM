@@ -30,6 +30,7 @@ import {
 	Wall,
 	HardwareInterface,
 } from "./types";
+import UWBRanging from "./logic/UWBRanging";
 
 const PIXELS_PER_METER = 20;
 const CANVAS_WIDTH = 1200;
@@ -97,7 +98,8 @@ const App: React.FC = () => {
 	const cloudBackendRef = useRef<CloudBackend>(new CloudBackend());
 	const visualPacketsRef = useRef<VisualPacket[]>([]);
 	const wallsRef = useRef<Wall[]>([]);
-	// const uwbRef = useRef(new UWBRanging(PIXELS_PER_METER));
+	const uwbRef = useRef(new UWBRanging(PIXELS_PER_METER));
+	const prevOdomRef = useRef<Map<number, { x: number; y: number; t: number }>>(new Map());
 	const animationRef = useRef<number | undefined>(undefined);
 	const lastTimeRef = useRef<number>(0);
 	const energyTimerRef = useRef<number>(0);
@@ -115,6 +117,8 @@ const App: React.FC = () => {
 	const [contextMenu, setContextMenu] = useState<{ x: number; y: number; nodeId: number } | null>(null);
 
 	const createNode = (id: number, type: NodeType, x: number, y: number) => {
+		prevOdomRef.current.set(id, { x, y, t: Date.now() });
+
 		const hal: HardwareInterface = {
 			radioSend: (packet) => {
 				txQueueRef.current.push({ senderId: id, packet });
@@ -128,6 +132,18 @@ const App: React.FC = () => {
 				if (!node) return false;
 				const dist = Math.sqrt(Math.pow(node.targetX - node.x, 2) + Math.pow(node.targetY - node.y, 2));
 				return dist > 10.0;
+			},
+			getOdometryMeters: () => {
+				const now = Date.now();
+				const node = nodesRef.current.find((n) => n.id === id);
+				if (!node) return { dx: 0, dy: 0, dTheta: 0, timestamp: now };
+
+				const prev = prevOdomRef.current.get(id) || { x: node.x, y: node.y, t: now };
+				const dxPx = node.x - prev.x;
+				const dyPx = node.y - prev.y;
+				prevOdomRef.current.set(id, { x: node.x, y: node.y, t: now });
+
+				return { dx: dxPx / PIXELS_PER_METER, dy: dyPx / PIXELS_PER_METER, dTheta: 0, timestamp: now };
 			},
 			log: (_msg) => {
 				// console.log(`[Node ${id}] ${msg}`);
@@ -263,36 +279,34 @@ const App: React.FC = () => {
 							if (Math.random() > 0.1) {
 								// Ranging Simulation
 								if (packet.payload?.type === "RANGING_POLL") {
-									// Generate Response
-									const trueDist = dist / PIXELS_PER_METER;
-									const noise = (Math.random() - 0.5) * 0.6; // +/- 30cm
-									const measuredDist = Math.max(0, trueDist + noise);
+									const measurement = uwbRef.current.measure(
+										{ id: sender.id, x: sender.x, y: sender.y },
+										{ id: receiver.id, x: receiver.x, y: receiver.y },
+										{ pixelsPerMeter: PIXELS_PER_METER, maxRangeMeters: config.uwbRange, walls: currentWalls }
+									);
 
-									// Calculate AoA (Angle of Arrival) at the Initiator (sender)
-									// Vector from Initiator (sender) to Responder (receiver)
-									const dx = receiver.x - sender.x;
-									const dy = receiver.y - sender.y;
-									const trueAngle = Math.atan2(dy, dx);
-									const angleNoise = (Math.random() - 0.5) * (10 * (Math.PI / 180)); // +/- 5 degrees
-									const measuredAoA = trueAngle + angleNoise;
+									if (measurement.success) {
+										const responsePacket: Packet = {
+											id: `resp-${receiver.id}-${sender.id}-${Date.now()}`,
+											type: PacketType.DATA,
+											srcId: receiver.id,
+											destId: sender.id,
+											payload: {
+												type: "RANGING_RESPONSE",
+												distance: measurement.measuredDistanceMeters,
+												aoa: measurement.aoa,
+												aod: measurement.aod,
+												tof: measurement.timeOfFlightSeconds,
+												los: measurement.los,
+											},
+											timestamp: Date.now(),
+										};
 
-									const responsePacket: Packet = {
-										id: `resp-${receiver.id}-${sender.id}-${Date.now()}`,
-										type: PacketType.DATA,
-										srcId: receiver.id,
-										destId: sender.id,
-										payload: {
-											type: "RANGING_RESPONSE",
-											distance: measuredDist,
-											aoa: measuredAoA,
-										},
-										timestamp: Date.now(),
-									};
-
-									// Schedule Response
-									setTimeout(() => {
-										txQueueRef.current.push({ senderId: receiver.id, packet: responsePacket });
-									}, 10);
+										// Schedule Response
+										setTimeout(() => {
+											txQueueRef.current.push({ senderId: receiver.id, packet: responsePacket });
+										}, 10);
+									}
 								} else {
 									// Normal Delivery
 									if (receiver.hal.onRx) {
@@ -377,6 +391,9 @@ const App: React.FC = () => {
 								timestamp: sighting.timestamp,
 								neighbors: [{ id: sighting.targetId, range: sighting.distance }],
 								battery: node.battery,
+								x: node.x / PIXELS_PER_METER,
+								y: node.y / PIXELS_PER_METER,
+								status: node.state,
 							});
 						}
 					}
@@ -390,9 +407,20 @@ const App: React.FC = () => {
 								timestamp: report.timestamp,
 								neighbors: report.neighbors,
 								battery: report.battery,
+								status: report.status,
 							});
 						}
 					}
+				} else if (node.role === NodeRole.ISOLATED) {
+					// Internet fallback: isolated node reports its own pose directly
+					cloudBackendRef.current.ingest({
+						nodeId: node.id,
+						timestamp: Date.now(),
+						x: node.x / PIXELS_PER_METER,
+						y: node.y / PIXELS_PER_METER,
+						battery: node.battery,
+						status: node.state,
+					});
 				} else {
 					// Non-Gateway nodes just clear their local sighting queue (simulating storage limit)
 					// In reality, they would aggregate these into the GOSSIP packet sent in runAnchorLogic
@@ -539,6 +567,7 @@ const App: React.FC = () => {
 	const nukeAll = () => {
 		setNodes([]);
 		nodesRef.current = [];
+		prevOdomRef.current.clear();
 		setOpenWindows([]);
 		setWalls([]);
 	};
