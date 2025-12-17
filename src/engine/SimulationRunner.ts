@@ -1,5 +1,6 @@
 import { NodeFirmware } from "../firmware/NodeFirmware.ts";
 import { INodeHAL, ImuSample, FirmwareSnapshot } from "../firmware/types.ts";
+import type { FirmwareConfig } from "../firmware/types.ts";
 import { Packet, Wall } from "../types/index.ts";
 import UWBRanging from "../logic/UWBRanging.ts";
 
@@ -32,6 +33,7 @@ export interface SimulationOptions {
 	uwbRangeMeters?: number;
 	uwbNoiseSigma?: number;
 	packetLoss?: number; // 0..1
+	firmwareConfig?: Partial<FirmwareConfig>;
 }
 
 export interface SimulationHooks {
@@ -61,10 +63,12 @@ export class SimulationRunner {
 	private packetLoss: number;
 	private readonly uwb: UWBRanging;
 	private hooks: SimulationHooks | undefined;
+	private readonly firmwareConfig: Partial<FirmwareConfig> | undefined;
 
 	constructor(opts?: SimulationOptions) {
 		this.uwbRangeMeters = opts?.uwbRangeMeters ?? 15;
 		this.packetLoss = opts?.packetLoss ?? 0.1;
+		this.firmwareConfig = opts?.firmwareConfig;
 		// Share the same stochastic UWB model as the UI.
 		// Engine units are meters, so treat them as "pixels" with pixelsPerMeter=1.
 		this.uwb = new UWBRanging(1, { noiseStdMeters: opts?.uwbNoiseSigma ?? 0.05 });
@@ -114,7 +118,7 @@ export class SimulationRunner {
 			},
 		};
 
-		const fw = new NodeFirmware(id, hal, undefined, { lteCapable: hasLte });
+		const fw = new NodeFirmware(id, hal, this.firmwareConfig, { lteCapable: hasLte });
 		nodeState = {
 			id,
 			firmware: fw,

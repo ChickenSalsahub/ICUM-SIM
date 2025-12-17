@@ -38,7 +38,13 @@ export class NodeFirmware {
 		this.cfg = {
 			accelMoveThresholdG: 0.5,
 			isolationNoAckMs: 30_000,
-			neighborTimeoutMs: 5_000,
+			neighborTimeoutMs: 20_000,
+			eventDrivenSensing: true,
+			helloIntervalMovingMs: 1_000,
+			helloIntervalIdleMs: 15_000,
+			rangingIntervalMovingMs: 1_000,
+			rangingIntervalIdleMs: 10_000,
+			rangingMaintenanceMs: 0,
 			lambdaDistance: 1.0,
 			lambdaAngle: 0.5,
 			learningRate: 0.2, // spring-relaxation step (matches paper's α)
@@ -49,12 +55,14 @@ export class NodeFirmware {
 
 	public tick(dtMs: number) {
 		const now = this.hal.getTimeMs();
+		const prevState = this.state;
 		this.consumeRadio(now);
 		this.pruneStaleNeighbors(now);
 		this.detectTopologyChange(now);
-		this.maybeSendRangingPoll(now);
 		this.updateStateFromImu(now);
+		const stateChanged = this.state !== prevState;
 		this.runLeaderElection(now);
+		this.maybeSendRangingPoll(now, prevState, stateChanged);
 		this.maybeSendHello(now);
 		this.runGraphOptimization(dtMs);
 	}
@@ -82,10 +90,10 @@ export class NodeFirmware {
 			if (p.destId !== -1 && p.destId !== this.id) continue;
 			// Any successful reception implies connectivity (prevents everyone timing out into ISOLATED)
 			if (p.srcId !== this.id) this.lastAckMs = now;
-			if (p.type === PacketType.DATA && p.payload?.type === "HELLO") this.recordNeighborObservation(p, now);
+			if (p.payload?.type === "HELLO") this.recordNeighborObservation(p, now);
 
 			//Ranging packets
-			if (p.type === PacketType.DATA && (p.payload?.type === "RANGING_POLL" || p.payload?.type === "RANGING_RESP")) {
+			if (p.payload?.type === "RANGING_POLL" || p.payload?.type === "RANGING_RESP") {
 				this.recordNeighborObservation(p, now);
 
 				//if someone asked us for ranging, respond
@@ -134,18 +142,41 @@ export class NodeFirmware {
 	}
 
 	///Send a ranging poll if enough time has passed since the last one
-	private maybeSendRangingPoll(now: number) {
-		// Adaptive sensing:
-		// - When moving, poll frequently.
-		// - When stationary, poll frequently only if topology changed recently.
-		//   Otherwise, slow down to reduce churn.
-		const FAST_MS = 1_000;
-		const SLOW_MS = 10_000;
-		const TOPOLOGY_RECENT_MS = 5_000;
+	private hasIncompleteNeighborInfo() {
+		for (const n of this.neighbors.values()) {
+			// Range comes only from ranging injection; HELLOs default to 0.
+			if (!Number.isFinite(n.rangeMeters) || n.rangeMeters <= 0) return true;
+			if (n.angleRad === undefined) return true;
+		}
+		return false;
+	}
 
+	///Send a ranging poll if policy allows
+	private maybeSendRangingPoll(now: number, prevState: NodeFirmware["state"], stateChanged: boolean) {
+		const TOPOLOGY_RECENT_MS = 5_000;
 		const isMoving = this.state === "MOVING";
 		const topologyRecentlyChanged = now - this.lastTopologyChangeMs <= TOPOLOGY_RECENT_MS;
-		const intervalMs = isMoving || topologyRecentlyChanged ? FAST_MS : SLOW_MS;
+		const recoveredFromIsolation = prevState === "ISOLATED" && this.state !== "ISOLATED";
+		const needsLearning = this.hasIncompleteNeighborInfo();
+
+		const movingIntervalMs = this.cfg.rangingIntervalMovingMs ?? 1_000;
+		const idleIntervalMs = this.cfg.rangingIntervalIdleMs ?? 10_000;
+		const maintenanceMs = this.cfg.rangingMaintenanceMs ?? 0;
+
+		// ICUM event-driven mode: when stationary+stable, only range on events or when
+		// we still lack measurements.
+		if (this.cfg.eventDrivenSensing && !isMoving && !topologyRecentlyChanged) {
+			const shouldFire = recoveredFromIsolation || stateChanged || needsLearning;
+			if (!shouldFire) {
+				if (maintenanceMs > 0 && now - this.lastRangePollMs >= maintenanceMs) {
+					// fallthrough to send a very slow maintenance poll
+				} else {
+					return;
+				}
+			}
+		}
+
+		const intervalMs = isMoving || topologyRecentlyChanged ? movingIntervalMs : idleIntervalMs;
 		if (now - this.lastRangePollMs < intervalMs) return;
 		this.lastRangePollMs = now;
 		const degree = this.neighbors.size;
@@ -244,10 +275,10 @@ export class NodeFirmware {
 	private maybeSendHello(now: number) {
 		// Keepalive HELLO:
 		// - Fast when moving/topology is changing.
-		// - Slow when stationary and stable, but still frequent enough to prevent
-		//   the whole network from going silent (and timing out into ISOLATED).
-		const FAST_MS = 1_000;
-		const SLOW_MS = 5_000;
+		// - Much slower when stationary+stable to reduce chatter while keeping
+		//   neighbor tables alive.
+		const FAST_MS = this.cfg.helloIntervalMovingMs ?? 1_000;
+		const SLOW_MS = this.cfg.helloIntervalIdleMs ?? 15_000;
 		const TOPOLOGY_RECENT_MS = 5_000;
 		const isMoving = this.state === "MOVING";
 		const topologyRecentlyChanged = now - this.lastTopologyChangeMs <= TOPOLOGY_RECENT_MS;
@@ -257,7 +288,7 @@ export class NodeFirmware {
 		const degree = this.neighbors.size;
 		const hello: Packet = {
 			id: `${this.id}-hello-${now}`,
-			type: PacketType.DATA,
+			type: PacketType.HELLO,
 			srcId: this.id,
 			destId: -1,
 			payload: {

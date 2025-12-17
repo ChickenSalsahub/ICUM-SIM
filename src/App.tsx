@@ -242,7 +242,7 @@ const App: React.FC = () => {
 		if (runnerRef.current) return runnerRef.current;
 		const runner = new SimulationRunner({
 			uwbRangeMeters: config.uwbRange,
-			uwbNoiseSigma: 0.05,
+			uwbNoiseSigma: 0.01,
 			packetLoss: 0.1,
 		});
 		runnerRef.current = runner;
@@ -1223,25 +1223,32 @@ const App: React.FC = () => {
 							<div style={{ display: "flex", flexDirection: "column", gap: "2px", padding: "8px" }}>
 								{packets
 									.filter((p) => packetFilter === "ALL" || p.type === packetFilter)
-									.map((p) => (
-										<div
-											key={p.id}
-											style={{
-												padding: "4px",
-												borderBottom: "1px solid #1e293b",
-												fontFamily: "monospace",
-												fontSize: "9px",
-												color: "#cbd5e1",
-												display: "flex",
-												gap: "8px",
-											}}
-										>
-											<span style={{ fontWeight: "bold", color: getPacketColor(p.type) }}>{p.type}</span>
-											<span>
-												ID:{p.srcId} → {p.destId === -1 ? "ALL" : `ID:${p.destId}`}
-											</span>
-										</div>
-									))}
+									.map((p) => {
+										const payloadKind =
+											p.type === PacketType.DATA && p.payload && typeof p.payload === "object" && "type" in p.payload
+												? String((p.payload as { type?: unknown }).type ?? "DATA")
+												: undefined;
+										const displayType = payloadKind ?? p.type;
+										return (
+											<div
+												key={p.id}
+												style={{
+													padding: "4px",
+													borderBottom: "1px solid #1e293b",
+													fontFamily: "monospace",
+													fontSize: "9px",
+													color: "#cbd5e1",
+													display: "flex",
+													gap: "8px",
+												}}
+											>
+												<span style={{ fontWeight: "bold", color: getPacketColor(p.type) }}>{displayType}</span>
+												<span>
+													ID:{p.srcId} → {p.destId === -1 ? "ALL" : `ID:${p.destId}`}
+												</span>
+											</div>
+										);
+									})}
 							</div>
 						</DraggableWindow>
 					)}

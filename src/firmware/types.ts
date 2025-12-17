@@ -39,6 +39,18 @@ export interface FirmwareConfig {
 	accelMoveThresholdG: number;
 	isolationNoAckMs: number;
 	neighborTimeoutMs: number;
+	// ICUM sensing policy: when enabled, stationary+stable nodes avoid periodic ranging
+	// and only range on IMU/topology events (with an optional maintenance interval).
+	eventDrivenSensing?: boolean;
+	// HELLO cadence controls (ms). If unset, firmware defaults are used.
+	helloIntervalMovingMs?: number;
+	helloIntervalIdleMs?: number;
+	// Ranging cadence controls (ms). If unset, firmware defaults are used.
+	rangingIntervalMovingMs?: number;
+	rangingIntervalIdleMs?: number;
+	// When eventDrivenSensing is enabled, allow an optional very-slow maintenance poll.
+	// Set to 0 or undefined to disable.
+	rangingMaintenanceMs?: number;
 	lambdaDistance: number;
 	lambdaAngle: number;
 	learningRate: number;

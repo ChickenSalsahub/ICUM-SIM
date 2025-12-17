@@ -206,4 +206,67 @@ describe("Adaptive sensing cadence", () => {
 		fw.tick(100);
 		expect(radioOut.some((p) => p.payload?.type === "RANGING_POLL")).toBe(true);
 	});
+
+	it("suppresses periodic ranging when stationary+stable and measurements are known (event-driven)", () => {
+		let now = 0;
+		let radioOut: Packet[] = [];
+		let inbound: Packet[] = [];
+		const hal: INodeHAL = {
+			getIMU: () => ({ accel: { x: 0, y: 0, z: 9.81 }, gyro: { x: 0, y: 0, z: 0 } }),
+			pollRadio: () => {
+				const items = inbound;
+				inbound = [];
+				return items;
+			},
+			getBatteryVoltage: () => 3.7,
+			getTimeMs: () => now,
+			radioSend: (p) => radioOut.push(p),
+			log: () => {},
+		};
+
+		const fw = new NodeFirmware(1, hal, {
+			neighborTimeoutMs: 100_000,
+			isolationNoAckMs: 100_000,
+			eventDrivenSensing: true,
+			// Make it easy for the test to fail if periodic ranging leaks through.
+			rangingIntervalIdleMs: 1_000,
+			rangingIntervalMovingMs: 1_000,
+			rangingMaintenanceMs: 0,
+			// Avoid HELLO noise in assertions.
+			helloIntervalIdleMs: 100_000,
+		});
+
+		// Seed neighbor + a real measurement (range+angle) so "needsLearning" becomes false.
+		inbound = [
+			{
+				id: "hello-2",
+				type: PacketType.HELLO,
+				srcId: 2,
+				destId: -1,
+				payload: { type: "HELLO", batteryV: 4.0, degree: 1 },
+				timestamp: now,
+			},
+			{
+				id: "resp-2",
+				type: PacketType.DATA,
+				srcId: 2,
+				destId: 1,
+				payload: { type: "RANGING_RESP", range: 5, angle: 0.25, batteryV: 4.0, degree: 1 },
+				timestamp: now,
+			},
+		];
+		fw.tick(100);
+
+		// After topology recency window passes (5s), stationary+stable should not poll periodically.
+		now = 7_000;
+		radioOut = [];
+		fw.tick(100);
+		expect(radioOut.some((p) => p.payload?.type === "RANGING_POLL")).toBe(false);
+
+		// Even much later, still no periodic ranging (maintenance disabled).
+		now = 25_000;
+		radioOut = [];
+		fw.tick(100);
+		expect(radioOut.some((p) => p.payload?.type === "RANGING_POLL")).toBe(false);
+	});
 });

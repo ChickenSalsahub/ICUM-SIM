@@ -107,10 +107,29 @@ function cloudRmse(latest: Map<number, FusedRecord>, truth: Map<number, { x: num
 }
 
 // Experiment A: Compare baseline vs ETM over time
+//baseline sends messages at fixed rate; ETM adapts based on motion and topology changes
+//baseline sends every 2s
 function runExperimentA(): ExperimentATimeRow[] {
 	const seed = makeSeed(10);
-	const baseline = new SimulationRunner({ uwbNoiseSigma: 0.05 });
-	const etm = new SimulationRunner({ uwbNoiseSigma: 0.05 });
+	const baseline = new SimulationRunner({
+		uwbNoiseSigma: 0.05,
+		firmwareConfig: {
+			// Fixed-rate baseline: send at ~2s regardless of IMU/topology.
+			eventDrivenSensing: false,
+			helloIntervalMovingMs: 2_000,
+			helloIntervalIdleMs: 2_000,
+			rangingIntervalMovingMs: 2_000,
+			rangingIntervalIdleMs: 2_000,
+			neighborTimeoutMs: 5_000,
+		},
+	});
+	const etm = new SimulationRunner({
+		uwbNoiseSigma: 0.05,
+		firmwareConfig: {
+			// ICUM/ETM: IMU/topology-driven sensing (default behavior), explicit for clarity.
+			eventDrivenSensing: true,
+		},
+	});
 	seedNodes(baseline, seed);
 	seedNodes(etm, seed);
 
@@ -281,7 +300,7 @@ export function main() {
 		runExperimentB().map((r) => [r.nodeCount, r.noiseSigma, r.rmse, r.mae].join(","))
 	);
 
-	const headerC = "Time,Nodes,Tx,RMSE\n";
+	const headerC = "Time,Nodes,TxPerNodePerMin,ALE,ConvergenceMs\n";
 	write(
 		"experiments_C.csv",
 		headerC,
