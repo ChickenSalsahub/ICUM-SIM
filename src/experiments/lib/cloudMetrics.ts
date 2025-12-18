@@ -1,3 +1,4 @@
+import { applyRigid2D, bestFitRigid2D, type Pt } from "./metrics.ts";
 import type { FusedRecord } from "../../logic/CloudBackend.ts";
 
 /**
@@ -16,6 +17,7 @@ export function latestByNode(records: FusedRecord[]) {
  * Computes RMSE between cloud fused positions and known ground truth.
  *
  * Returns both error and coverage (how many nodes had a fused record).
+ * IMPORTANT: This assumes the cloud graph is already in the global frame!
  */
 export function cloudRmse(latest: Map<number, FusedRecord>, truth: Map<number, { x: number; y: number }>) {
 	let sumSq = 0;
@@ -29,4 +31,37 @@ export function cloudRmse(latest: Map<number, FusedRecord>, truth: Map<number, {
 		count += 1;
 	}
 	return { rmse: count > 0 ? Math.sqrt(sumSq / count) : Number.NaN, coverage: count };
+}
+
+/**
+ * Computes Aligned RMSE (RMSD) for cloud positions.
+ *
+ * This performs a rigid alignment (Best Fit) before scoring, which is critical
+ * if the cloud graph is floating (anchor-free).
+ */
+export function cloudRmseAligned(latest: Map<number, FusedRecord>, truth: Map<number, { x: number; y: number }>) {
+	const estPoints: Pt[] = [];
+	const truePoints: Pt[] = [];
+
+	for (const [id, t] of truth.entries()) {
+		const r = latest.get(id);
+		if (!r) continue;
+		estPoints.push({ x: r.position.x, y: r.position.y });
+		truePoints.push({ x: t.x, y: t.y });
+	}
+
+	if (estPoints.length < 2) return { rmse: Number.NaN, coverage: estPoints.length };
+
+	const tf = bestFitRigid2D(truePoints, estPoints);
+	if (!tf) return { rmse: Number.NaN, coverage: estPoints.length };
+
+	let sumSq = 0;
+	for (let i = 0; i < estPoints.length; i++) {
+		const aligned = applyRigid2D(estPoints[i], tf);
+		const dx = aligned.x - truePoints[i].x;
+		const dy = aligned.y - truePoints[i].y;
+		sumSq += dx * dx + dy * dy;
+	}
+
+	return { rmse: Math.sqrt(sumSq / estPoints.length), coverage: estPoints.length };
 }

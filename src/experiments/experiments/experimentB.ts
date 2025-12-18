@@ -277,7 +277,7 @@ export function runExperimentBRaw(): ExperimentBRowRaw[] {
 	const layout = makeSeed(nodeCount, seededRng(baseSeed + 200));
 
 	// Keep this list stable: it defines the X-axis for the sensitivity curve.
-	const noiseSigmas = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0];
+	const noiseSigmas = [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0];
 
 	// Increase for tighter confidence intervals; keep modest to avoid slow runs.
 	const seedCount = 10;

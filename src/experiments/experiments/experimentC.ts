@@ -1,19 +1,15 @@
 import { SimulationRunner } from "../../engine/SimulationRunner.ts";
 import { applyMotionScenario } from "../lib/motion.ts";
-import { aleAlignedRigid, sumTx } from "../lib/metrics.ts";
+import { rmseAlignedRigid, sumTx } from "../lib/metrics.ts";
 import { EXPERIMENT_WORLD_BOUNDS_M, type MotionScenarioName } from "../lib/types.ts";
-import { getCliNumber } from "../lib/cli.ts";
 import { getCliSeed, makeSeed, seededRng, seedNodes } from "../lib/seed.ts";
-import { createRollingMeanConvergenceTracker } from "../lib/convergence.ts";
+// import { createRollingMeanConvergenceTracker } from "../lib/convergence.ts";
 
 export interface ExperimentCTimeRow {
 	timeSeconds: number;
 	nodes: number;
 	txPerNodePerMin: number;
-	ale: number;
-	convergenceMs?: number;
-	/** First time the smoothed ALE crosses <= convEps (and stays for convHold samples). */
-	tEpsMs?: number;
+	rmse: number;
 }
 
 export interface ExperimentCScenarioTimeRow extends ExperimentCTimeRow {
@@ -28,20 +24,14 @@ export interface ExperimentCScenarioTimeRow extends ExperimentCTimeRow {
  *   and what is the messaging rate?
  *
  * What this measures
- * - Tx per node per minute (normalized for fair comparison)
- * - ALE (average localization error) over time
- * - A simple convergence time heuristic
+ * - Tx per node per minute (instantaneous rate)
+ * - RMSE (root mean squared error) over time
  */
 export function runExperimentCScenarios(): ExperimentCScenarioTimeRow[] {
 	const rows: ExperimentCScenarioTimeRow[] = [];
-	const simSeconds = 300;
+	const simSeconds = 600;
 	const logEveryMs = 1_000;
 
-	// Paper-friendly convergence (tweakable): time-to-threshold with hold + smoothing.
-	// Run with e.g. `npm run experiments -- --convEps=1 --convHold=5 --convWindow=30`
-	const convEpsMeters = getCliNumber("convEps", 1.0);
-	const convHoldSamples = Math.max(1, Math.floor(getCliNumber("convHold", 5)));
-	const convWindowSeconds = Math.max(1, getCliNumber("convWindow", 30));
 	const baseSeed = getCliSeed(1);
 	const scenarios: MotionScenarioName[] = ["none_moving", "few_moving", "many_moving"];
 
@@ -63,47 +53,51 @@ export function runExperimentCScenarios(): ExperimentCScenarioTimeRow[] {
 			// Convergence heuristic (paper-friendly, noise-tolerant):
 			//
 			// Cooperative localization without anchors is only identifiable up to a global
-			// rotation/translation. We therefore use an anchor-free ALE (rigid alignment to
+			// rotation/translation. We therefore use an anchor-free RMSE (rigid alignment to
 			// truth) and detect convergence by looking at a smoothed metric.
 			//
 			// Definition:
-			// - Let m(t) be the rolling mean of aligned ALE over a 30 second window.
+			// - Let m(t) be the rolling mean of aligned RMSE over a 30 second window.
 			// - Declare convergence at the first time where |m(t) - m(t-1)| <= 0.05m for
 			//   5 consecutive seconds.
-			//
-			// This avoids false "no convergence" when the per-second ALE jitters (which it
-			// will, with packet loss and measurement noise).
-			const tracker = createRollingMeanConvergenceTracker({
-				samplePeriodMs: logEveryMs,
-				windowMs: convWindowSeconds * 1000,
-				stableDelta: 0.05,
-				stableHoldMs: 5_000,
-				threshold: convEpsMeters,
-				thresholdHoldMs: convHoldSamples * logEveryMs,
-			});
+			// const tracker = createRollingMeanConvergenceTracker({
+			// 	samplePeriodMs: logEveryMs,
+			// 	windowMs: 30_000,
+			// 	stableDelta: 0.05,
+			// 	stableHoldMs: 10_000,
+			// });
 
+			let lastTotalTx = 0;
 			for (let t = 0; t <= simSeconds * 1000; t += logEveryMs) {
 				applyMotionScenario(runner, scenario, t);
 				const snap = runner.snapshot();
-				const totalTx = sumTx(snap.nodes);
-				const currentAle = aleAlignedRigid(snap.nodes);
+				const currentTotalTx = sumTx(snap.nodes);
+				const currentRmse = rmseAlignedRigid(snap.nodes);
 
-				// Normalize by time elapsed so this stays meaningful even if we
-				// change the sample period.
-				const txPerNodePerMin = totalTx / nodeCount / (snap.timeMs / 60000 || 1);
-
-				tracker.update(snap.timeMs, currentAle);
-				const { convergenceStableMs: convergenceMs, tThresholdMs: tEpsMs } = tracker.getState();
+				// Instantaneous rate: (delta_tx / nodes) / (delta_time_min)
+				// delta_time is logEveryMs (1 sec) = 1/60 min
+				const deltaTx = currentTotalTx - lastTotalTx;
+				lastTotalTx = currentTotalTx;
+				const txPerNodePerMin = (deltaTx / nodeCount) * 60;
 
 				rows.push({
 					scenario,
 					timeSeconds: t / 1000,
 					nodes: nodeCount,
 					txPerNodePerMin,
-					ale: currentAle,
-					convergenceMs,
-					tEpsMs,
+					rmse: currentRmse,
 				});
+
+				// tracker.update(t, currentRmse);
+				// const { convergenceStableMs } = tracker.getState();
+				// if (convergenceStableMs !== undefined) {
+				// 	// Optimization: early exit if stable.
+				// 	// For moving scenarios, we MUST wait until after the motion block (180s)
+				// 	// to ensure we capture the motion handling and recovery.
+				// 	// if (scenario === "none_moving") break;
+				// 	// if (t > MOTION_STOP_MS + 30_000) break;
+				// }
+
 				runner.step(logEveryMs);
 			}
 		}

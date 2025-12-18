@@ -2,7 +2,7 @@ import { SimulationRunner } from "../../engine/SimulationRunner.ts";
 import { CloudBackend } from "../../logic/CloudBackend.ts";
 import { createMulberry32 } from "../../logic/math/Random.ts";
 import { applyMotionScenario } from "../lib/motion.ts";
-import { cloudRmse, latestByNode } from "../lib/cloudMetrics.ts";
+import { cloudRmseAligned, latestByNode } from "../lib/cloudMetrics.ts";
 import { EXPERIMENT_WORLD_BOUNDS_M, type MotionScenarioName } from "../lib/types.ts";
 import { getCliSeed, makeSeed, seededRng, seedNodes } from "../lib/seed.ts";
 
@@ -134,7 +134,7 @@ export function runExperimentDScenarios(): ExperimentDScenarioTimeRow[] {
 			cloud.tick(nowMs);
 
 			const latest = latestByNode(cloud.getRecords());
-			const stats = cloudRmse(latest, truth);
+			const stats = cloudRmseAligned(latest, truth);
 
 			rows.push({
 				scenario,

@@ -1,4 +1,8 @@
+// @ts-ignore
+declare module "react-plotly.js";
+
 import React, { useState, useEffect, useCallback, useRef } from "react";
+
 import {
 	Play,
 	Pause,
@@ -16,6 +20,7 @@ import {
 	TrendingDown,
 	BrickWall,
 } from "lucide-react";
+import { AnalysisDashboard } from "./components/AnalysisDashboard";
 import { CloudBackend, type CloudBackendOptions, type CloudEvent, FusedRecord } from "./logic/CloudBackend";
 import { computeCloudStructureStatsMeters } from "./logic/metrics/CloudTopologyMetrics";
 import { DraggableWindow } from "./components/DraggableWindow";
@@ -57,16 +62,15 @@ const CANVAS_WIDTH = 1200;
 const CANVAS_HEIGHT = 800;
 
 // Keep UI arena consistent with experiment bounds (0..50m in both axes).
-const OFFSET_X_M = 20,
-	OFFSET_Y_M = 10;
-const OFFSET_X_PX = OFFSET_X_M;
-const OFFSET_Y_PX = OFFSET_Y_M;
-const WORLD_BOUNDS_M = { minX: 0, maxX: 48, minY: 0, maxY: 40 };
+const ARENAHEADER = "Arena (48m × 35m)";
+const OFFSET_X_PX = 60; // Increased to make room for axis labels
+const OFFSET_Y_PX = 60;
+const WORLD_BOUNDS_M = { minX: 0, maxX: 48, minY: 0, maxY: 35 };
 const WORLD_BOUNDS_PX = {
-	minX: WORLD_BOUNDS_M.minX * PIXELS_PER_METER + OFFSET_X_M,
-	maxX: WORLD_BOUNDS_M.maxX * PIXELS_PER_METER + OFFSET_X_M,
-	minY: WORLD_BOUNDS_M.minY * PIXELS_PER_METER + OFFSET_Y_M,
-	maxY: WORLD_BOUNDS_M.maxY * PIXELS_PER_METER + OFFSET_Y_M,
+	minX: WORLD_BOUNDS_M.minX * PIXELS_PER_METER + OFFSET_X_PX,
+	maxX: WORLD_BOUNDS_M.maxX * PIXELS_PER_METER + OFFSET_X_PX,
+	minY: WORLD_BOUNDS_M.minY * PIXELS_PER_METER + OFFSET_Y_PX,
+	maxY: WORLD_BOUNDS_M.maxY * PIXELS_PER_METER + OFFSET_Y_PX,
 };
 
 type Pose2D = { x: number; y: number; theta: number };
@@ -228,8 +232,11 @@ const doIntersect = (
 // For anchor-free topology, prefer the aligned and pairwise-distance metrics below.
 
 const App: React.FC = () => {
+    const [viewMode, setViewMode] = useState<"SIM" | "ANALYSIS">("SIM");
 	const [nodes, setNodes] = useState<UiNode[]>([]);
 	const [links, setLinks] = useState<Link[]>([]);
+    // ... rest of state
+
 	const [packets, setPackets] = useState<Packet[]>([]);
 	const [visualPackets, setVisualPackets] = useState<VisualPacket[]>([]);
 	const [fusedRecordsBaseline, setFusedRecordsBaseline] = useState<FusedRecord[]>([]);
@@ -534,19 +541,36 @@ const App: React.FC = () => {
 
 					if (vp.style === "LINE") {
 						const targetNode = currentNodes.find((n) => n.id === vp.targetId);
-						let tx = vp.x;
+						const sourceNode = currentNodes.find((n) => n.id === vp.sourceId);
+
+						let sx = vp.startX;
+						let sy = vp.startY;
+						let tx = vp.x; // default to prev
 						let ty = vp.y;
-						if (targetNode) {
-							tx = vp.startX + (targetNode.x - vp.startX) * vp.progress;
-							ty = vp.startY + (targetNode.y - vp.startY) * vp.progress;
+
+						// If source exists, track its current position for sliding link effect
+						if (sourceNode) {
+							sx = sourceNode.x;
+							sy = sourceNode.y;
 						}
+						
+						if (targetNode) {
+							// Interpolate between current source and current target
+							tx = sx + (targetNode.x - sx) * vp.progress;
+							ty = sy + (targetNode.y - sy) * vp.progress;
+						} else {
+							// Fallback if target is gone
+							tx = sx + (vp.x - vp.startX) * vp.progress;
+						}
+						
 						vp.x = tx;
 						vp.y = ty;
 
+						// Check wall intersection
 						for (const w of currentWalls) {
 							if (
 								doIntersect(
-									{ x: vp.startX, y: vp.startY },
+									{ x: sx, y: sy },
 									{ x: vp.x, y: vp.y },
 									{ x: w.x1, y: w.y1 },
 									{ x: w.x2, y: w.y2 }
@@ -554,6 +578,12 @@ const App: React.FC = () => {
 							) {
 								return null;
 							}
+						}
+					} else if (vp.style === "RING") {
+						const sourceNode = currentNodes.find((n) => n.id === vp.sourceId);
+						if (sourceNode) {
+							vp.x = sourceNode.x;
+							vp.y = sourceNode.y;
 						}
 					}
 					return vp;
@@ -589,15 +619,16 @@ const App: React.FC = () => {
 						newVisuals.push({
 							id: Math.random().toString(),
 							packet,
-							x: senderPos.x * PIXELS_PER_METER,
-							y: senderPos.y * PIXELS_PER_METER,
-							startX: senderPos.x * PIXELS_PER_METER,
-							startY: senderPos.y * PIXELS_PER_METER,
+							x: senderPos.x * PIXELS_PER_METER + OFFSET_X_PX,
+							y: senderPos.y * PIXELS_PER_METER + OFFSET_Y_PX,
+							startX: senderPos.x * PIXELS_PER_METER + OFFSET_X_PX,
+							startY: senderPos.y * PIXELS_PER_METER + OFFSET_Y_PX,
 							targetId: -1,
 							progress: 0,
 							speed: packet.type === PacketType.DATA ? 2.5 : 2.0,
 							style: "RING",
 							maxRadius: rangePx,
+							sourceId: senderId,
 						});
 					}
 				},
@@ -606,14 +637,15 @@ const App: React.FC = () => {
 						newVisuals.push({
 							id: Math.random().toString(),
 							packet,
-							x: senderPos.x * PIXELS_PER_METER,
-							y: senderPos.y * PIXELS_PER_METER,
-							startX: senderPos.x * PIXELS_PER_METER,
-							startY: senderPos.y * PIXELS_PER_METER,
+							x: senderPos.x * PIXELS_PER_METER + OFFSET_X_PX,
+							y: senderPos.y * PIXELS_PER_METER + OFFSET_Y_PX,
+							startX: senderPos.x * PIXELS_PER_METER + OFFSET_X_PX,
+							startY: senderPos.y * PIXELS_PER_METER + OFFSET_Y_PX,
 							targetId: packet.destId,
 							progress: 0,
 							speed: 2.5,
 							style: "LINE",
+							sourceId: packet.srcId,
 						});
 					}
 				},
@@ -1038,6 +1070,27 @@ const App: React.FC = () => {
 		setContextMenu(null);
 	};
 
+    // --- RENDER ---
+    if (viewMode === "ANALYSIS") {
+        return (
+            <div style={{ width: "100vw", height: "100vh", backgroundColor: "white", overflow: "auto", position: "relative" }}>
+                 <button
+                    onClick={() => setViewMode("SIM")}
+                    style={{
+                        position: "fixed", top: "1rem", right: "1rem", zIndex: 50,
+                        display: "flex", alignItems: "center", gap: "0.5rem",
+                        padding: "0.5rem 1rem", backgroundColor: "#1f2937", color: "white",
+                        borderRadius: "0.25rem", border: "none", cursor: "pointer",
+                        boxShadow: "0 10px 15px -3px rgba(0, 0, 0, 0.1)"
+                    }}
+                >
+                    <Activity size={18} /> Back to Simulator
+                </button>
+                <AnalysisDashboard />
+            </div>
+        )
+    }
+
 	return (
 		<>
 			<style>{`body { margin: 0; padding: 0; overflow: hidden; box-sizing: border-box; }`}</style>
@@ -1047,6 +1100,19 @@ const App: React.FC = () => {
 				onMouseMove={handleMouseMove}
 				onMouseDown={(e) => handleMouseDown(e, "bg")}
 			>
+                <div style={{ position: "absolute", top: 16, right: 16, zIndex: 9999 }}>
+                     <button
+                        onClick={() => setViewMode("ANALYSIS")}
+                        style={{
+                            display: "flex", alignItems: "center", gap: "8px",
+                            padding: "8px 16px", backgroundColor: "#4f46e5", color: "white",
+                            borderRadius: "6px", border: "none", cursor: "pointer",
+                            boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.1)"
+                        }}
+                    >
+                        <Database size={18} /> View Analysis
+                    </button>
+                </div>
 				<div style={styles.sidebar}>
 					<div>
 						<h1 style={{ margin: 0, color: "#38bdf8", fontSize: "22px", fontWeight: "900" }}>MESH SIM v21</h1>
@@ -1634,7 +1700,7 @@ const App: React.FC = () => {
 										}
 										// Compute cloudStats and convergence status
 										const cloudStats = computeCloudStructureStatsMeters({ records: uniqueRecords, truthById, edges });
-										const { converged, convergenceText, convergenceColor } = computeCloudConvergence(
+										const { convergenceText, convergenceColor } = computeCloudConvergence(
 											uniqueRecords,
 											cloudStats
 										);
@@ -2120,8 +2186,52 @@ const App: React.FC = () => {
 								fontFamily="monospace"
 								opacity={0.8}
 							>
-								ARENA (48m × 40m)
+								{ARENAHEADER}
 							</text>
+
+                            {/* X-Axis Labels */}
+                            {Array.from({ length: 9 }).map((_, i) => {
+                                const m = i * 10; // 0, 10, 20...
+                                if (m > 50) return null;
+                                const px = WORLD_BOUNDS_PX.minX + m * PIXELS_PER_METER;
+                                return (
+                                    <g key={`x-axis-${m}`} transform={`translate(${px}, ${WORLD_BOUNDS_PX.minY - 5})`}>
+                                        <line y1="0" y2="5" stroke="#38bdf8" strokeWidth="1" opacity="0.5" />
+                                        <text
+                                            y="-4"
+                                            textAnchor="middle"
+                                            fill="#38bdf8"
+                                            fontSize="9"
+                                            fontFamily="monospace"
+                                            opacity="0.8"
+                                        >
+                                            {m}m
+                                        </text>
+                                    </g>
+                                );
+                            })}
+                            {/* Y-Axis Labels */}
+                            {Array.from({ length: 6 }).map((_, i) => {
+                                const m = i * 10;
+                                if (m > 40) return null;
+                                const py = WORLD_BOUNDS_PX.minY + m * PIXELS_PER_METER;
+                                return (
+                                    <g key={`y-axis-${m}`} transform={`translate(${WORLD_BOUNDS_PX.minX - 5}, ${py})`}>
+                                        <line x1="0" x2="5" stroke="#38bdf8" strokeWidth="1" opacity="0.5" />
+                                        <text
+                                            x="-4"
+                                            y="3"
+                                            textAnchor="end"
+                                            fill="#38bdf8"
+                                            fontSize="9"
+                                            fontFamily="monospace"
+                                            opacity="0.8"
+                                        >
+                                            {m}m
+                                        </text>
+                                    </g>
+                                );
+                            })}
 						</g>
 						{/* GHOST GRAPH VISUALIZATION (Cooperative Localization Belief) */}
 						{(() => {

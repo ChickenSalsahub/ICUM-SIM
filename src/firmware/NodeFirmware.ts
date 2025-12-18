@@ -676,7 +676,7 @@ export class NodeFirmware {
 		let stepY = (targetY - this.est.y) * alpha;
 
 		const stepNorm = Math.sqrt(stepX * stepX + stepY * stepY);
-		const maxStepMeters = 0.5;
+		const maxStepMeters = 5; // this means we can move at most 5m per second
 		if (stepNorm > maxStepMeters) {
 			const scale = maxStepMeters / stepNorm;
 			stepX *= scale;

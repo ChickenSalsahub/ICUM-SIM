@@ -45,7 +45,8 @@ export function ale(nodes: RunnerSnapshot["nodes"]) {
 	return mae(nodes);
 }
 
-type Pt = { x: number; y: number };
+
+export type Pt = { x: number; y: number };
 
 function meanPoint(points: Pt[]): Pt {
 	let sumX = 0;
@@ -66,9 +67,9 @@ function meanPoint(points: Pt[]): Pt {
  * identifiable up to a global rotation/translation. Measuring raw absolute
  * error can look "stuck" even when the relative geometry has converged.
  */
-type Rigid2D = { c: number; s: number; tx: number; ty: number; flipY?: boolean };
+export type Rigid2D = { c: number; s: number; tx: number; ty: number; flipY?: boolean };
 
-function bestFitRigid2D(truth: Pt[], est: Pt[]): Rigid2D | undefined {
+export function bestFitRigid2D(truth: Pt[], est: Pt[]): Rigid2D | undefined {
 	if (truth.length !== est.length) return undefined;
 	if (truth.length < 2) return undefined;
 
@@ -134,7 +135,7 @@ function bestFitRigid2D(truth: Pt[], est: Pt[]): Rigid2D | undefined {
 	return sseFlip < sseNo ? tfFlip : tfNo;
 }
 
-function applyRigid2D(p: Pt, tf: Rigid2D): Pt {
+export function applyRigid2D(p: Pt, tf: Rigid2D): Pt {
 	const y = tf.flipY ? -p.y : p.y;
 	return {
 		x: tf.c * p.x - tf.s * y + tf.tx,

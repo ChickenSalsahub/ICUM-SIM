@@ -33,6 +33,7 @@ export interface VisualPacket {
 	startX: number;
 	startY: number;
 	targetId: number;
+	sourceId?: number; // Optional source ID for dynamic link tracking
 	progress: number;
 	speed: number;
 	style: "LINE" | "RING";
