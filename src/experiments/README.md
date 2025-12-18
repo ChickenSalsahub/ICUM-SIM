@@ -4,7 +4,12 @@ This folder contains the headless experiment runner used to generate CSV outputs
 
 - Entry point: `src/experiments/runner.ts`
 - Run: `npm run experiments -- --seed=1`
-- Output: `experiments_A_noise*.csv`, `experiments_B.csv` … `experiments_E.csv` (written to the repo root)
+- Output (written to the repo root):
+  - Experiment A: `experiments_A_<scenario>_noise<xx.xx>.csv`
+  - Experiment B: `experiments_B.csv`
+  - Experiment C: `experiments_C_<scenario>.csv`
+  - Experiment D: `experiments_D_<scenario>.csv`
+  - Experiment E: `experiments_E_<scenario>_<policy>.csv`
 
 All experiments are deterministic given the same seed. The seed is taken from (highest priority first):
 
@@ -35,7 +40,7 @@ Each experiment is implemented in its own file under `src/experiments/experiment
 ### Experiment A — Baseline vs ETM over time
 
 - Implementation: `src/experiments/experiments/experimentA.ts`
-- CSV: `experiments_A_noise0.00.csv`, `experiments_A_noise0.05.csv`, `experiments_A_noise0.20.csv`
+- CSV: `experiments_A_<scenario>_noise0.00.csv`, `experiments_A_<scenario>_noise0.05.csv`, `experiments_A_<scenario>_noise0.20.csv`
 - Columns:
   - `Scenario`: motion scenario
   - `Time`: seconds
@@ -70,7 +75,7 @@ flowchart TD
   A2 --> A3["For each scenario: create 2 runners\n(baseline + ETM)"]
   A3 --> A4["For t = 0..T step dt:\n- apply motion scenario\n- snapshot\n- compute RMSE + total Tx\n- advance simulation"]
   A4 --> A5["Append CSV row per (scenario, time)"]
-  A5 --> A6["Write experiments_A_noise*.csv"]
+  A5 --> A6["Write experiments_A_<scenario>_noise*.csv"]
   A6 --> A7(("Done"))
 ```
 
@@ -111,7 +116,7 @@ flowchart TD
 ### Experiment C — Scaling and convergence
 
 - Implementation: `src/experiments/experiments/experimentC.ts`
-- CSV: `experiments_C.csv`
+- CSV: `experiments_C_<scenario>.csv`
 - Columns:
   - `Scenario`
   - `Time`
@@ -143,14 +148,14 @@ flowchart TD
   C4 --> C5["Initialize convergence tracker\n(prev ALE + stable count)"]
   C5 --> C6["For t = 0..T step dt:\n- apply motion\n- snapshot\n- compute ALE + TxPerNodePerMin\n- update convergence heuristic\n- advance"]
   C6 --> C7["Append CSV row per (scenario, nodeCount, time)"]
-  C7 --> C8["Write experiments_C.csv"]
+  C7 --> C8["Write experiments_C_<scenario>.csv"]
   C8 --> C9(("Done"))
 ```
 
 ### Experiment D — Cloud fusion baseline vs robust
 
 - Implementation: `src/experiments/experiments/experimentD.ts`
-- CSV: `experiments_D.csv`
+- CSV: `experiments_D_<scenario>.csv`
 - Columns:
   - `Scenario`
   - `Time`
@@ -191,14 +196,14 @@ flowchart TD
   D7 --> D8["Tick clouds; take latest estimate per node"]
   D8 --> D9["Compute RMSE + coverage (baseline vs robust)"]
   D9 --> D10["Append CSV row per (scenario, time)"]
-  D10 --> D11["Write experiments_D.csv"]
+  D10 --> D11["Write experiments_D_<scenario>.csv"]
   D11 --> D12(("Done"))
 ```
 
 ### Experiment E — Compact A/B runner across scenarios
 
 - Implementation: `src/experiments/experiments/experimentE.ts`
-- CSV: `experiments_E.csv`
+- CSV: `experiments_E_<scenario>_<policy>.csv`
 - Columns:
   - `Scenario`
   - `Policy`: `baseline` or `icum`
@@ -233,7 +238,7 @@ flowchart TD
   E4 --> E5["Derive per-run seed\nCreate runner w/ policy config"]
   E5 --> E6["For t = 0..T step dt:\n- apply scenario motion\n- log every 1s: TxTotal + RMSE\n- advance"]
   E6 --> E7["Append CSV row per (scenario, policy, time)"]
-  E7 --> E8["Write experiments_E.csv"]
+  E7 --> E8["Write experiments_E_<scenario>_<policy>.csv"]
   E8 --> E9(("Done"))
 ```
 

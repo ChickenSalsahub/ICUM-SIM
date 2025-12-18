@@ -151,9 +151,9 @@ flowchart LR
   Runner --> D["Experiment D\n(cloud baseline vs robust)"]
   Runner --> E["Experiment E\n(A/B policies, seeded)"]
 
-  A --> CSV_A[(experiments_A_noise*.csv)]
+  A --> CSV_A[(experiments_A_<scenario>_noise*.csv)]
   B --> CSV_B[(experiments_B.csv)]
-  C --> CSV_C[(experiments_C.csv)]
-  D --> CSV_D[(experiments_D.csv)]
-  E --> CSV_E[(experiments_E.csv)]
+  C --> CSV_C[(experiments_C_<scenario>.csv)]
+  D --> CSV_D[(experiments_D_<scenario>.csv)]
+  E --> CSV_E[(experiments_E_<scenario>_<policy>.csv)]
 ```

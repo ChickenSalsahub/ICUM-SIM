@@ -9,7 +9,8 @@
 		"test": "vitest",
 		"lint": "eslint .",
 		"preview": "vite preview",
-		"experiments": "tsx src/experiments/runner.ts"
+		"experiments": "tsx src/experiments/runner.ts",
+		"plots": "tsx src/experiments/plots/generatePlots.ts"
 	},
 	"dependencies": {
 		"lucide-react": "^0.554.0",
