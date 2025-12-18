@@ -13,6 +13,7 @@ export enum PacketType {
 	DATA = "DATA",
 	ELECTION = "ELECTION",
 	PANIC = "PANIC",
+	UPLINK = "UPLINK",
 }
 
 export interface Packet {

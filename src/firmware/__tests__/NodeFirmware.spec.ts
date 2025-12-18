@@ -102,6 +102,346 @@ describe("NodeFirmware FSM", () => {
 		expect(fw.getSnapshot().state).toBe("ISOLATED");
 		expect(radioOut.some((p) => p.type === PacketType.PANIC)).toBe(true);
 	});
+
+	it("immediately ACKs the sender when receiving a PANIC packet", () => {
+		let now = 0;
+		const { hal, radioOut } = makeHal({ linearAccelG: 0.0, batteryV: 3.7, now });
+		(hal.getTimeMs as unknown as () => number) = () => now;
+
+		let deliverOnce = true;
+		(hal.pollRadio as unknown as () => Packet[]) = () => {
+			if (!deliverOnce) return [];
+			deliverOnce = false;
+			return [
+				{
+					id: "panic-2",
+					type: PacketType.PANIC,
+					srcId: 2,
+					destId: -1,
+					payload: { type: "PANIC" },
+					timestamp: now,
+				},
+			];
+		};
+
+		const fw = new NodeFirmware(1, hal, {
+			isolationNoAckMs: 100_000,
+			neighborTimeoutMs: 100_000,
+			helloIntervalIdleMs: 1_000_000,
+			helloIntervalMovingMs: 1_000_000,
+			rangingIntervalIdleMs: 1_000_000,
+			rangingIntervalMovingMs: 1_000_000,
+		});
+
+		fw.tick(100);
+		const ack = radioOut.find((p) => p.payload?.type === "ACK" && p.destId === 2);
+		expect(ack).toBeTruthy();
+	});
+
+	it("forwards UPLINK_GOSSIP to its leader when acting as a relay", () => {
+		let now = 0;
+		let inbound: Packet[] = [];
+		let radioOut: Packet[] = [];
+		const { hal } = makeHal({ linearAccelG: 0.0, batteryV: 3.7, now });
+		(hal.getTimeMs as unknown as () => number) = () => now;
+		(hal.pollRadio as unknown as () => Packet[]) = () => {
+			const items = inbound;
+			inbound = [];
+			return items;
+		};
+		(hal.radioSend as unknown as (p: Packet) => void) = (p) => radioOut.push(p);
+
+		const fw = new NodeFirmware(1, hal, {
+			isolationNoAckMs: 100_000,
+			neighborTimeoutMs: 100_000,
+			helloIntervalIdleMs: 1_000_000,
+			helloIntervalMovingMs: 1_000_000,
+			rangingIntervalIdleMs: 1_000_000,
+			rangingIntervalMovingMs: 1_000_000,
+		});
+
+		// Step 1: make node 2 look like a better leader so fw(1) becomes RELAY with leaderId=2.
+		inbound = [
+			{
+				id: "hello-2",
+				type: PacketType.DATA,
+				srcId: 2,
+				destId: -1,
+				payload: { type: "HELLO", batteryV: 4.2, degree: 5, lteCapable: true },
+				timestamp: now,
+			},
+		];
+		fw.tick(100);
+		expect(fw.getSnapshot().leaderId).toBe(2);
+		expect(fw.getSnapshot().role).toBe("RELAY");
+
+		// Step 2: deliver an uplink gossip from node 3 directly to node 1.
+		radioOut = [];
+		now = 1_000;
+		inbound = [
+			{
+				id: "gossip-3",
+				type: PacketType.DATA,
+				srcId: 3,
+				destId: 1,
+				payload: {
+					type: "UPLINK_GOSSIP",
+					targetLeaderId: 2,
+					ttl: 2,
+					report: {
+						nodeId: 3,
+						timestamp: now,
+						batteryV: 3.9,
+						status: "STATIONARY",
+						lteCapable: false,
+						neighbors: [],
+					},
+				},
+				timestamp: now,
+			},
+		];
+		fw.tick(100);
+
+		const forwarded = radioOut.find(
+			(p) =>
+				p.payload?.type === "UPLINK_GOSSIP" &&
+				p.destId === 2 &&
+				(p.payload as any)?.targetLeaderId === 2 &&
+				(p.payload as any)?.ttl === 1
+		);
+		expect(forwarded).toBeTruthy();
+	});
+
+	it("leader includes forwarded multi-hop UPLINK_GOSSIP report in its next uplink batch", () => {
+		let now = 0;
+		let inbound: Packet[] = [];
+		let radioOut: Packet[] = [];
+		const { hal } = makeHal({ linearAccelG: 0.0, batteryV: 4.2, now });
+		(hal.getTimeMs as unknown as () => number) = () => now;
+		(hal.pollRadio as unknown as () => Packet[]) = () => {
+			const items = inbound;
+			inbound = [];
+			return items;
+		};
+		(hal.radioSend as unknown as (p: Packet) => void) = (p) => radioOut.push(p);
+
+		// Node 2 will become leader (higher battery than neighbor) and also act as uplink node.
+		const fwLeader = new NodeFirmware(2, hal, {
+			eventDrivenSensing: false,
+			helloIntervalIdleMs: 0,
+			helloIntervalMovingMs: 0,
+			rangingIntervalIdleMs: 1_000_000,
+			rangingIntervalMovingMs: 1_000_000,
+			isolationNoAckMs: 100_000,
+			neighborTimeoutMs: 100_000,
+		});
+
+		// Provide one neighbor so leader election runs and can self-elect.
+		inbound = [
+			{
+				id: "hello-1",
+				type: PacketType.DATA,
+				srcId: 1,
+				destId: -1,
+				payload: { type: "HELLO", batteryV: 3.6, degree: 1, lteCapable: false },
+				timestamp: now,
+			},
+			{
+				id: "gossip-3",
+				type: PacketType.DATA,
+				srcId: 3,
+				destId: -1,
+				payload: {
+					type: "UPLINK_GOSSIP",
+					targetLeaderId: 2,
+					ttl: 2,
+					report: {
+						nodeId: 3,
+						timestamp: 1234,
+						batteryV: 3.9,
+						status: "STATIONARY",
+						lteCapable: false,
+						neighbors: [],
+					},
+				},
+				timestamp: now,
+			},
+		];
+
+		radioOut = [];
+		now = 1_000;
+		fwLeader.tick(100);
+
+		const uplink = radioOut.find((p) => p.type === PacketType.UPLINK);
+		expect(uplink).toBeTruthy();
+		const reports = (uplink as any)?.payload?.reports;
+		expect(Array.isArray(reports)).toBe(true);
+		expect((reports as any[]).some((r) => r?.nodeId === 3)).toBe(true);
+	});
+
+	it("leader includes TOPOLOGY_CHANGE event in UPLINK_BATCH when neighbor set changes", () => {
+		let now = 0;
+		let inbound: Packet[] = [];
+		let radioOut: Packet[] = [];
+		const { hal } = makeHal({ linearAccelG: 0.0, batteryV: 3.7, now });
+		(hal.getTimeMs as unknown as () => number) = () => now;
+		(hal.pollRadio as unknown as () => Packet[]) = () => {
+			const items = inbound;
+			inbound = [];
+			return items;
+		};
+		(hal.radioSend as unknown as (p: Packet) => void) = (p) => radioOut.push(p);
+
+		const fw = new NodeFirmware(1, hal, {
+			eventDrivenSensing: false,
+			helloIntervalIdleMs: 0,
+			helloIntervalMovingMs: 0,
+			rangingIntervalIdleMs: 1_000_000,
+			rangingIntervalMovingMs: 1_000_000,
+			isolationNoAckMs: 100_000,
+			neighborTimeoutMs: 100_000,
+		});
+
+		// First neighbor appears.
+		inbound = [
+			{
+				id: "hello-2",
+				type: PacketType.DATA,
+				srcId: 2,
+				destId: -1,
+				payload: { type: "HELLO", batteryV: 3.6, degree: 1, lteCapable: false },
+				timestamp: now,
+			},
+		];
+		radioOut = [];
+		fw.tick(100);
+		const firstUplink = radioOut.find((p) => p.type === PacketType.UPLINK);
+		expect(firstUplink).toBeTruthy();
+		const firstEvents = (firstUplink as any)?.payload?.events;
+		expect(Array.isArray(firstEvents)).toBe(true);
+		expect((firstEvents as any[]).some((e) => e?.kind === "TOPOLOGY_CHANGE" && e?.nodeId === 1)).toBe(true);
+
+		// Topology changes again (new neighbor 3).
+		now = 1_000;
+		inbound = [
+			{
+				id: "hello-3",
+				type: PacketType.DATA,
+				srcId: 3,
+				destId: -1,
+				payload: { type: "HELLO", batteryV: 3.6, degree: 1, lteCapable: false },
+				timestamp: now,
+			},
+		];
+		radioOut = [];
+		fw.tick(100);
+		const secondUplink = radioOut.find((p) => p.type === PacketType.UPLINK);
+		expect(secondUplink).toBeTruthy();
+		const secondEvents = (secondUplink as any)?.payload?.events;
+		expect(Array.isArray(secondEvents)).toBe(true);
+		expect((secondEvents as any[]).some((e) => e?.kind === "TOPOLOGY_CHANGE" && e?.nodeId === 1)).toBe(true);
+	});
+
+	it("leader emits TOPOLOGY_CHANGE event when a leaf report's topologyVersion increases", () => {
+		let now = 0;
+		let inbound: Packet[] = [];
+		let radioOut: Packet[] = [];
+		const { hal } = makeHal({ linearAccelG: 0.0, batteryV: 4.2, now });
+		(hal.getTimeMs as unknown as () => number) = () => now;
+		(hal.pollRadio as unknown as () => Packet[]) = () => {
+			const items = inbound;
+			inbound = [];
+			return items;
+		};
+		(hal.radioSend as unknown as (p: Packet) => void) = (p) => radioOut.push(p);
+
+		// Node 2 will become leader and uplink node.
+		const fwLeader = new NodeFirmware(2, hal, {
+			eventDrivenSensing: false,
+			helloIntervalIdleMs: 0,
+			helloIntervalMovingMs: 0,
+			rangingIntervalIdleMs: 1_000_000,
+			rangingIntervalMovingMs: 1_000_000,
+			isolationNoAckMs: 100_000,
+			neighborTimeoutMs: 100_000,
+		});
+
+		// Provide one neighbor so leader election runs.
+		inbound = [
+			{
+				id: "hello-1",
+				type: PacketType.DATA,
+				srcId: 1,
+				destId: -1,
+				payload: { type: "HELLO", batteryV: 3.6, degree: 1, lteCapable: false },
+				timestamp: now,
+			},
+			{
+				id: "gossip-3-v1",
+				type: PacketType.DATA,
+				srcId: 3,
+				destId: 2,
+				payload: {
+					type: "UPLINK_GOSSIP",
+					targetLeaderId: 2,
+					ttl: 2,
+					report: {
+						nodeId: 3,
+						timestamp: 500,
+						batteryV: 3.9,
+						status: "STATIONARY",
+						lteCapable: false,
+						neighbors: [],
+						degree: 1,
+						topologyVersion: 1,
+					},
+				},
+				timestamp: now,
+			},
+		];
+		radioOut = [];
+		now = 1_000;
+		fwLeader.tick(100);
+		let uplink = radioOut.find((p) => p.type === PacketType.UPLINK);
+		expect(uplink).toBeTruthy();
+		let events = (uplink as any)?.payload?.events;
+		expect(Array.isArray(events)).toBe(true);
+		expect((events as any[]).some((e) => e?.kind === "TOPOLOGY_CHANGE" && e?.nodeId === 3)).toBe(true);
+
+		// Send another report from node 3 with higher topologyVersion.
+		inbound = [
+			{
+				id: "gossip-3-v2",
+				type: PacketType.DATA,
+				srcId: 3,
+				destId: 2,
+				payload: {
+					type: "UPLINK_GOSSIP",
+					targetLeaderId: 2,
+					ttl: 2,
+					report: {
+						nodeId: 3,
+						timestamp: 1500,
+						batteryV: 3.9,
+						status: "STATIONARY",
+						lteCapable: false,
+						neighbors: [],
+						degree: 2,
+						topologyVersion: 2,
+					},
+				},
+				timestamp: 1_500,
+			},
+		];
+		radioOut = [];
+		now = 2_000;
+		fwLeader.tick(100);
+		uplink = radioOut.find((p) => p.type === PacketType.UPLINK);
+		expect(uplink).toBeTruthy();
+		events = (uplink as any)?.payload?.events;
+		expect(Array.isArray(events)).toBe(true);
+		expect((events as any[]).some((e) => e?.kind === "TOPOLOGY_CHANGE" && e?.nodeId === 3)).toBe(true);
+	});
 });
 
 describe("Leader Election", () => {

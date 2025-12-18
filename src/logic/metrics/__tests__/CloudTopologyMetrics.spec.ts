@@ -71,6 +71,47 @@ describe("computeCloudStructureStatsMeters", () => {
 		expect(stats.aligned.rmse).toBeCloseTo(0, 8);
 	});
 
+	it("aligned error can be computed per disconnected component", () => {
+		// Two disconnected 2-node clusters with different rigid frames.
+		const truthById = truthMap([
+			{ id: 1, x: 0, y: 0 },
+			{ id: 2, x: 1, y: 0 },
+			{ id: 3, x: 10, y: 0 },
+			{ id: 4, x: 11, y: 0 },
+		]);
+
+		// Cluster A is rotated +90deg and translated.
+		const txA = 10;
+		const tyA = -5;
+		const rot90 = (p: Pt2) => ({ x: -p.y + txA, y: p.x + tyA });
+
+		// Cluster B is only translated.
+		const txB = -30;
+		const tyB = 3;
+		const transB = (p: Pt2) => ({ x: p.x + txB, y: p.y + tyB });
+
+		const records: CloudPositionRecord[] = [
+			{ nodeId: 1, position: rot90({ x: 0, y: 0 }) },
+			{ nodeId: 2, position: rot90({ x: 1, y: 0 }) },
+			{ nodeId: 3, position: transB({ x: 10, y: 0 }) },
+			{ nodeId: 4, position: transB({ x: 11, y: 0 }) },
+		];
+
+		// Without component info, a single global transform cannot align both clusters.
+		const globalStats = computeCloudStructureStatsMeters({ records, truthById })!;
+		expect(globalStats.abs.rmse).toBeGreaterThan(0.1);
+		expect(globalStats.aligned.rmse).toBeGreaterThan(0.01);
+
+		// With edges indicating two components, each aligns independently.
+		const edges: Array<[number, number]> = [
+			[1, 2],
+			[3, 4],
+		];
+		const compStats = computeCloudStructureStatsMeters({ records, truthById, edges })!;
+		expect(compStats.aligned.rmse).toBeCloseTo(0, 8);
+		expect(compStats.aligned.mae).toBeCloseTo(0, 8);
+	});
+
 	it("pairwise distance MAE is invariant under rigid transforms", () => {
 		const truthById = truthMap([
 			{ id: 1, x: 0, y: 0 },

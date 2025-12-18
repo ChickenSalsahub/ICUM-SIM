@@ -62,6 +62,10 @@ export function runExperimentAScenarios(): ExperimentAScenarioTimeRow[] {
 }
 
 export function runExperimentAScenariosWithOptions(options: ExperimentAOptions): ExperimentAScenarioTimeRow[] {
+	const perfectChannel = options.uwbNoiseSigma === 0;
+	const packetLoss = perfectChannel ? 0 : 0.1;
+	const uwbAngleNoiseStdRad = perfectChannel ? 0 : 0.05;
+
 	const baseSeed = getCliSeed(1);
 	const layout = makeSeed(10, seededRng(baseSeed + 100));
 	const scenarios: MotionScenarioName[] = ["none_moving", "few_moving", "many_moving"];
@@ -74,6 +78,8 @@ export function runExperimentAScenariosWithOptions(options: ExperimentAOptions):
 		// Baseline: periodic HELLO/RANGING regardless of motion state.
 		const baseline = new SimulationRunner({
 			uwbNoiseSigma: options.uwbNoiseSigma,
+			uwbAngleNoiseStdRad,
+			packetLoss,
 			worldBounds: EXPERIMENT_WORLD_BOUNDS_M,
 			seed: baseSeed + 101 + scenarioOffset,
 			firmwareConfig: {
@@ -89,6 +95,8 @@ export function runExperimentAScenariosWithOptions(options: ExperimentAOptions):
 		// ETM/ICUM: event-driven sensing while stationary+stable.
 		const etm = new SimulationRunner({
 			uwbNoiseSigma: options.uwbNoiseSigma,
+			uwbAngleNoiseStdRad,
+			packetLoss,
 			worldBounds: EXPERIMENT_WORLD_BOUNDS_M,
 			seed: baseSeed + 102 + scenarioOffset,
 			firmwareConfig: { eventDrivenSensing: true },

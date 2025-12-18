@@ -31,11 +31,15 @@ export function runExperimentE(): ExperimentETimeRow[] {
 	const dtMs = 250;
 	const logEveryMs = 1_000;
 	const nodeCount = 10;
+	const uwbNoiseSigma: number = 0.05;
+	const perfectChannel = uwbNoiseSigma === 0;
 	const layout = makeSeed(nodeCount, seededRng(baseSeed + 600));
 
 	const makeRunner = (policy: "baseline" | "icum", seed: number) =>
 		new SimulationRunner({
-			uwbNoiseSigma: 0.05,
+			uwbNoiseSigma,
+			uwbAngleNoiseStdRad: perfectChannel ? 0 : 0.05,
+			packetLoss: perfectChannel ? 0 : 0.1,
 			seed,
 			firmwareConfig:
 				policy === "baseline"

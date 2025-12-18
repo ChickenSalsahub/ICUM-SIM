@@ -2,7 +2,9 @@ import { SimulationRunner } from "../../engine/SimulationRunner.ts";
 import { applyMotionScenario } from "../lib/motion.ts";
 import { aleAlignedRigid, sumTx } from "../lib/metrics.ts";
 import { EXPERIMENT_WORLD_BOUNDS_M, type MotionScenarioName } from "../lib/types.ts";
+import { getCliNumber } from "../lib/cli.ts";
 import { getCliSeed, makeSeed, seededRng, seedNodes } from "../lib/seed.ts";
+import { createRollingMeanConvergenceTracker } from "../lib/convergence.ts";
 
 export interface ExperimentCTimeRow {
 	timeSeconds: number;
@@ -10,6 +12,8 @@ export interface ExperimentCTimeRow {
 	txPerNodePerMin: number;
 	ale: number;
 	convergenceMs?: number;
+	/** First time the smoothed ALE crosses <= convEps (and stays for convHold samples). */
+	tEpsMs?: number;
 }
 
 export interface ExperimentCScenarioTimeRow extends ExperimentCTimeRow {
@@ -32,15 +36,25 @@ export function runExperimentCScenarios(): ExperimentCScenarioTimeRow[] {
 	const rows: ExperimentCScenarioTimeRow[] = [];
 	const simSeconds = 300;
 	const logEveryMs = 1_000;
+
+	// Paper-friendly convergence (tweakable): time-to-threshold with hold + smoothing.
+	// Run with e.g. `npm run experiments -- --convEps=1 --convHold=5 --convWindow=30`
+	const convEpsMeters = getCliNumber("convEps", 1.0);
+	const convHoldSamples = Math.max(1, Math.floor(getCliNumber("convHold", 5)));
+	const convWindowSeconds = Math.max(1, getCliNumber("convWindow", 30));
 	const baseSeed = getCliSeed(1);
 	const scenarios: MotionScenarioName[] = ["none_moving", "few_moving", "many_moving"];
 
 	for (const scenario of scenarios) {
 		for (const nodeCount of [5, 10, 20, 35, 50]) {
+			const uwbNoiseSigma: number = 0.05;
+			const perfectChannel = uwbNoiseSigma === 0;
 			const scenarioOffset = scenario === "none_moving" ? 0 : scenario === "few_moving" ? 10_000 : 20_000;
 			const layout = makeSeed(nodeCount, seededRng(baseSeed + 300 + nodeCount + scenarioOffset));
 			const runner = new SimulationRunner({
-				uwbNoiseSigma: 0.05,
+				uwbNoiseSigma,
+				uwbAngleNoiseStdRad: perfectChannel ? 0 : 0.05,
+				packetLoss: perfectChannel ? 0 : 0.1,
 				worldBounds: EXPERIMENT_WORLD_BOUNDS_M,
 				seed: baseSeed + 301 + nodeCount + scenarioOffset,
 			});
@@ -59,13 +73,14 @@ export function runExperimentCScenarios(): ExperimentCScenarioTimeRow[] {
 			//
 			// This avoids false "no convergence" when the per-second ALE jitters (which it
 			// will, with packet loss and measurement noise).
-			const meanWindowSamples = 30; // 30 seconds (because logEveryMs=1000)
-			const meanDeltaMeters = 0.05;
-			const stableSecondsRequired = 5;
-			const recent: number[] = [];
-			let prevMean: number | undefined;
-			let stableSeconds = 0;
-			let convergenceMs: number | undefined;
+			const tracker = createRollingMeanConvergenceTracker({
+				samplePeriodMs: logEveryMs,
+				windowMs: convWindowSeconds * 1000,
+				stableDelta: 0.05,
+				stableHoldMs: 5_000,
+				threshold: convEpsMeters,
+				thresholdHoldMs: convHoldSamples * logEveryMs,
+			});
 
 			for (let t = 0; t <= simSeconds * 1000; t += logEveryMs) {
 				applyMotionScenario(runner, scenario, t);
@@ -77,18 +92,8 @@ export function runExperimentCScenarios(): ExperimentCScenarioTimeRow[] {
 				// change the sample period.
 				const txPerNodePerMin = totalTx / nodeCount / (snap.timeMs / 60000 || 1);
 
-				if (convergenceMs === undefined && Number.isFinite(currentAle)) {
-					recent.push(currentAle);
-					if (recent.length > meanWindowSamples) recent.shift();
-					if (recent.length === meanWindowSamples) {
-						const mean = recent.reduce((s, v) => s + v, 0) / recent.length;
-						if (prevMean !== undefined) {
-							stableSeconds = Math.abs(mean - prevMean) <= meanDeltaMeters ? stableSeconds + 1 : 0;
-							if (stableSeconds >= stableSecondsRequired) convergenceMs = snap.timeMs;
-						}
-						prevMean = mean;
-					}
-				}
+				tracker.update(snap.timeMs, currentAle);
+				const { convergenceStableMs: convergenceMs, tThresholdMs: tEpsMs } = tracker.getState();
 
 				rows.push({
 					scenario,
@@ -97,6 +102,7 @@ export function runExperimentCScenarios(): ExperimentCScenarioTimeRow[] {
 					txPerNodePerMin,
 					ale: currentAle,
 					convergenceMs,
+					tEpsMs,
 				});
 				runner.step(logEveryMs);
 			}

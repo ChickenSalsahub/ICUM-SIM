@@ -1,6 +1,5 @@
 import { SimulationRunner } from "../../engine/SimulationRunner.ts";
 import { CloudBackend } from "../../logic/CloudBackend.ts";
-import { CloudPublishTracker } from "../../logic/cloudPublishPolicy.ts";
 import { createMulberry32 } from "../../logic/math/Random.ts";
 import { applyMotionScenario } from "../lib/motion.ts";
 import { cloudRmse, latestByNode } from "../lib/cloudMetrics.ts";
@@ -44,8 +43,12 @@ export function runExperimentDScenarios(): ExperimentDScenarioTimeRow[] {
 
 	for (const scenario of scenarios) {
 		const scenarioOffset = scenario === "none_moving" ? 0 : scenario === "few_moving" ? 10_000 : 20_000;
+		const uwbNoiseSigma: number = 0.05;
+		const perfectChannel = uwbNoiseSigma === 0;
 		const runner = new SimulationRunner({
-			uwbNoiseSigma: 0.05,
+			uwbNoiseSigma,
+			uwbAngleNoiseStdRad: perfectChannel ? 0 : 0.05,
+			packetLoss: perfectChannel ? 0 : 0.1,
 			worldBounds: EXPERIMENT_WORLD_BOUNDS_M,
 			seed: baseSeed + 400 + scenarioOffset,
 		});
@@ -60,7 +63,79 @@ export function runExperimentDScenarios(): ExperimentDScenarioTimeRow[] {
 			robustFusion: true,
 			rng: createMulberry32(baseSeed + 501 + scenarioOffset),
 		});
-		const publish = new CloudPublishTracker({ staleMs: 30_000 });
+
+		runner.setHooks({
+			onTx: ({ timeMs, senderId, packet, senderPos }) => {
+				if (packet.type !== "UPLINK") return;
+				if (!packet.payload || typeof packet.payload !== "object") return;
+				if ((packet.payload as { type?: unknown }).type !== "UPLINK_BATCH") return;
+
+				const rawEvents = (packet.payload as { events?: unknown }).events;
+				if (Array.isArray(rawEvents)) {
+					for (const raw of rawEvents) {
+						if (!raw || typeof raw !== "object") continue;
+						const e = raw as any;
+						const timestamp = Number(e.timestamp);
+						if (!Number.isFinite(timestamp)) continue;
+						const kind = typeof e.kind === "string" ? e.kind : "EVENT";
+						const level = e.level === "WARN" || e.level === "ERROR" ? e.level : "INFO";
+						const nodeId = Number(e.nodeId);
+						cloudBaseline.recordEvent({
+							timestamp,
+							level,
+							kind,
+							nodeId: Number.isFinite(nodeId) ? nodeId : undefined,
+							message: typeof e.message === "string" ? e.message : String(e.message ?? kind),
+						});
+						cloudRobust.recordEvent({
+							timestamp,
+							level,
+							kind,
+							nodeId: Number.isFinite(nodeId) ? nodeId : undefined,
+							message: typeof e.message === "string" ? e.message : String(e.message ?? kind),
+						});
+					}
+				}
+
+				const reports = (packet.payload as { reports?: unknown }).reports;
+				if (!Array.isArray(reports) || reports.length === 0) return;
+
+				for (const raw of reports) {
+					if (!raw || typeof raw !== "object") continue;
+					const r = raw as any;
+					const nodeId = Number(r.nodeId);
+					if (!Number.isFinite(nodeId)) continue;
+
+					const neighborsRaw = r.neighbors;
+					const neighbors = Array.isArray(neighborsRaw)
+						? neighborsRaw
+								.map((n: any) => ({
+									id: Number(n?.id),
+									range: Number(n?.range),
+									aoa: n?.aoa,
+								}))
+								.filter((n: any) => Number.isFinite(n.id) && Number.isFinite(n.range))
+						: [];
+
+					const report: any = {
+						nodeId,
+						timestamp: timeMs,
+						battery: Number(r.batteryV ?? 0),
+						status: r.status === "MOVING" ? "MOVING" : "STATIONARY",
+						neighbors,
+					};
+
+					// Anchor the cloud graph to world coords using the LTE-capable uplink sender.
+					if (Boolean(r.lteCapable) && nodeId === senderId) {
+						report.x = senderPos.x;
+						report.y = senderPos.y;
+					}
+
+					cloudBaseline.ingest(report);
+					cloudRobust.ingest(report);
+				}
+			},
+		});
 
 		for (let t = 0; t <= simSeconds * 1000; t += logEveryMs) {
 			applyMotionScenario(runner, scenario, t);
@@ -72,32 +147,6 @@ export function runExperimentDScenarios(): ExperimentDScenarioTimeRow[] {
 
 			for (const sn of snap.nodes) {
 				truth.set(sn.id, { x: sn.trueX, y: sn.trueY });
-
-				// What the node would report to the cloud.
-				const neighbors = sn.firmware.neighbors.map((nb) => ({
-					id: nb.id,
-					range: nb.rangeMeters,
-					aoa: nb.angleRad,
-				}));
-				const report = {
-					nodeId: sn.id,
-					timestamp: nowMs,
-					battery: 100,
-					status: sn.firmware.state === "ISOLATED" ? "STATIONARY" : (sn.firmware.state as "MOVING" | "STATIONARY"),
-					neighbors,
-				};
-
-				const shouldPublish = publish.shouldPublish({
-					nodeId: sn.id,
-					nowMs,
-					isAnchor: false,
-					isMoving: sn.firmware.state === "MOVING",
-					neighborIds: sn.firmware.neighbors.map((nb) => nb.id),
-				});
-				if (shouldPublish) {
-					cloudBaseline.ingest(report);
-					cloudRobust.ingest(report);
-				}
 			}
 
 			cloudBaseline.tick(nowMs);

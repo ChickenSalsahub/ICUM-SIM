@@ -5,11 +5,11 @@ This folder contains the headless experiment runner used to generate CSV outputs
 - Entry point: `src/experiments/runner.ts`
 - Run: `npm run experiments -- --seed=1`
 - Output (written to the repo root):
-  - Experiment A: `experiments_A_<scenario>_noise<xx.xx>.csv`
-  - Experiment B: `experiments_B.csv`
-  - Experiment C: `experiments_C_<scenario>.csv`
-  - Experiment D: `experiments_D_<scenario>.csv`
-  - Experiment E: `experiments_E_<scenario>_<policy>.csv`
+  - Experiment A: `experiments_A_<scenario>_noise<xx.xx>_clean.csv`
+  - Experiment B: `experiments_B_clean.csv`, `experiments_B_raw_clean.csv`, `experiments_B_summary_clean.csv`
+  - Experiment C: `experiments_C_<scenario>_clean.csv`
+  - Experiment D: `experiments_D_<scenario>_clean.csv`
+  - Experiment E: `experiments_E_<scenario>_<policy>_clean.csv`
 
 All experiments are deterministic given the same seed. The seed is taken from (highest priority first):
 
@@ -21,7 +21,8 @@ All experiments are deterministic given the same seed. The seed is taken from (h
 
 - Units: meters, seconds.
 - World bounds: `EXPERIMENT_WORLD_BOUNDS_M` in `src/experiments/lib/types.ts` (currently 0–50 m in X/Y).
-- Default UWB noise (unless a sweep overrides it): `uwbNoiseSigma = 0.05` meters.
+- Default UWB distance noise (unless a sweep overrides it): `uwbNoiseSigma = 0.05` meters.
+- In experiments, `uwbNoiseSigma = 0` is treated as a "perfect channel": `packetLoss = 0` and `uwbAngleNoiseStdRad = 0`.
 - Motion scenarios: `none_moving`, `few_moving`, `many_moving`.
   - Motion is applied only during a fixed window (see `MOTION_START_MS` / `MOTION_STOP_MS` in `src/experiments/lib/types.ts`).
   - Motion is injected deterministically via `applyMotionScenario(...)` (`src/experiments/lib/motion.ts`).
@@ -40,14 +41,20 @@ Each experiment is implemented in its own file under `src/experiments/experiment
 ### Experiment A — Baseline vs ETM over time
 
 - Implementation: `src/experiments/experiments/experimentA.ts`
-- CSV: `experiments_A_<scenario>_noise0.00.csv`, `experiments_A_<scenario>_noise0.05.csv`, `experiments_A_<scenario>_noise0.20.csv`
-- Columns:
-  - `Scenario`: motion scenario
-  - `Time`: seconds
-  - `Baseline_Tx`: cumulative transmissions (sum over all nodes)
-  - `Baseline_RMSE`: firmware position RMSE vs truth (all nodes)
-  - `ETM_Tx`, `ETM_RMSE`: same metrics for event-driven (ETM/ICUM-style) sensing
-  - Also emitted (paper-friendly, anchor-free): `*_MAE`, `*_RMSE_Aligned`, `*_MAE_Aligned`, `*_PairwiseDist_MAE`
+- CSV: `experiments_A_<scenario>_noise0.00_clean.csv`, `experiments_A_<scenario>_noise0.05_clean.csv`, `experiments_A_<scenario>_noise0.20_clean.csv`
+
+Clean columns (recommended for reports)
+
+- `scenario`
+- `time_s`
+- `baseline_tx_total`
+- `baseline_tx_per_node_per_min`
+- `baseline_rmse_aligned_m`: RMSE after best-fit rigid alignment to truth (anchor-free)
+- `baseline_mae_aligned_m`: MAE after best-fit rigid alignment to truth (anchor-free)
+- `icum_tx_total`
+- `icum_tx_per_node_per_min`
+- `icum_rmse_aligned_m`
+- `icum_mae_aligned_m`
 
 This is the main time-series comparison of “periodic baseline” vs “event-driven” policies.
 
@@ -75,29 +82,31 @@ flowchart TD
   A2 --> A3["For each scenario: create 2 runners\n(baseline + ETM)"]
   A3 --> A4["For t = 0..T step dt:\n- apply motion scenario\n- snapshot\n- compute RMSE + total Tx\n- advance simulation"]
   A4 --> A5["Append CSV row per (scenario, time)"]
-  A5 --> A6["Write experiments_A_<scenario>_noise*.csv"]
+  A5 --> A6["Write experiments_A_<scenario>_noise*_clean.csv"]
   A6 --> A7(("Done"))
 ```
 
 ### Experiment B — Noise sweep (final accuracy)
 
 - Implementation: `src/experiments/experiments/experimentB.ts`
-- CSV: `experiments_B.csv`
-- Columns:
-  - `NodeCount`
-  - `Noise`: UWB distance noise sigma (m)
-  - `RMSE`, `MAE` (absolute)
-  - `RMSE_Aligned`, `MAE_Aligned` (anchor-free / rigid alignment)
-  - `PairwiseDist_MAE` (structure error)
+- CSV: `experiments_B_clean.csv`
+- Raw per-seed: `experiments_B_raw_clean.csv`
+- Summary (uncertainty): `experiments_B_summary_clean.csv`
 
 This is a simple sweep over measurement noise to show sensitivity.
+
+Notes
+
+- `experiments_B_clean.csv` is the **aggregated** curve (median over multiple RNG seeds per noise sigma).
+- `experiments_B_raw_clean.csv` contains the **raw per-seed** rows (useful for error bars).
+- `experiments_B_summary_clean.csv` contains **median + IQR** and **mean + 95% CI** for key metrics per noise sigma.
 
 Parameters used
 
 - Node count: 8
 - World bounds: `EXPERIMENT_WORLD_BOUNDS_M`
 - Duration: 300 s
-- UWB distance noise sweep (`uwbNoiseSigma` in meters): 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8
+- UWB distance noise sweep (`uwbNoiseSigma` in meters): 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0
 - Run mode: `runFor(simSeconds)` (uses the engine's default internal timestep)
 
 ```mermaid
@@ -109,21 +118,24 @@ flowchart TD
   B4 --> B5["Seed nodes; run for T seconds"]
   B5 --> B6["Snapshot; compute final RMSE + MAE"]
   B6 --> B7["Append one CSV row per sigma"]
-  B7 --> B8["Write experiments_B.csv"]
+  B7 --> B8["Write experiments_B_clean.csv"]
   B8 --> B9(("Done"))
 ```
 
 ### Experiment C — Scaling and convergence
 
 - Implementation: `src/experiments/experiments/experimentC.ts`
-- CSV: `experiments_C_<scenario>.csv`
-- Columns:
-  - `Scenario`
-  - `Time`
-  - `Nodes`: node count
-  - `TxPerNodePerMin`: normalized communication load
-  - `ALE`: average localization error (mean Euclidean error)
-  - `ConvergenceMs`: first time the convergence heuristic triggers (blank until detected)
+- CSV: `experiments_C_<scenario>_clean.csv`
+
+Clean columns (recommended for reports)
+
+- `scenario`
+- `time_s`
+- `node_count`
+- `tx_per_node_per_min`
+- `ale_aligned_m`: anchor-free ALE (rigid-aligned to truth)
+- `convergence_stable_ms`: first time the stability heuristic triggers
+- `t_eps_ms`: first time the rolling-mean error stays <= `--convEps`
 
 Parameters used
 
@@ -135,9 +147,18 @@ Parameters used
 - Scenarios: `none_moving`, `few_moving`, `many_moving`
 - Node-count sweep: 5, 10, 20, 35, 50
 - Convergence heuristic:
+
   - Uses anchor-free ALE: rigidly aligns estimated positions to truth (rotation+translation) before scoring
   - Computes a rolling 30-second mean of aligned ALE
   - Declares convergence when the rolling mean stabilizes: `|mean(t)-mean(t-1s)| ≤ 0.05 m` for 5 consecutive seconds
+
+- Time-to-threshold convergence (`T_eps_ms`):
+  - Uses the same rolling-mean ALE as above
+  - Declares convergence when `mean(t) ≤ convEps` for `convHold` consecutive samples
+  - Tweak via CLI args to `npm run experiments`:
+    - `--convEps=<meters>` (default `1.0`)
+    - `--convHold=<samples>` (default `5`, with 1s sampling => seconds)
+    - `--convWindow=<seconds>` (default `30`)
 
 ```mermaid
 flowchart TD
@@ -148,20 +169,24 @@ flowchart TD
   C4 --> C5["Initialize convergence tracker\n(prev ALE + stable count)"]
   C5 --> C6["For t = 0..T step dt:\n- apply motion\n- snapshot\n- compute ALE + TxPerNodePerMin\n- update convergence heuristic\n- advance"]
   C6 --> C7["Append CSV row per (scenario, nodeCount, time)"]
-  C7 --> C8["Write experiments_C_<scenario>.csv"]
+  C7 --> C8["Write experiments_C_<scenario>_clean.csv"]
   C8 --> C9(("Done"))
 ```
 
 ### Experiment D — Cloud fusion baseline vs robust
 
 - Implementation: `src/experiments/experiments/experimentD.ts`
-- CSV: `experiments_D_<scenario>.csv`
-- Columns:
-  - `Scenario`
-  - `Time`
-  - `Nodes`
-  - `CloudBaseline_RMSE`, `CloudRobust_RMSE`
-  - `CoverageBaseline`, `CoverageRobust`: number of nodes with a cloud estimate at that time
+- CSV: `experiments_D_<scenario>_clean.csv`
+
+Clean columns (recommended for reports)
+
+- `scenario`
+- `time_s`
+- `node_count`
+- `cloud_baseline_rmse_m`
+- `cloud_robust_rmse_m`
+- `coverage_baseline_nodes`
+- `coverage_robust_nodes`
 
 Parameters used
 
@@ -196,21 +221,24 @@ flowchart TD
   D7 --> D8["Tick clouds; take latest estimate per node"]
   D8 --> D9["Compute RMSE + coverage (baseline vs robust)"]
   D9 --> D10["Append CSV row per (scenario, time)"]
-  D10 --> D11["Write experiments_D_<scenario>.csv"]
+  D10 --> D11["Write experiments_D_<scenario>_clean.csv"]
   D11 --> D12(("Done"))
 ```
 
 ### Experiment E — Compact A/B runner across scenarios
 
 - Implementation: `src/experiments/experiments/experimentE.ts`
-- CSV: `experiments_E_<scenario>_<policy>.csv`
-- Columns:
-  - `Scenario`
-  - `Policy`: `baseline` or `icum`
-  - `Seed`: per-run seed derived from the base seed
-  - `Time`
-  - `TxTotal`
-  - `RMSE`
+- CSV: `experiments_E_<scenario>_<policy>_clean.csv`
+
+Clean columns (recommended for reports)
+
+- `scenario`
+- `policy`
+- `seed`
+- `time_s`
+- `tx_total`
+- `tx_per_node_per_min`
+- `rmse_m`
 
 Experiment E is a “small harness” that’s useful for quick sanity checks and regression comparisons.
 
@@ -238,7 +266,7 @@ flowchart TD
   E4 --> E5["Derive per-run seed\nCreate runner w/ policy config"]
   E5 --> E6["For t = 0..T step dt:\n- apply scenario motion\n- log every 1s: TxTotal + RMSE\n- advance"]
   E6 --> E7["Append CSV row per (scenario, policy, time)"]
-  E7 --> E8["Write experiments_E_<scenario>_<policy>.csv"]
+  E7 --> E8["Write experiments_E_<scenario>_<policy>_clean.csv"]
   E8 --> E9(("Done"))
 ```
 

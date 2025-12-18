@@ -48,6 +48,15 @@ export interface FusedRecord {
 	neighbors: { id: number; range: number; aoa: number }[];
 }
 
+export interface CloudEvent {
+	id: string;
+	timestamp: number;
+	level: "INFO" | "WARN" | "ERROR";
+	kind: "PANIC" | "TOPOLOGY_CHANGE" | "NOTE" | "EVENT";
+	nodeId?: number;
+	message: string;
+}
+
 /**
  * Simulates a Cloud Backend Service.
  * Responsibilities:
@@ -62,6 +71,10 @@ export class CloudBackend {
 
 	// The "Database"
 	private db: FusedRecord[] = [];
+
+	// Event log (non-fusion telemetry)
+	private events: CloudEvent[] = [];
+	private eventCounter = 0;
 
 	// Topology Engine (Relative Pose Graph)
 	// We keep a persistent graph so the layout is continuous over time.
@@ -99,6 +112,29 @@ export class CloudBackend {
 			warmupIterations: opts?.warmupIterations ?? 15,
 			finalIterations: opts?.finalIterations ?? 50,
 		};
+	}
+
+	public recordEvent(event: Omit<CloudEvent, "id">) {
+		const e: CloudEvent = {
+			id: `evt-${this.eventCounter++}`,
+			...event,
+		};
+		this.events.unshift(e);
+		if (this.events.length > 500) this.events = this.events.slice(0, 500);
+	}
+
+	public recordPanic(opts: { timestamp: number; nodeId: number; message?: string }) {
+		this.recordEvent({
+			timestamp: opts.timestamp,
+			level: "ERROR",
+			kind: "PANIC",
+			nodeId: opts.nodeId,
+			message: opts.message ?? "PANIC",
+		});
+	}
+
+	public getEvents(): CloudEvent[] {
+		return this.events;
 	}
 
 	/**
@@ -448,5 +484,7 @@ export class CloudBackend {
 		this.graph = null;
 		this.graphSeedId = null;
 		this.nodeStabilityCounter.clear();
+		this.events = [];
+		this.eventCounter = 0;
 	}
 }

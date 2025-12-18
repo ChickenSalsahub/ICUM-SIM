@@ -146,27 +146,87 @@ function applyRigid2D(p: Pt, tf: Rigid2D): Pt {
  * Anchor-free ALE: aligns estimated positions to truth before scoring.
  */
 export function aleAlignedRigid(nodes: RunnerSnapshot["nodes"]) {
+	const nodeIds: number[] = [];
 	const truth: Pt[] = [];
 	const est: Pt[] = [];
 	for (const node of nodes) {
 		const p = node.firmware.estPosition;
 		if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) return Number.NaN;
+		nodeIds.push(node.id);
 		truth.push({ x: node.trueX, y: node.trueY });
 		est.push({ x: p.x, y: p.y });
 	}
 
-	const tf = bestFitRigid2D(truth, est);
-	if (!tf) {
-		// Fallback to raw ALE (mainly for tiny N).
-		return ale(nodes);
+	const idToIndex = new Map<number, number>();
+	for (let i = 0; i < nodeIds.length; i++) idToIndex.set(nodeIds[i], i);
+
+	const adjacency: number[][] = Array.from({ length: nodes.length }, () => []);
+	let edgeCount = 0;
+	for (const node of nodes) {
+		const i = idToIndex.get(node.id);
+		if (i === undefined) continue;
+		for (const nb of node.firmware.neighbors) {
+			const j = idToIndex.get(nb.id);
+			if (j === undefined || j === i) continue;
+			adjacency[i].push(j);
+			// Treat as undirected.
+			adjacency[j].push(i);
+			edgeCount++;
+		}
+	}
+
+	const components: number[][] = [];
+	if (edgeCount === 0) {
+		components.push(Array.from({ length: nodes.length }, (_, i) => i));
+	} else {
+		const visited = new Array<boolean>(nodes.length).fill(false);
+		for (let i = 0; i < nodes.length; i++) {
+			if (visited[i]) continue;
+			const comp: number[] = [];
+			const stack = [i];
+			visited[i] = true;
+			while (stack.length > 0) {
+				const cur = stack.pop()!;
+				comp.push(cur);
+				for (const nb of adjacency[cur]) {
+					if (visited[nb]) continue;
+					visited[nb] = true;
+					stack.push(nb);
+				}
+			}
+			components.push(comp);
+		}
 	}
 
 	let sum = 0;
-	for (let i = 0; i < nodes.length; i++) {
-		const aligned = applyRigid2D(est[i], tf);
-		const dx = aligned.x - truth[i].x;
-		const dy = aligned.y - truth[i].y;
-		sum += Math.sqrt(dx * dx + dy * dy);
+	for (const comp of components) {
+		if (comp.length < 2) {
+			const i = comp[0];
+			if (i === undefined) continue;
+			const dx = est[i].x - truth[i].x;
+			const dy = est[i].y - truth[i].y;
+			sum += Math.hypot(dx, dy);
+			continue;
+		}
+
+		const truthC = comp.map((i) => truth[i]);
+		const estC = comp.map((i) => est[i]);
+		const tf = bestFitRigid2D(truthC, estC);
+		if (!tf) {
+			for (const i of comp) {
+				const dx = est[i].x - truth[i].x;
+				const dy = est[i].y - truth[i].y;
+				sum += Math.hypot(dx, dy);
+			}
+			continue;
+		}
+
+		for (const i of comp) {
+			const aligned = applyRigid2D(est[i], tf);
+			const dx = aligned.x - truth[i].x;
+			const dy = aligned.y - truth[i].y;
+			sum += Math.hypot(dx, dy);
+		}
 	}
 	return sum / nodes.length;
 }
@@ -175,26 +235,86 @@ export function aleAlignedRigid(nodes: RunnerSnapshot["nodes"]) {
  * Anchor-free RMSE: rigidly aligns estimated positions to truth before scoring.
  */
 export function rmseAlignedRigid(nodes: RunnerSnapshot["nodes"]) {
+	const nodeIds: number[] = [];
 	const truth: Pt[] = [];
 	const est: Pt[] = [];
 	for (const node of nodes) {
 		const p = node.firmware.estPosition;
 		if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) return Number.NaN;
+		nodeIds.push(node.id);
 		truth.push({ x: node.trueX, y: node.trueY });
 		est.push({ x: p.x, y: p.y });
 	}
 
-	const tf = bestFitRigid2D(truth, est);
-	if (!tf) {
-		return rmse(nodes);
+	const idToIndex = new Map<number, number>();
+	for (let i = 0; i < nodeIds.length; i++) idToIndex.set(nodeIds[i], i);
+
+	const adjacency: number[][] = Array.from({ length: nodes.length }, () => []);
+	let edgeCount = 0;
+	for (const node of nodes) {
+		const i = idToIndex.get(node.id);
+		if (i === undefined) continue;
+		for (const nb of node.firmware.neighbors) {
+			const j = idToIndex.get(nb.id);
+			if (j === undefined || j === i) continue;
+			adjacency[i].push(j);
+			adjacency[j].push(i);
+			edgeCount++;
+		}
+	}
+
+	const components: number[][] = [];
+	if (edgeCount === 0) {
+		components.push(Array.from({ length: nodes.length }, (_, i) => i));
+	} else {
+		const visited = new Array<boolean>(nodes.length).fill(false);
+		for (let i = 0; i < nodes.length; i++) {
+			if (visited[i]) continue;
+			const comp: number[] = [];
+			const stack = [i];
+			visited[i] = true;
+			while (stack.length > 0) {
+				const cur = stack.pop()!;
+				comp.push(cur);
+				for (const nb of adjacency[cur]) {
+					if (visited[nb]) continue;
+					visited[nb] = true;
+					stack.push(nb);
+				}
+			}
+			components.push(comp);
+		}
 	}
 
 	let sumSq = 0;
-	for (let i = 0; i < nodes.length; i++) {
-		const aligned = applyRigid2D(est[i], tf);
-		const dx = aligned.x - truth[i].x;
-		const dy = aligned.y - truth[i].y;
-		sumSq += dx * dx + dy * dy;
+	for (const comp of components) {
+		if (comp.length < 2) {
+			const i = comp[0];
+			if (i === undefined) continue;
+			const dx = est[i].x - truth[i].x;
+			const dy = est[i].y - truth[i].y;
+			sumSq += dx * dx + dy * dy;
+			continue;
+		}
+
+		const truthC = comp.map((i) => truth[i]);
+		const estC = comp.map((i) => est[i]);
+		const tf = bestFitRigid2D(truthC, estC);
+		if (!tf) {
+			for (const i of comp) {
+				const dx = est[i].x - truth[i].x;
+				const dy = est[i].y - truth[i].y;
+				sumSq += dx * dx + dy * dy;
+			}
+			continue;
+		}
+
+		for (const i of comp) {
+			const aligned = applyRigid2D(est[i], tf);
+			const dx = aligned.x - truth[i].x;
+			const dy = aligned.y - truth[i].y;
+			sumSq += dx * dx + dy * dy;
+		}
 	}
 	return Math.sqrt(sumSq / nodes.length);
 }

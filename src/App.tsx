@@ -16,11 +16,10 @@ import {
 	TrendingDown,
 	BrickWall,
 } from "lucide-react";
-import { CloudBackend, type CloudBackendOptions, FusedRecord } from "./logic/CloudBackend";
-import { CloudPublishTracker } from "./logic/cloudPublishPolicy";
+import { CloudBackend, type CloudBackendOptions, type CloudEvent, FusedRecord } from "./logic/CloudBackend";
 import { computeCloudStructureStatsMeters } from "./logic/metrics/CloudTopologyMetrics";
 import { DraggableWindow } from "./components/DraggableWindow";
-import { NodeConfig, LogEntry, NodeRole, NodeType, Packet, PacketType, VisualPacket, Wall } from "./types";
+import { NodeConfig, NodeRole, NodeType, Packet, PacketType, VisualPacket, Wall } from "./types";
 import { SimulationRunner } from "./engine/SimulationRunner";
 import type { FirmwareConfig } from "./firmware/types";
 
@@ -202,13 +201,15 @@ const doIntersect = (
 const App: React.FC = () => {
 	const [nodes, setNodes] = useState<UiNode[]>([]);
 	const [links, setLinks] = useState<Link[]>([]);
-	const [logs] = useState<LogEntry[]>([]);
 	const [packets, setPackets] = useState<Packet[]>([]);
 	const [visualPackets, setVisualPackets] = useState<VisualPacket[]>([]);
 	const [fusedRecordsBaseline, setFusedRecordsBaseline] = useState<FusedRecord[]>([]);
 	const [fusedRecordsRobust, setFusedRecordsRobust] = useState<FusedRecord[]>([]);
+	const [cloudEventsBaseline, setCloudEventsBaseline] = useState<CloudEvent[]>([]);
+	const [cloudEventsRobust, setCloudEventsRobust] = useState<CloudEvent[]>([]);
 	const [cloudAlgoMode, setCloudAlgoMode] = useState<"BASELINE" | "ROBUST">("BASELINE");
 	const fusedRecords = cloudAlgoMode === "ROBUST" ? fusedRecordsRobust : fusedRecordsBaseline;
+	const cloudEvents = cloudAlgoMode === "ROBUST" ? cloudEventsRobust : cloudEventsBaseline;
 
 	const [walls, setWalls] = useState<Wall[]>([]);
 	const [isDrawingWall, setIsDrawingWall] = useState(false);
@@ -269,9 +270,9 @@ const App: React.FC = () => {
 	});
 
 	const [simTuning, setSimTuning] = useState({
-		uwbNoiseSigmaMeters: 0.01,
-		uwbAngleNoiseStdDeg: 3.0,
-		packetLoss: 0.1,
+		uwbNoiseSigmaMeters: 0.0,
+		uwbAngleNoiseStdDeg: 0.0,
+		packetLoss: 0.0,
 	});
 
 	const [firmwareTuning, setFirmwareTuning] = useState<FirmwareConfig>({
@@ -307,7 +308,15 @@ const App: React.FC = () => {
 	const lastTimeRef = useRef<number>(0);
 	const energyTimerRef = useRef<number>(0);
 	const lastCloudTickRef = useRef<number>(0);
-	const cloudPublishRef = useRef<CloudPublishTracker>(new CloudPublishTracker({ staleMs: 30_000 }));
+	const simNowMsRef = useRef<number>(0);
+
+	const [uplinkStats, setUplinkStats] = useState({
+		totalBatches: 0,
+		totalReports: 0,
+		lastSenderId: -1,
+		lastBatchSize: 0,
+		lastUplinkTimeMs: 0,
+	});
 
 	const [openWindows, setOpenWindows] = useState<number[]>([]);
 	const [windowOrder, setWindowOrder] = useState<number[]>([]);
@@ -376,6 +385,8 @@ const App: React.FC = () => {
 		cloudBackendRobustRef.current = new CloudBackend({ robustFusion: true, ...cloudTuning });
 		setFusedRecordsBaseline([]);
 		setFusedRecordsRobust([]);
+		setCloudEventsBaseline([]);
+		setCloudEventsRobust([]);
 	}, [cloudTuning]);
 
 	useEffect(() => {
@@ -394,6 +405,99 @@ const App: React.FC = () => {
 	const capturePacket = useCallback((p: Packet) => {
 		setPackets((prev) => [p, ...prev].slice(0, 50));
 	}, []);
+
+	const ingestUplinkToCloud = useCallback(
+		(opts: { packet: Packet; senderId: number; senderPos: { x: number; y: number }; nowMs: number }) => {
+			const { packet, senderId, senderPos, nowMs } = opts;
+			if (packet.type !== PacketType.UPLINK) return;
+			if (!packet.payload || typeof packet.payload !== "object") return;
+			if ((packet.payload as { type?: unknown }).type !== "UPLINK_BATCH") return;
+			const reports = (packet.payload as { reports?: unknown }).reports;
+			if (!Array.isArray(reports) || reports.length === 0) return;
+
+			setUplinkStats((prev) => ({
+				totalBatches: prev.totalBatches + 1,
+				totalReports: prev.totalReports + reports.length,
+				lastSenderId: senderId,
+				lastBatchSize: reports.length,
+				lastUplinkTimeMs: nowMs,
+			}));
+
+			const baselineCloud = cloudBackendBaselineRef.current;
+			const robustCloud = cloudBackendRobustRef.current;
+			let recordedBackendEvents = false;
+
+			const rawEvents = (packet.payload as { events?: unknown }).events;
+			if (Array.isArray(rawEvents)) {
+				for (const raw of rawEvents) {
+					if (!raw || typeof raw !== "object") continue;
+					const e = raw as any;
+					const timestamp = Number(e.timestamp);
+					if (!Number.isFinite(timestamp)) continue;
+					const kind = typeof e.kind === "string" ? e.kind : "EVENT";
+					const level = e.level === "WARN" || e.level === "ERROR" ? e.level : "INFO";
+					const nodeId = Number(e.nodeId);
+					baselineCloud.recordEvent({
+						timestamp,
+						level,
+						kind,
+						nodeId: Number.isFinite(nodeId) ? nodeId : undefined,
+						message: typeof e.message === "string" ? e.message : String(e.message ?? kind),
+					});
+					robustCloud.recordEvent({
+						timestamp,
+						level,
+						kind,
+						nodeId: Number.isFinite(nodeId) ? nodeId : undefined,
+						message: typeof e.message === "string" ? e.message : String(e.message ?? kind),
+					});
+					recordedBackendEvents = true;
+				}
+			}
+
+			for (const raw of reports) {
+				if (!raw || typeof raw !== "object") continue;
+				const r = raw as any;
+				const nodeId = Number(r.nodeId);
+				if (!Number.isFinite(nodeId)) continue;
+
+				const neighborsRaw = r.neighbors;
+				const neighbors = Array.isArray(neighborsRaw)
+					? neighborsRaw
+							.map((n: any) => ({
+								id: Number(n?.id),
+								range: Number(n?.range),
+								aoa: n?.aoa,
+							}))
+							.filter((n: any) => Number.isFinite(n.id) && Number.isFinite(n.range))
+					: [];
+
+				const report: any = {
+					nodeId,
+					timestamp: nowMs,
+					battery: Number(r.batteryV ?? 0),
+					status: r.status === "MOVING" ? "MOVING" : "STATIONARY",
+					neighbors,
+				};
+
+				// Anchor only when the uplink sender is also the origin and is LTE-capable.
+				// This is the "supernode" concept in the cloud solver.
+				if (Boolean(r.lteCapable) && nodeId === senderId) {
+					report.x = senderPos.x;
+					report.y = senderPos.y;
+				}
+
+				baselineCloud.ingest(report);
+				robustCloud.ingest(report);
+			}
+
+			if (recordedBackendEvents) {
+				setCloudEventsBaseline([...baselineCloud.getEvents()]);
+				setCloudEventsRobust([...robustCloud.getEvents()]);
+			}
+		},
+		[]
+	);
 
 	const gameLoop = useCallback(
 		(timestamp: number) => {
@@ -460,8 +564,17 @@ const App: React.FC = () => {
 			);
 
 			runner.setHooks({
-				onTx: ({ packet, senderPos }) => {
+				onTx: ({ timeMs, senderId, packet, senderPos }) => {
 					capturePacket(packet);
+					ingestUplinkToCloud({ packet, senderId, senderPos, nowMs: timeMs });
+					if (packet.type === PacketType.PANIC) {
+						const baselineCloud = cloudBackendBaselineRef.current;
+						const robustCloud = cloudBackendRobustRef.current;
+						baselineCloud.recordPanic({ timestamp: timeMs, nodeId: senderId });
+						robustCloud.recordPanic({ timestamp: timeMs, nodeId: senderId });
+						setCloudEventsBaseline([...baselineCloud.getEvents()]);
+						setCloudEventsRobust([...robustCloud.getEvents()]);
+					}
 					if (packet.destId === -1) {
 						newVisuals.push({
 							id: Math.random().toString(),
@@ -578,6 +691,7 @@ const App: React.FC = () => {
 
 			runner.step(deltaTime * 1000);
 			const snap = runner.snapshot();
+			simNowMsRef.current = snap.timeMs;
 			for (const sn of snap.nodes) {
 				const node = currentNodes.find((n) => n.id === sn.id);
 				if (!node) continue;
@@ -623,40 +737,12 @@ const App: React.FC = () => {
 			});
 			setLinks(newLinks);
 
-			// 4. CLOUD BACKEND (baseline + robust; fuse snapshots every ~1s)
-			const nowMs = Date.now();
+			// 4. CLOUD BACKEND (baseline + robust; ingest is driven by firmware uplink packets)
+			const nowMs = snap.timeMs;
 			if (nowMs - lastCloudTickRef.current > 250) {
 				lastCloudTickRef.current = nowMs;
 				const baselineCloud = cloudBackendBaselineRef.current;
 				const robustCloud = cloudBackendRobustRef.current;
-				for (const sn of snap.nodes) {
-					const node = currentNodes.find((n) => n.id === sn.id);
-					if (!node) continue;
-
-					const isGateway = node.type === "HARDWARE_GW";
-					const isMoving = node.firmwareState === "MOVING";
-					const isPanic = node.role === NodeRole.ISOLATED && node.isolationTimer > config.isolationTimeout;
-					const lteCapable = Boolean((sn.firmware as { lteCapable?: boolean }).lteCapable);
-					const shouldPublish = cloudPublishRef.current.shouldPublish({
-						nodeId: node.id,
-						nowMs,
-						isAnchor: isGateway,
-						isMoving,
-						neighborIds: sn.firmware.neighbors.map((nb) => nb.id),
-					});
-					if (!shouldPublish && !(isPanic && lteCapable)) continue;
-
-					const report = {
-						nodeId: node.id,
-						timestamp: nowMs,
-						battery: node.battery,
-						status: node.firmwareState === "ISOLATED" ? "STATIONARY" : node.firmwareState,
-						neighbors: sn.firmware.neighbors.map((nb) => ({ id: nb.id, range: nb.rangeMeters, aoa: nb.angleRad })),
-						...(isGateway || (isPanic && lteCapable) ? { x: sn.trueX, y: sn.trueY } : {}),
-					};
-					baselineCloud.ingest(report);
-					robustCloud.ingest(report);
-				}
 				if (baselineCloud.tick(nowMs)) setFusedRecordsBaseline([...baselineCloud.getRecords()]);
 				if (robustCloud.tick(nowMs)) setFusedRecordsRobust([...robustCloud.getRecords()]);
 			}
@@ -673,7 +759,7 @@ const App: React.FC = () => {
 			setNodes([...currentNodes]);
 			animationRef.current = requestAnimationFrame(gameLoop);
 		},
-		[isPlaying, config, simTuning, capturePacket, ensureRunner]
+		[isPlaying, config, simTuning, capturePacket, ensureRunner, ingestUplinkToCloud]
 	);
 
 	useEffect(() => {
@@ -814,11 +900,20 @@ const App: React.FC = () => {
 		setNodes([]);
 		nodesRef.current = [];
 		runnerRef.current = null;
+		simNowMsRef.current = 0;
+		setUplinkStats({
+			totalBatches: 0,
+			totalReports: 0,
+			lastSenderId: -1,
+			lastBatchSize: 0,
+			lastUplinkTimeMs: 0,
+		});
 		cloudBackendBaselineRef.current = new CloudBackend({ robustFusion: false });
 		cloudBackendRobustRef.current = new CloudBackend({ robustFusion: true });
 		setFusedRecordsBaseline([]);
 		setFusedRecordsRobust([]);
-		cloudPublishRef.current = new CloudPublishTracker({ staleMs: 30_000 });
+		setCloudEventsBaseline([]);
+		setCloudEventsRobust([]);
 		setOpenWindows([]);
 		setWalls([]);
 	};
@@ -844,6 +939,8 @@ const App: React.FC = () => {
 				return "#38bdf8";
 			case PacketType.DATA:
 				return "#4ade80";
+			case PacketType.UPLINK:
+				return "#ec4899";
 			case PacketType.ELECTION:
 				return "#a855f7";
 			case PacketType.PANIC:
@@ -1463,6 +1560,26 @@ const App: React.FC = () => {
 									ROBUST
 								</button>
 							</div>
+							<div
+								style={{
+									padding: "6px 8px",
+									borderBottom: "1px solid #334155",
+									fontSize: "9px",
+									fontFamily: "monospace",
+									color: "#94a3b8",
+								}}
+							>
+								UPLINK: {uplinkStats.totalBatches} batches / {uplinkStats.totalReports} reports
+								{uplinkStats.lastSenderId >= 0 && (
+									<>
+										{" "}
+										| last sender: {uplinkStats.lastSenderId} ({uplinkStats.lastBatchSize}){" "}
+										{uplinkStats.lastUplinkTimeMs > 0
+											? `${(Math.max(0, simNowMsRef.current - uplinkStats.lastUplinkTimeMs) / 1000).toFixed(1)}s ago`
+											: ""}
+									</>
+								)}
+							</div>
 							{cloudViewMode === "FUSED" ? (
 								<div style={{ padding: "8px", overflowX: "auto" }}>
 									<table
@@ -1499,7 +1616,7 @@ const App: React.FC = () => {
 														{r.status}
 													</td>
 													<td style={{ padding: "4px", opacity: 0.7 }}>
-														{((Date.now() - r.timestamp) / 1000).toFixed(1)}s ago
+														{(Math.max(0, simNowMsRef.current - r.timestamp) / 1000).toFixed(1)}s ago
 													</td>
 												</tr>
 											))}
@@ -1524,6 +1641,35 @@ const App: React.FC = () => {
 									}}
 								>
 									{(() => {
+														// Compute cloud convergence status (rolling mean stability on aligned RMSE)
+														import { createRollingMeanConvergenceTracker } from "./experiments/lib/convergence";
+														const tracker = createRollingMeanConvergenceTracker({
+															samplePeriodMs: 1000,
+															windowMs: 30_000,
+															stableDelta: 0.05,
+															stableHoldMs: 5_000,
+														});
+														const rmseHistory: Array<{ t: number; v: number }> = [];
+														for (const r of fusedRecords) {
+															if (typeof r.position?.x === "number" && typeof r.position?.y === "number") {
+																const t = r.timestamp;
+																const v = cloudStats?.aligned.rmse ?? NaN;
+																rmseHistory.push({ t, v });
+															}
+														}
+														// Feed the tracker with the latest N samples (simulate time progression)
+														for (const pt of rmseHistory.slice(-40)) tracker.update(pt.t, pt.v);
+														const converged = tracker.getState().convergenceStableMs !== undefined;
+														const convergenceText = converged ? "CONVERGED" : "NOT CONVERGED";
+														const convergenceColor = converged ? "#4ade80" : "#f87171";
+										const lastPanicTsByNodeId = new Map<number, number>();
+										for (const e of cloudEvents) {
+											if (e.kind !== "PANIC") continue;
+											if (typeof e.nodeId !== "number") continue;
+											const prev = lastPanicTsByNodeId.get(e.nodeId);
+											if (!prev || e.timestamp >= prev) lastPanicTsByNodeId.set(e.nodeId, e.timestamp);
+										}
+
 										// Filter to get only the latest record per node for the topology.
 										const uniqueRecordsMap = new Map<number, FusedRecord>();
 										for (const r of fusedRecords) {
@@ -1540,7 +1686,59 @@ const App: React.FC = () => {
 											if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
 											truthById.set(n.id, { x, y });
 										}
-										const cloudStats = computeCloudStructureStatsMeters({ records: uniqueRecords, truthById });
+										const edgeSet = new Set<string>();
+										const edges: Array<[number, number]> = [];
+										const idsPresent = new Set(uniqueRecords.map((r) => r.nodeId));
+										for (const r of uniqueRecords) {
+											for (const n of r.neighbors) {
+												if (!idsPresent.has(n.id)) continue;
+												const a = Math.min(r.nodeId, n.id);
+												const b = Math.max(r.nodeId, n.id);
+												const key = `${a}-${b}`;
+												if (edgeSet.has(key)) continue;
+												edgeSet.add(key);
+												edges.push([a, b]);
+											}
+										}
+										const componentSizeByNodeId = new Map<number, number>();
+										{
+											const idList = Array.from(idsPresent.values());
+											const idToIndex = new Map<number, number>();
+											for (let i = 0; i < idList.length; i++) idToIndex.set(idList[i], i);
+											const adjacency: number[][] = Array.from({ length: idList.length }, () => []);
+											for (const [a, b] of edges) {
+												const ai = idToIndex.get(a);
+												const bi = idToIndex.get(b);
+												if (ai === undefined || bi === undefined) continue;
+												adjacency[ai].push(bi);
+												adjacency[bi].push(ai);
+											}
+											const visited = new Array<boolean>(idList.length).fill(false);
+											for (let i = 0; i < idList.length; i++) {
+												if (visited[i]) continue;
+												const stack = [i];
+												visited[i] = true;
+												const comp: number[] = [];
+												while (stack.length > 0) {
+													const cur = stack.pop()!;
+													comp.push(cur);
+													for (const nb of adjacency[cur]) {
+														if (visited[nb]) continue;
+														visited[nb] = true;
+														stack.push(nb);
+													}
+												}
+												const size = comp.length;
+												for (const idx of comp) componentSizeByNodeId.set(idList[idx], size);
+											}
+										}
+										const isPanicActive = (nodeId: number) => {
+											// Panic persists while isolated, and clears automatically when the node
+											// rejoins any multi-node connected component.
+											if (!lastPanicTsByNodeId.has(nodeId)) return false;
+											return (componentSizeByNodeId.get(nodeId) ?? 1) <= 1;
+										};
+										const cloudStats = computeCloudStructureStatsMeters({ records: uniqueRecords, truthById, edges });
 
 										if (uniqueRecords.length === 0)
 											return (
@@ -1574,6 +1772,23 @@ const App: React.FC = () => {
 
 										return (
 											<>
+																<div style={{
+																	position: "absolute",
+																	top: 8,
+																	right: 8,
+																	padding: "6px 10px",
+																	borderRadius: "6px",
+																	border: `1px solid ${convergenceColor}`,
+																	backgroundColor: "#0f172a",
+																	color: convergenceColor,
+																	fontFamily: "monospace",
+																	fontSize: "12px",
+																	fontWeight: "bold",
+																	opacity: 0.95,
+																	pointerEvents: "none",
+																}}>
+																	Cloud: {convergenceText}
+																</div>
 												<div
 													style={{
 														position: "absolute",
@@ -1651,9 +1866,15 @@ const App: React.FC = () => {
 													{/* Nodes */}
 													{uniqueRecords.map((r) => {
 														const pos = transform(r.position.x, r.position.y);
+														const panic = isPanicActive(r.nodeId);
 														return (
 															<g key={r.nodeId} transform={`translate(${pos.x}, ${pos.y})`}>
-																<circle r="6" fill={r.status === "STABLE" ? "#4ade80" : "#facc15"} />
+																<circle
+																	r="6"
+																	fill={r.status === "STABLE" ? "#4ade80" : "#facc15"}
+																	stroke={panic ? "#ef4444" : "#0f172a"}
+																	strokeWidth={panic ? 2.5 : 1}
+																/>
 																<text
 																	y="-10"
 																	textAnchor="middle"
@@ -1674,25 +1895,24 @@ const App: React.FC = () => {
 								</div>
 							) : (
 								<div style={{ display: "flex", flexDirection: "column", gap: "4px", padding: "8px" }}>
-									{logs
-										.filter((l) => l.category === "CLOUD")
-										.map((l) => (
-											<div
-												key={l.id}
-												style={{
-													padding: "4px",
-													borderBottom: "1px solid #1e293b",
-													fontFamily: "monospace",
-													fontSize: "10px",
-													color: l.type === "SUCCESS" ? "#4ade80" : "#f87171",
-												}}
-											>
-												<span style={{ opacity: 0.5 }}>[{l.time}]</span> {l.msg}
-											</div>
-										))}
-									{logs.filter((l) => l.category === "CLOUD").length === 0 && (
+									{cloudEvents.map((e) => (
+										<div
+											key={e.id}
+											style={{
+												padding: "4px",
+												borderBottom: "1px solid #1e293b",
+												fontFamily: "monospace",
+												fontSize: "10px",
+												color: e.level === "ERROR" ? "#f87171" : e.level === "WARN" ? "#facc15" : "#cbd5e1",
+											}}
+										>
+											<span style={{ opacity: 0.5 }}>[{(e.timestamp / 1000).toFixed(1)}s]</span> {e.kind}
+											{e.nodeId !== undefined ? ` node ${e.nodeId}` : ""}: {e.message}
+										</div>
+									))}
+									{cloudEvents.length === 0 && (
 										<div style={{ padding: "8px", textAlign: "center", color: "#64748b", fontSize: "10px" }}>
-											No logs yet.
+											No events yet.
 										</div>
 									)}
 								</div>
