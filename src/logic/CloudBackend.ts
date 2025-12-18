@@ -2,6 +2,7 @@ import { RelativePoseGraph } from "./localization/CooperativeLocalization.ts";
 
 export interface CloudBackendOptions {
 	robustFusion?: boolean;
+	rng?: () => number;
 	// Huber threshold in normalized residual units.
 	huberK?: number;
 	// Normalization scales for residuals.
@@ -67,8 +68,10 @@ export class CloudBackend {
 	// IMPORTANT: Do not assume a hardware gateway exists; seed the graph lazily.
 	private graph: RelativePoseGraph | null = null;
 	private graphSeedId: number | null = null;
+	private readonly rng: () => number;
+	private recordCounter = 0;
 
-	private readonly opts: Required<CloudBackendOptions>;
+	private readonly opts: Required<Omit<CloudBackendOptions, "rng">>;
 
 	// Configuration
 	private FUSION_WINDOW_MS = 1000; // Fuse data every 1 second
@@ -79,7 +82,7 @@ export class CloudBackend {
 
 	private ensureGraph(seedId: number) {
 		if (!this.graph) {
-			this.graph = new RelativePoseGraph(seedId);
+			this.graph = new RelativePoseGraph(seedId, this.rng);
 			this.graphSeedId = seedId;
 			this.nodeStabilityCounter.clear();
 		}
@@ -87,6 +90,7 @@ export class CloudBackend {
 	}
 
 	constructor(opts?: CloudBackendOptions) {
+		this.rng = opts?.rng ?? Math.random;
 		this.opts = {
 			robustFusion: opts?.robustFusion ?? false,
 			huberK: opts?.huberK ?? 2.5,
@@ -270,8 +274,8 @@ export class CloudBackend {
 				if (!graph.getNodePose(nodeId)) {
 					// Initialize at random position to allow physics to converge
 					graph.setNodePose(nodeId, {
-						x: Math.random() * 40,
-						y: Math.random() * 30,
+						x: this.rng() * 40,
+						y: this.rng() * 30,
 						theta: 0,
 					});
 					this.nodeStabilityCounter.set(nodeId, 0);
@@ -412,9 +416,9 @@ export class CloudBackend {
 				: [];
 
 			const record: FusedRecord = {
-				id: Math.random().toString(36).substr(2, 9),
+				id: `${nodeId}-${this.recordCounter++}`,
 				nodeId,
-				timestamp: Date.now(),
+				timestamp: latestReport.timestamp,
 				sampleCount: count,
 				position: {
 					x: parseFloat(pose.x.toFixed(2)),

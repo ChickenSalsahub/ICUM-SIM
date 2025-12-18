@@ -3,6 +3,7 @@ import { INodeHAL, ImuSample, FirmwareSnapshot } from "../firmware/types.ts";
 import type { FirmwareConfig } from "../firmware/types.ts";
 import { Packet, Wall } from "../types/index.ts";
 import UWBRanging from "../logic/UWBRanging.ts";
+import { createMulberry32, type RngFn } from "../logic/math/Random.ts";
 
 interface NodeWorldState {
 	id: number;
@@ -34,6 +35,9 @@ export interface SimulationOptions {
 	uwbNoiseSigma?: number;
 	packetLoss?: number; // 0..1
 	firmwareConfig?: Partial<FirmwareConfig>;
+	seed?: number;
+	rng?: RngFn;
+	worldBounds?: { minX: number; maxX: number; minY: number; maxY: number };
 }
 
 export interface SimulationHooks {
@@ -62,16 +66,24 @@ export class SimulationRunner {
 	private uwbRangeMeters: number;
 	private packetLoss: number;
 	private readonly uwb: UWBRanging;
+	private readonly rng: RngFn;
+	private worldBounds: { minX: number; maxX: number; minY: number; maxY: number } | undefined;
 	private hooks: SimulationHooks | undefined;
 	private readonly firmwareConfig: Partial<FirmwareConfig> | undefined;
 
 	constructor(opts?: SimulationOptions) {
+		this.rng = opts?.rng ?? (opts?.seed !== undefined ? createMulberry32(opts.seed) : Math.random);
 		this.uwbRangeMeters = opts?.uwbRangeMeters ?? 15;
 		this.packetLoss = opts?.packetLoss ?? 0.1;
 		this.firmwareConfig = opts?.firmwareConfig;
+		this.worldBounds = opts?.worldBounds;
 		// Share the same stochastic UWB model as the UI.
 		// Engine units are meters, so treat them as "pixels" with pixelsPerMeter=1.
-		this.uwb = new UWBRanging(1, { noiseStdMeters: opts?.uwbNoiseSigma ?? 0.05 });
+		this.uwb = new UWBRanging(1, { rng: this.rng, noiseStdMeters: opts?.uwbNoiseSigma ?? 0.05 });
+	}
+
+	public setWorldBounds(bounds: { minX: number; maxX: number; minY: number; maxY: number } | undefined) {
+		this.worldBounds = bounds;
 	}
 
 	public setHooks(hooks: SimulationHooks | undefined) {
@@ -162,12 +174,91 @@ export class SimulationRunner {
 		this.timeMs += dtMs;
 
 		for (const node of this.nodes) {
-			node.x += (node.vx * dtMs) / 1000;
-			node.y += (node.vy * dtMs) / 1000;
+			const prevX = node.x;
+			const prevY = node.y;
+			const nextX = prevX + (node.vx * dtMs) / 1000;
+			const nextY = prevY + (node.vy * dtMs) / 1000;
+
+			if (this.segmentHitsAnyWall(prevX, prevY, nextX, nextY)) {
+				// Simple collision response: stop at the wall and zero velocity.
+				node.vx = 0;
+				node.vy = 0;
+				// Keep position unchanged.
+			} else {
+				node.x = nextX;
+				node.y = nextY;
+			}
+			this.applyBounds(node);
 		}
 
 		for (const node of this.nodes) {
 			node.firmware.tick(dtMs);
+		}
+	}
+
+	private segmentHitsAnyWall(ax: number, ay: number, bx: number, by: number): boolean {
+		if (this.walls.length === 0) return false;
+		for (const w of this.walls) {
+			if (this.segmentsIntersect(ax, ay, bx, by, w.x1, w.y1, w.x2, w.y2)) return true;
+		}
+		return false;
+	}
+
+	private segmentsIntersect(
+		ax: number,
+		ay: number,
+		bx: number,
+		by: number,
+		cx: number,
+		cy: number,
+		dx: number,
+		dy: number
+	): boolean {
+		const eps = 1e-12;
+		const orient = (px: number, py: number, qx: number, qy: number, rx: number, ry: number) =>
+			(qx - px) * (ry - py) - (qy - py) * (rx - px);
+		const onSegment = (px: number, py: number, qx: number, qy: number, rx: number, ry: number) =>
+			rx <= Math.max(px, qx) + eps &&
+			rx >= Math.min(px, qx) - eps &&
+			ry <= Math.max(py, qy) + eps &&
+			ry >= Math.min(py, qy) - eps;
+
+		const o1 = orient(ax, ay, bx, by, cx, cy);
+		const o2 = orient(ax, ay, bx, by, dx, dy);
+		const o3 = orient(cx, cy, dx, dy, ax, ay);
+		const o4 = orient(cx, cy, dx, dy, bx, by);
+
+		// General case
+		if ((o1 > eps && o2 < -eps) || (o1 < -eps && o2 > eps)) {
+			if ((o3 > eps && o4 < -eps) || (o3 < -eps && o4 > eps)) return true;
+		}
+
+		// Colinear / touching cases
+		if (Math.abs(o1) <= eps && onSegment(ax, ay, bx, by, cx, cy)) return true;
+		if (Math.abs(o2) <= eps && onSegment(ax, ay, bx, by, dx, dy)) return true;
+		if (Math.abs(o3) <= eps && onSegment(cx, cy, dx, dy, ax, ay)) return true;
+		if (Math.abs(o4) <= eps && onSegment(cx, cy, dx, dy, bx, by)) return true;
+		return false;
+	}
+
+	private applyBounds(node: NodeWorldState) {
+		const b = this.worldBounds;
+		if (!b) return;
+
+		if (node.x < b.minX) {
+			node.x = b.minX;
+			if (node.vx < 0) node.vx = 0;
+		} else if (node.x > b.maxX) {
+			node.x = b.maxX;
+			if (node.vx > 0) node.vx = 0;
+		}
+
+		if (node.y < b.minY) {
+			node.y = b.minY;
+			if (node.vy < 0) node.vy = 0;
+		} else if (node.y > b.maxY) {
+			node.y = b.maxY;
+			if (node.vy > 0) node.vy = 0;
 		}
 	}
 
@@ -201,7 +292,7 @@ export class SimulationRunner {
 		for (const recipient of this.nodes) {
 			if (recipient.id === senderId) continue;
 			if (packet.destId !== -1 && packet.destId !== recipient.id) continue;
-			if (Math.random() < this.packetLoss) continue;
+			if (this.rng() < this.packetLoss) continue;
 
 			const ranging = this.uwb.measure(
 				{ id: sender.id, x: sender.x, y: sender.y },

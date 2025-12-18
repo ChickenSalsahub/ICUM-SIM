@@ -26,6 +26,19 @@ const PIXELS_PER_METER = 20;
 const CANVAS_WIDTH = 1200;
 const CANVAS_HEIGHT = 800;
 
+// Keep UI arena consistent with experiment bounds (0..50m in both axes).
+const OFFSET_X_M = 20,
+	OFFSET_Y_M = 10;
+const OFFSET_X_PX = OFFSET_X_M;
+const OFFSET_Y_PX = OFFSET_Y_M;
+const WORLD_BOUNDS_M = { minX: 0, maxX: 48, minY: 0, maxY: 40 };
+const WORLD_BOUNDS_PX = {
+	minX: WORLD_BOUNDS_M.minX * PIXELS_PER_METER + OFFSET_X_M,
+	maxX: WORLD_BOUNDS_M.maxX * PIXELS_PER_METER + OFFSET_X_M,
+	minY: WORLD_BOUNDS_M.minY * PIXELS_PER_METER + OFFSET_Y_M,
+	maxY: WORLD_BOUNDS_M.maxY * PIXELS_PER_METER + OFFSET_Y_M,
+};
+
 type Pose2D = { x: number; y: number; theta: number };
 
 type UiGlobalPosition = { lat: number; lng: number; alt?: number };
@@ -244,6 +257,7 @@ const App: React.FC = () => {
 			uwbRangeMeters: config.uwbRange,
 			uwbNoiseSigma: 0.01,
 			packetLoss: 0.1,
+			worldBounds: WORLD_BOUNDS_M,
 		});
 		runnerRef.current = runner;
 		return runner;
@@ -320,10 +334,10 @@ const App: React.FC = () => {
 			runner.setWalls(
 				currentWalls.map((w) => ({
 					...w,
-					x1: w.x1 / PIXELS_PER_METER,
-					y1: w.y1 / PIXELS_PER_METER,
-					x2: w.x2 / PIXELS_PER_METER,
-					y2: w.y2 / PIXELS_PER_METER,
+					x1: (w.x1 - OFFSET_X_PX) / PIXELS_PER_METER,
+					y1: (w.y1 - OFFSET_Y_PX) / PIXELS_PER_METER,
+					x2: (w.x2 - OFFSET_X_PX) / PIXELS_PER_METER,
+					y2: (w.y2 - OFFSET_Y_PX) / PIXELS_PER_METER,
 				}))
 			);
 
@@ -372,7 +386,10 @@ const App: React.FC = () => {
 				else node.isolationTimer = 0;
 
 				// Sync current UI pose into engine (dragging or external edits).
-				runner.setNodePose(node.id, { x: node.x / PIXELS_PER_METER, y: node.y / PIXELS_PER_METER });
+				runner.setNodePose(node.id, {
+					x: (node.x - OFFSET_X_PX) / PIXELS_PER_METER,
+					y: (node.y - OFFSET_Y_PX) / PIXELS_PER_METER,
+				});
 
 				// Map UI battery percent (0..100) to a plausible Li-ion voltage range.
 				// This voltage is what firmware uses for leader election.
@@ -382,11 +399,53 @@ const App: React.FC = () => {
 				let vxMps = 0;
 				let vyMps = 0;
 				if (node.motionMode === "MOVING" && !node.isDragging) {
-					const dist = Math.sqrt(Math.pow(node.targetX - node.x, 2) + Math.pow(node.targetY - node.y, 2));
+					const marginPx = 20;
+					const pickTarget = () => ({
+						x:
+							WORLD_BOUNDS_PX.minX +
+							marginPx +
+							Math.random() * (WORLD_BOUNDS_PX.maxX - WORLD_BOUNDS_PX.minX - 2 * marginPx),
+						y:
+							WORLD_BOUNDS_PX.minY +
+							marginPx +
+							Math.random() * (WORLD_BOUNDS_PX.maxY - WORLD_BOUNDS_PX.minY - 2 * marginPx),
+					});
+					const isOutOfBounds = (x: number, y: number) =>
+						x < WORLD_BOUNDS_PX.minX ||
+						x > WORLD_BOUNDS_PX.maxX ||
+						y < WORLD_BOUNDS_PX.minY ||
+						y > WORLD_BOUNDS_PX.maxY;
+					const pathBlocked = (x1: number, y1: number, x2: number, y2: number) =>
+						currentWalls.some((w) =>
+							doIntersect({ x: x1, y: y1 }, { x: x2, y: y2 }, { x: w.x1, y: w.y1 }, { x: w.x2, y: w.y2 })
+						);
+
+					// If the target is outside the arena or behind a wall, reroll it.
+					if (isOutOfBounds(node.targetX, node.targetY) || pathBlocked(node.x, node.y, node.targetX, node.targetY)) {
+						for (let attempt = 0; attempt < 20; attempt++) {
+							const t = pickTarget();
+							if (!pathBlocked(node.x, node.y, t.x, t.y)) {
+								node.targetX = t.x;
+								node.targetY = t.y;
+								break;
+							}
+						}
+					}
+
+					let dist = Math.sqrt(Math.pow(node.targetX - node.x, 2) + Math.pow(node.targetY - node.y, 2));
 					if (dist < 10) {
-						node.targetX = Math.random() * 1100 + 50;
-						node.targetY = Math.random() * 700 + 50;
-					} else {
+						for (let attempt = 0; attempt < 20; attempt++) {
+							const t = pickTarget();
+							if (!pathBlocked(node.x, node.y, t.x, t.y)) {
+								node.targetX = t.x;
+								node.targetY = t.y;
+								break;
+							}
+						}
+						dist = Math.sqrt(Math.pow(node.targetX - node.x, 2) + Math.pow(node.targetY - node.y, 2));
+					}
+
+					if (dist >= 10) {
 						node.battery = Math.max(0, node.battery - 0.01 * deltaTime);
 						const speedPxPerSec = config.movingSpeed * 100;
 						const vxPx = ((node.targetX - node.x) / dist) * speedPxPerSec;
@@ -405,8 +464,8 @@ const App: React.FC = () => {
 				const node = currentNodes.find((n) => n.id === sn.id);
 				if (!node) continue;
 				if (!node.isDragging) {
-					node.x = sn.trueX * PIXELS_PER_METER;
-					node.y = sn.trueY * PIXELS_PER_METER;
+					node.x = sn.trueX * PIXELS_PER_METER + OFFSET_X_PX;
+					node.y = sn.trueY * PIXELS_PER_METER + OFFSET_Y_PX;
 					// keep target position unless we auto-rerolled it above
 				}
 				node.updateFromEngine({
@@ -556,7 +615,10 @@ const App: React.FC = () => {
 				node.targetY = node.y;
 				const runner = runnerRef.current;
 				if (runner) {
-					runner.setNodePose(node.id, { x: node.x / PIXELS_PER_METER, y: node.y / PIXELS_PER_METER });
+					runner.setNodePose(node.id, {
+						x: (node.x - OFFSET_X_PX) / PIXELS_PER_METER,
+						y: (node.y - OFFSET_Y_PX) / PIXELS_PER_METER,
+					});
 					runner.setNodeVelocity(node.id, { vx: 0, vy: 0 });
 				}
 				setNodes([...nodesRef.current]);
@@ -606,13 +668,13 @@ const App: React.FC = () => {
 	// Actions
 	const spawn = (type: NodeType) => {
 		const maxId = nodesRef.current.length > 0 ? Math.max(...nodesRef.current.map((n) => n.id)) : 0;
-		const x = Math.random() * 1000 + 50;
-		const y = Math.random() * 700 + 50;
+		const x = WORLD_BOUNDS_PX.minX + Math.random() * (WORLD_BOUNDS_PX.maxX - WORLD_BOUNDS_PX.minX);
+		const y = WORLD_BOUNDS_PX.minY + Math.random() * (WORLD_BOUNDS_PX.maxY - WORLD_BOUNDS_PX.minY);
 		const n = new UiNode(maxId + 1, type, x, y);
 		const runner = ensureRunner();
 		runner.addNode(
 			n.id,
-			{ x: x / PIXELS_PER_METER, y: y / PIXELS_PER_METER },
+			{ x: (x - OFFSET_X_PX) / PIXELS_PER_METER, y: (y - OFFSET_Y_PX) / PIXELS_PER_METER },
 			{ vx: 0, vy: 0 },
 			3.7,
 			type === "HARDWARE_GW"
@@ -1382,6 +1444,30 @@ const App: React.FC = () => {
 							</pattern>
 						</defs>
 						<rect width="100%" height="100%" fill="url(#grid)" />
+						{/* Arena bounds (matches experiment world bounds) */}
+						<g style={{ pointerEvents: "none" }}>
+							<rect
+								x={WORLD_BOUNDS_PX.minX}
+								y={WORLD_BOUNDS_PX.minY}
+								width={WORLD_BOUNDS_PX.maxX - WORLD_BOUNDS_PX.minX}
+								height={WORLD_BOUNDS_PX.maxY - WORLD_BOUNDS_PX.minY}
+								fill="none"
+								stroke="#38bdf8"
+								strokeWidth={2}
+								strokeDasharray="6 4"
+								opacity={0.45}
+							/>
+							<text
+								x={WORLD_BOUNDS_PX.minX + 6}
+								y={WORLD_BOUNDS_PX.minY + 14}
+								fill="#38bdf8"
+								fontSize="10"
+								fontFamily="monospace"
+								opacity={0.8}
+							>
+								ARENA (48m × 40m)
+							</text>
+						</g>
 						{/* GHOST GRAPH VISUALIZATION (Cooperative Localization Belief) */}
 						{(() => {
 							if (windowOrder.length === 0) return null;

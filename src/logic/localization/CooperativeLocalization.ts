@@ -9,8 +9,10 @@ export class RelativePoseGraph {
 	public nodes: Map<number, Pose2D> = new Map();
 	private edges: Map<string, { u: number; v: number; dist: number; weight: number; aoaUV?: number; aoaVU?: number }> =
 		new Map();
+	private readonly rng: () => number;
 
-	constructor(private selfId: number) {
+	constructor(private selfId: number, rng: () => number = Math.random) {
+		this.rng = rng;
 		// Initialize self at origin
 		this.nodes.set(selfId, { x: 0, y: 0, theta: 0 });
 	}
@@ -47,7 +49,7 @@ export class RelativePoseGraph {
 
 	private initializeNode(newId: number, refId: number, dist: number, aoa?: number) {
 		const refPose = this.nodes.get(refId)!;
-		let angle = Math.random() * Math.PI * 2;
+		let angle = this.rng() * Math.PI * 2;
 
 		if (aoa !== undefined) {
 			angle = refPose.theta + aoa;
