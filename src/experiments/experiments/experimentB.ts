@@ -22,7 +22,7 @@ type EstNode = {
 	id: number;
 	trueX: number;
 	trueY: number;
-	firmware: { estPosition: { x: number; y: number } };
+	firmware: { estPosition: { x: number; y: number }; neighbors: any[] };
 	txCount: number;
 };
 
@@ -38,7 +38,7 @@ function buildEstimatedNodesFromPoseGraph(
 			id: n.id,
 			trueX: n.trueX,
 			trueY: n.trueY,
-			firmware: { estPosition: { x, y } },
+			firmware: { ...n.firmware, estPosition: { x, y } },
 			txCount: n.txCount,
 		};
 	});

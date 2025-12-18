@@ -9,10 +9,8 @@ import { getCliSeed, makeSeed, seededRng, seedNodes } from "../lib/seed.ts";
 export interface ExperimentDTimeRow {
 	timeSeconds: number;
 	nodes: number;
-	cloudBaselineRmse: number;
-	cloudRobustRmse: number;
-	coverageBaseline: number;
-	coverageRobust: number;
+	cloudRmse: number;
+	cloudCoverage: number;
 }
 
 export interface ExperimentDScenarioTimeRow extends ExperimentDTimeRow {
@@ -23,9 +21,7 @@ export interface ExperimentDScenarioTimeRow extends ExperimentDTimeRow {
  * Experiment D
  *
  * Goal
- * - Compare cloud-side fusion accuracy between:
- *   - baseline least squares
- *   - robust fusion (Huber loss, outlier resistance)
+ * - Measure cloud-side fusion accuracy using standard least squares.
  *
  * How it's run
  * - Run a local simulation
@@ -54,14 +50,8 @@ export function runExperimentDScenarios(): ExperimentDScenarioTimeRow[] {
 		});
 		seedNodes(runner, layout);
 
-		// Deterministic RNG per cloud backend so results are stable.
-		const cloudBaseline = new CloudBackend({
-			robustFusion: false,
+		const cloud = new CloudBackend({
 			rng: createMulberry32(baseSeed + 500 + scenarioOffset),
-		});
-		const cloudRobust = new CloudBackend({
-			robustFusion: true,
-			rng: createMulberry32(baseSeed + 501 + scenarioOffset),
 		});
 
 		runner.setHooks({
@@ -80,14 +70,7 @@ export function runExperimentDScenarios(): ExperimentDScenarioTimeRow[] {
 						const kind = typeof e.kind === "string" ? e.kind : "EVENT";
 						const level = e.level === "WARN" || e.level === "ERROR" ? e.level : "INFO";
 						const nodeId = Number(e.nodeId);
-						cloudBaseline.recordEvent({
-							timestamp,
-							level,
-							kind,
-							nodeId: Number.isFinite(nodeId) ? nodeId : undefined,
-							message: typeof e.message === "string" ? e.message : String(e.message ?? kind),
-						});
-						cloudRobust.recordEvent({
+						cloud.recordEvent({
 							timestamp,
 							level,
 							kind,
@@ -131,8 +114,7 @@ export function runExperimentDScenarios(): ExperimentDScenarioTimeRow[] {
 						report.y = senderPos.y;
 					}
 
-					cloudBaseline.ingest(report);
-					cloudRobust.ingest(report);
+					cloud.ingest(report);
 				}
 			},
 		});
@@ -149,22 +131,17 @@ export function runExperimentDScenarios(): ExperimentDScenarioTimeRow[] {
 				truth.set(sn.id, { x: sn.trueX, y: sn.trueY });
 			}
 
-			cloudBaseline.tick(nowMs);
-			cloudRobust.tick(nowMs);
+			cloud.tick(nowMs);
 
-			const baselineLatest = latestByNode(cloudBaseline.getRecords());
-			const robustLatest = latestByNode(cloudRobust.getRecords());
-			const baselineStats = cloudRmse(baselineLatest, truth);
-			const robustStats = cloudRmse(robustLatest, truth);
+			const latest = latestByNode(cloud.getRecords());
+			const stats = cloudRmse(latest, truth);
 
 			rows.push({
 				scenario,
 				timeSeconds: t / 1000,
 				nodes: nodeCount,
-				cloudBaselineRmse: baselineStats.rmse,
-				cloudRobustRmse: robustStats.rmse,
-				coverageBaseline: baselineStats.coverage,
-				coverageRobust: robustStats.coverage,
+				cloudRmse: stats.rmse,
+				cloudCoverage: stats.coverage,
 			});
 
 			runner.step(logEveryMs);

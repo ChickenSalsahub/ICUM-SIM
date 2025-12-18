@@ -22,8 +22,37 @@ import { DraggableWindow } from "./components/DraggableWindow";
 import { NodeConfig, NodeRole, NodeType, Packet, PacketType, VisualPacket, Wall } from "./types";
 import { SimulationRunner } from "./engine/SimulationRunner";
 import type { FirmwareConfig } from "./firmware/types";
+import { createRollingMeanConvergenceTracker } from "./experiments/lib/convergence";
 
 const PIXELS_PER_METER = 20;
+
+// Convergence tracker instance (cloud backend)
+const cloudConvergenceTracker = createRollingMeanConvergenceTracker({
+	samplePeriodMs: 1000,
+	windowMs: 30_000,
+	stableDelta: 0.05,
+	stableHoldMs: 5_000,
+});
+
+function computeCloudConvergence(fusedRecords: import("./logic/CloudBackend").FusedRecord[], cloudStats: any) {
+	// Build RMSE history from fused records
+	const rmseHistory: Array<{ t: number; v: number }> = [];
+	for (const r of fusedRecords) {
+		if (typeof r.position?.x === "number" && typeof r.position?.y === "number") {
+			const t = r.timestamp;
+			const v = cloudStats?.aligned.rmse ?? NaN;
+			rmseHistory.push({ t, v });
+		}
+	}
+	// Feed the tracker with the latest N samples (simulate time progression)
+	for (const pt of rmseHistory.slice(-40)) cloudConvergenceTracker.update(pt.t, pt.v);
+	const state = cloudConvergenceTracker.getState();
+	return {
+		converged: state.convergenceStableMs !== undefined,
+		convergenceText: state.convergenceStableMs !== undefined ? "CONVERGED" : "NOT CONVERGED",
+		convergenceColor: state.convergenceStableMs !== undefined ? "#4ade80" : "#f87171",
+	};
+}
 const CANVAS_WIDTH = 1200;
 const CANVAS_HEIGHT = 800;
 
@@ -204,12 +233,10 @@ const App: React.FC = () => {
 	const [packets, setPackets] = useState<Packet[]>([]);
 	const [visualPackets, setVisualPackets] = useState<VisualPacket[]>([]);
 	const [fusedRecordsBaseline, setFusedRecordsBaseline] = useState<FusedRecord[]>([]);
-	const [fusedRecordsRobust, setFusedRecordsRobust] = useState<FusedRecord[]>([]);
 	const [cloudEventsBaseline, setCloudEventsBaseline] = useState<CloudEvent[]>([]);
-	const [cloudEventsRobust, setCloudEventsRobust] = useState<CloudEvent[]>([]);
-	const [cloudAlgoMode, setCloudAlgoMode] = useState<"BASELINE" | "ROBUST">("BASELINE");
-	const fusedRecords = cloudAlgoMode === "ROBUST" ? fusedRecordsRobust : fusedRecordsBaseline;
-	const cloudEvents = cloudAlgoMode === "ROBUST" ? cloudEventsRobust : cloudEventsBaseline;
+
+	const fusedRecords = fusedRecordsBaseline;
+	const cloudEvents = cloudEventsBaseline;
 
 	const [walls, setWalls] = useState<Wall[]>([]);
 	const [isDrawingWall, setIsDrawingWall] = useState(false);
@@ -291,7 +318,6 @@ const App: React.FC = () => {
 	});
 
 	const [cloudTuning, setCloudTuning] = useState<CloudBackendOptions>({
-		huberK: 2.5,
 		distanceSigma: 0.15,
 		angleSigma: (20 * Math.PI) / 180,
 		warmupIterations: 15,
@@ -300,8 +326,7 @@ const App: React.FC = () => {
 
 	const nodesRef = useRef<UiNode[]>([]);
 	const runnerRef = useRef<SimulationRunner | null>(null);
-	const cloudBackendBaselineRef = useRef<CloudBackend>(new CloudBackend({ robustFusion: false, ...cloudTuning }));
-	const cloudBackendRobustRef = useRef<CloudBackend>(new CloudBackend({ robustFusion: true, ...cloudTuning }));
+	const cloudBackendBaselineRef = useRef<CloudBackend>(new CloudBackend({ ...cloudTuning }));
 	const visualPacketsRef = useRef<VisualPacket[]>([]);
 	const wallsRef = useRef<Wall[]>([]);
 	const animationRef = useRef<number | undefined>(undefined);
@@ -381,12 +406,9 @@ const App: React.FC = () => {
 	);
 
 	const applyCloudTuning = useCallback(() => {
-		cloudBackendBaselineRef.current = new CloudBackend({ robustFusion: false, ...cloudTuning });
-		cloudBackendRobustRef.current = new CloudBackend({ robustFusion: true, ...cloudTuning });
+		cloudBackendBaselineRef.current = new CloudBackend({ ...cloudTuning });
 		setFusedRecordsBaseline([]);
-		setFusedRecordsRobust([]);
 		setCloudEventsBaseline([]);
-		setCloudEventsRobust([]);
 	}, [cloudTuning]);
 
 	useEffect(() => {
@@ -424,7 +446,6 @@ const App: React.FC = () => {
 			}));
 
 			const baselineCloud = cloudBackendBaselineRef.current;
-			const robustCloud = cloudBackendRobustRef.current;
 			let recordedBackendEvents = false;
 
 			const rawEvents = (packet.payload as { events?: unknown }).events;
@@ -438,13 +459,6 @@ const App: React.FC = () => {
 					const level = e.level === "WARN" || e.level === "ERROR" ? e.level : "INFO";
 					const nodeId = Number(e.nodeId);
 					baselineCloud.recordEvent({
-						timestamp,
-						level,
-						kind,
-						nodeId: Number.isFinite(nodeId) ? nodeId : undefined,
-						message: typeof e.message === "string" ? e.message : String(e.message ?? kind),
-					});
-					robustCloud.recordEvent({
 						timestamp,
 						level,
 						kind,
@@ -488,12 +502,10 @@ const App: React.FC = () => {
 				}
 
 				baselineCloud.ingest(report);
-				robustCloud.ingest(report);
 			}
 
 			if (recordedBackendEvents) {
 				setCloudEventsBaseline([...baselineCloud.getEvents()]);
-				setCloudEventsRobust([...robustCloud.getEvents()]);
 			}
 		},
 		[]
@@ -501,6 +513,7 @@ const App: React.FC = () => {
 
 	const gameLoop = useCallback(
 		(timestamp: number) => {
+			if (!lastTimeRef.current) lastTimeRef.current = timestamp;
 			if (!lastTimeRef.current) lastTimeRef.current = timestamp;
 			const deltaTime = (timestamp - lastTimeRef.current) / 1000;
 			lastTimeRef.current = timestamp;
@@ -569,11 +582,8 @@ const App: React.FC = () => {
 					ingestUplinkToCloud({ packet, senderId, senderPos, nowMs: timeMs });
 					if (packet.type === PacketType.PANIC) {
 						const baselineCloud = cloudBackendBaselineRef.current;
-						const robustCloud = cloudBackendRobustRef.current;
 						baselineCloud.recordPanic({ timestamp: timeMs, nodeId: senderId });
-						robustCloud.recordPanic({ timestamp: timeMs, nodeId: senderId });
 						setCloudEventsBaseline([...baselineCloud.getEvents()]);
-						setCloudEventsRobust([...robustCloud.getEvents()]);
 					}
 					if (packet.destId === -1) {
 						newVisuals.push({
@@ -742,9 +752,7 @@ const App: React.FC = () => {
 			if (nowMs - lastCloudTickRef.current > 250) {
 				lastCloudTickRef.current = nowMs;
 				const baselineCloud = cloudBackendBaselineRef.current;
-				const robustCloud = cloudBackendRobustRef.current;
 				if (baselineCloud.tick(nowMs)) setFusedRecordsBaseline([...baselineCloud.getRecords()]);
-				if (robustCloud.tick(nowMs)) setFusedRecordsRobust([...robustCloud.getRecords()]);
 			}
 
 			// 6. ENERGY
@@ -908,12 +916,9 @@ const App: React.FC = () => {
 			lastBatchSize: 0,
 			lastUplinkTimeMs: 0,
 		});
-		cloudBackendBaselineRef.current = new CloudBackend({ robustFusion: false });
-		cloudBackendRobustRef.current = new CloudBackend({ robustFusion: true });
+		cloudBackendBaselineRef.current = new CloudBackend();
 		setFusedRecordsBaseline([]);
-		setFusedRecordsRobust([]);
 		setCloudEventsBaseline([]);
-		setCloudEventsRobust([]);
 		setOpenWindows([]);
 		setWalls([]);
 	};
@@ -1390,22 +1395,6 @@ const App: React.FC = () => {
 							</button>
 						</div>
 						<div style={{ fontSize: "9px", color: "#64748b" }}>Affects how the cloud optimizer weights residuals.</div>
-						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 6 }}>
-							Robustness (Huber K)
-						</div>
-						<input
-							type="range"
-							min="0.5"
-							max="10"
-							step="0.1"
-							value={cloudTuning.huberK ?? 2.5}
-							onChange={(e) => setCloudTuning({ ...cloudTuning, huberK: Number(e.target.value) })}
-							style={{ width: "100%" }}
-						/>
-						<div style={{ fontSize: "9px", color: "#cbd5e1", textAlign: "right" }}>
-							Huber K: {(cloudTuning.huberK ?? 2.5).toFixed(1)}
-						</div>
-						<div style={{ fontSize: "9px", color: "#64748b" }}>Lower = more aggressive outlier rejection.</div>
 						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 6 }}>Distance σ (Cloud)</div>
 						<input
 							type="range"
@@ -1476,7 +1465,7 @@ const App: React.FC = () => {
 					{showCloudLogs && (
 						<DraggableWindow
 							id="cloud"
-							title={`CLOUD DATABASE (${cloudViewMode} / ${cloudAlgoMode})`}
+							title={`CLOUD DATABASE (${cloudViewMode})`}
 							icon={Database}
 							initialX={800}
 							initialY={50}
@@ -1530,35 +1519,7 @@ const App: React.FC = () => {
 								>
 									TOPOLOGY
 								</button>
-								<div style={{ flex: 1 }} />
-								<button
-									onClick={() => setCloudAlgoMode("BASELINE")}
-									style={{
-										fontSize: "9px",
-										padding: "4px 8px",
-										borderRadius: "4px",
-										border: "none",
-										backgroundColor: cloudAlgoMode === "BASELINE" ? "#38bdf8" : "#1e293b",
-										color: cloudAlgoMode === "BASELINE" ? "#0f172a" : "#94a3b8",
-										cursor: "pointer",
-									}}
-								>
-									BASELINE
-								</button>
-								<button
-									onClick={() => setCloudAlgoMode("ROBUST")}
-									style={{
-										fontSize: "9px",
-										padding: "4px 8px",
-										borderRadius: "4px",
-										border: "none",
-										backgroundColor: cloudAlgoMode === "ROBUST" ? "#38bdf8" : "#1e293b",
-										color: cloudAlgoMode === "ROBUST" ? "#0f172a" : "#94a3b8",
-										cursor: "pointer",
-									}}
-								>
-									ROBUST
-								</button>
+
 							</div>
 							<div
 								style={{
@@ -1641,35 +1602,6 @@ const App: React.FC = () => {
 									}}
 								>
 									{(() => {
-														// Compute cloud convergence status (rolling mean stability on aligned RMSE)
-														import { createRollingMeanConvergenceTracker } from "./experiments/lib/convergence";
-														const tracker = createRollingMeanConvergenceTracker({
-															samplePeriodMs: 1000,
-															windowMs: 30_000,
-															stableDelta: 0.05,
-															stableHoldMs: 5_000,
-														});
-														const rmseHistory: Array<{ t: number; v: number }> = [];
-														for (const r of fusedRecords) {
-															if (typeof r.position?.x === "number" && typeof r.position?.y === "number") {
-																const t = r.timestamp;
-																const v = cloudStats?.aligned.rmse ?? NaN;
-																rmseHistory.push({ t, v });
-															}
-														}
-														// Feed the tracker with the latest N samples (simulate time progression)
-														for (const pt of rmseHistory.slice(-40)) tracker.update(pt.t, pt.v);
-														const converged = tracker.getState().convergenceStableMs !== undefined;
-														const convergenceText = converged ? "CONVERGED" : "NOT CONVERGED";
-														const convergenceColor = converged ? "#4ade80" : "#f87171";
-										const lastPanicTsByNodeId = new Map<number, number>();
-										for (const e of cloudEvents) {
-											if (e.kind !== "PANIC") continue;
-											if (typeof e.nodeId !== "number") continue;
-											const prev = lastPanicTsByNodeId.get(e.nodeId);
-											if (!prev || e.timestamp >= prev) lastPanicTsByNodeId.set(e.nodeId, e.timestamp);
-										}
-
 										// Filter to get only the latest record per node for the topology.
 										const uniqueRecordsMap = new Map<number, FusedRecord>();
 										for (const r of fusedRecords) {
@@ -1700,6 +1632,20 @@ const App: React.FC = () => {
 												edges.push([a, b]);
 											}
 										}
+										// Compute cloudStats and convergence status
+										const cloudStats = computeCloudStructureStatsMeters({ records: uniqueRecords, truthById, edges });
+										const { converged, convergenceText, convergenceColor } = computeCloudConvergence(
+											uniqueRecords,
+											cloudStats
+										);
+										const lastPanicTsByNodeId = new Map<number, number>();
+										for (const e of cloudEvents) {
+											if (e.kind !== "PANIC") continue;
+											if (typeof e.nodeId !== "number") continue;
+											const prev = lastPanicTsByNodeId.get(e.nodeId);
+											if (!prev || e.timestamp >= prev) lastPanicTsByNodeId.set(e.nodeId, e.timestamp);
+										}
+
 										const componentSizeByNodeId = new Map<number, number>();
 										{
 											const idList = Array.from(idsPresent.values());
@@ -1738,7 +1684,6 @@ const App: React.FC = () => {
 											if (!lastPanicTsByNodeId.has(nodeId)) return false;
 											return (componentSizeByNodeId.get(nodeId) ?? 1) <= 1;
 										};
-										const cloudStats = computeCloudStructureStatsMeters({ records: uniqueRecords, truthById, edges });
 
 										if (uniqueRecords.length === 0)
 											return (
@@ -1772,23 +1717,25 @@ const App: React.FC = () => {
 
 										return (
 											<>
-																<div style={{
-																	position: "absolute",
-																	top: 8,
-																	right: 8,
-																	padding: "6px 10px",
-																	borderRadius: "6px",
-																	border: `1px solid ${convergenceColor}`,
-																	backgroundColor: "#0f172a",
-																	color: convergenceColor,
-																	fontFamily: "monospace",
-																	fontSize: "12px",
-																	fontWeight: "bold",
-																	opacity: 0.95,
-																	pointerEvents: "none",
-																}}>
-																	Cloud: {convergenceText}
-																</div>
+												<div
+													style={{
+														position: "absolute",
+														top: 8,
+														right: 8,
+														padding: "6px 10px",
+														borderRadius: "6px",
+														border: `1px solid ${convergenceColor}`,
+														backgroundColor: "#0f172a",
+														color: convergenceColor,
+														fontFamily: "monospace",
+														fontSize: "12px",
+														fontWeight: "bold",
+														opacity: 0.95,
+														pointerEvents: "none",
+													}}
+												>
+													Cloud: {convergenceText}
+												</div>
 												<div
 													style={{
 														position: "absolute",

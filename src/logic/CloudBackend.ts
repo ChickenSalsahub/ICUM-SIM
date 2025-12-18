@@ -1,10 +1,7 @@
 import { RelativePoseGraph } from "./localization/CooperativeLocalization.ts";
 
 export interface CloudBackendOptions {
-	robustFusion?: boolean;
 	rng?: () => number;
-	// Huber threshold in normalized residual units.
-	huberK?: number;
 	// Normalization scales for residuals.
 	distanceSigma?: number; // meters
 	angleSigma?: number; // radians
@@ -105,8 +102,6 @@ export class CloudBackend {
 	constructor(opts?: CloudBackendOptions) {
 		this.rng = opts?.rng ?? Math.random;
 		this.opts = {
-			robustFusion: opts?.robustFusion ?? false,
-			huberK: opts?.huberK ?? 2.5,
 			distanceSigma: opts?.distanceSigma ?? 0.15,
 			angleSigma: opts?.angleSigma ?? (20 * Math.PI) / 180,
 			warmupIterations: opts?.warmupIterations ?? 15,
@@ -176,13 +171,6 @@ export class CloudBackend {
 		const activeNodeIds = new Set<number>();
 		const fixedNodeIds: number[] = [];
 		const supernodeIds = new Set<number>();
-
-		const wrapPi = (a: number) => {
-			let x = a;
-			while (x > Math.PI) x -= 2 * Math.PI;
-			while (x < -Math.PI) x += 2 * Math.PI;
-			return x;
-		};
 
 		// 0. Identify Supernodes (Anchors)
 		this.buffer.forEach((reports, nodeId) => {
@@ -344,44 +332,7 @@ export class CloudBackend {
 
 		// 3. Optimize Graph
 		applyConstraints();
-		graph.optimize(this.opts.warmupIterations, fixedNodeIds);
-
-		if (this.opts.robustFusion) {
-			const weights = new Map<string, number>();
-			for (const c of constraints) {
-				const uPose = graph.getNodePose(c.u);
-				const vPose = graph.getNodePose(c.v);
-				if (!uPose || !vPose) continue;
-				const dx = vPose.x - uPose.x;
-				const dy = vPose.y - uPose.y;
-				const currentDist = Math.sqrt(dx * dx + dy * dy);
-				const distErr = currentDist - c.dist;
-				let r2 = (distErr / this.opts.distanceSigma) ** 2;
-
-				if (c.aoaUV !== undefined) {
-					const target = uPose.theta + c.aoaUV;
-					const current = Math.atan2(dy, dx);
-					const angleErr = wrapPi(target - current);
-					r2 += (angleErr / this.opts.angleSigma) ** 2;
-				}
-				if (c.aoaVU !== undefined) {
-					const target = vPose.theta + c.aoaVU;
-					const current = Math.atan2(-dy, -dx);
-					const angleErr = wrapPi(target - current);
-					r2 += (angleErr / this.opts.angleSigma) ** 2;
-				}
-
-				const r = Math.sqrt(r2);
-				const k = this.opts.huberK;
-				const w = r <= k ? 1.0 : k / Math.max(r, 1e-9);
-				weights.set(c.key, w);
-			}
-
-			applyConstraints(weights);
-			graph.optimize(this.opts.finalIterations, fixedNodeIds);
-		} else {
-			graph.optimize(this.opts.finalIterations, fixedNodeIds);
-		}
+		graph.optimize(this.opts.finalIterations, fixedNodeIds);
 
 		// 4. Generate Fused Records from Graph State
 		this.buffer.forEach((reports, nodeId) => {

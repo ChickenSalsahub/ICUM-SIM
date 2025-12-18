@@ -159,16 +159,14 @@ export function main() {
 			// Report-friendly D output: clearer names + units.
 			writeCsv(
 				`experiments_D_${scenarioToFilenameToken(scenario)}_clean.csv`,
-				"scenario,time_s,node_count,cloud_baseline_rmse_m,cloud_robust_rmse_m,coverage_baseline_nodes,coverage_robust_nodes\n",
+				"scenario,time_s,node_count,cloud_rmse_m,cloud_coverage_nodes\n",
 				scenarioRows.map((r) =>
 					[
 						r.scenario,
 						r.timeSeconds,
 						r.nodes,
-						r.cloudBaselineRmse,
-						r.cloudRobustRmse,
-						r.coverageBaseline,
-						r.coverageRobust,
+						r.cloudRmse,
+						r.cloudCoverage,
 					].join(",")
 				)
 			);
