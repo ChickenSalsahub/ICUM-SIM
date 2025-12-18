@@ -1,3 +1,10 @@
+/*
+	** Experiment C
+	** 5.3 Scalability and Convergence
+	** Responsible:	Thor
+*/
+
+
 import { SimulationRunner } from "../../engine/SimulationRunner.ts";
 import { applyMotionScenario } from "../lib/motion.ts";
 import { aleAlignedRigid, sumTx } from "../lib/metrics.ts";
