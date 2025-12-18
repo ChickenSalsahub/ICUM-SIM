@@ -8,7 +8,6 @@ import { runExperimentDScenarios } from "./experiments/experimentD.ts";
 import { runExperimentE } from "./experiments/experimentE.ts";
 
 export function main() {
-	// eslint-disable-next-line no-console
 	console.log(
 		`World bounds enabled: x=[${EXPERIMENT_WORLD_BOUNDS_M.minX}, ${EXPERIMENT_WORLD_BOUNDS_M.maxX}] y=[${EXPERIMENT_WORLD_BOUNDS_M.minY}, ${EXPERIMENT_WORLD_BOUNDS_M.maxY}]`
 	);

@@ -7,6 +7,5 @@ import { writeFileSync } from "fs";
  */
 export function writeCsv(filename: string, header: string, lines: string[]) {
 	writeFileSync(filename, header + lines.join("\n"));
-	// eslint-disable-next-line no-console
 	console.log(`${filename} written`);
 }

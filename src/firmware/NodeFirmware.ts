@@ -352,9 +352,13 @@ export class NodeFirmware {
 		for (const n of this.neighbors.values()) {
 			const dx = this.est.x - n.rangeMeters * Math.cos(n.angleRad ?? 0);
 			const dy = this.est.y - n.rangeMeters * Math.sin(n.angleRad ?? 0);
-			const distErr = Math.sqrt(dx * dx + dy * dy) - n.rangeMeters;
-			gradX += this.cfg.lambdaDistance * 2 * distErr * (dx / (Math.abs(distErr) + 1e-6));
-			gradY += this.cfg.lambdaDistance * 2 * distErr * (dy / (Math.abs(distErr) + 1e-6));
+			const dist = Math.sqrt(dx * dx + dy * dy) + 1e-6;
+			const distErr = dist - n.rangeMeters;
+			// Gradient of (distErr^2) w.r.t position is 2*distErr*(d(dist)/dpos), where
+			// d(dist)/dpos = (dx,dy)/dist. Using dist (not distErr) avoids divisions by
+			// ~0 when we are close to satisfying a constraint.
+			gradX += this.cfg.lambdaDistance * 2 * distErr * (dx / dist);
+			gradY += this.cfg.lambdaDistance * 2 * distErr * (dy / dist);
 
 			if (n.angleRad !== undefined) {
 				const currentAngle = Math.atan2(dy, dx);
@@ -368,8 +372,24 @@ export class NodeFirmware {
 			}
 		}
 
-		this.est.x -= lr * gradX;
-		this.est.y -= lr * gradY;
+		// Clamp the per-tick update so large neighbor sets don't create runaway steps.
+		// This keeps the firmware numerically stable in larger graphs (e.g., 20–50 nodes)
+		// while preserving the same qualitative relaxation dynamics.
+		let stepX = lr * gradX;
+		let stepY = lr * gradY;
+		const stepNorm = Math.sqrt(stepX * stepX + stepY * stepY);
+		const maxStepMeters = 0.5; // per tick
+		if (stepNorm > maxStepMeters) {
+			const scale = maxStepMeters / stepNorm;
+			stepX *= scale;
+			stepY *= scale;
+		}
+
+		this.est.x -= stepX;
+		this.est.y -= stepY;
+		if (!Number.isFinite(this.est.x) || !Number.isFinite(this.est.y)) {
+			this.est = { x: 0, y: 0 };
+		}
 	}
 
 	//Get a snapshot of the current firmware state

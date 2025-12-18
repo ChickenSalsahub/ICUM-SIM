@@ -1,6 +1,6 @@
 import { SimulationRunner } from "../../engine/SimulationRunner.ts";
 import { applyMotionScenario } from "../lib/motion.ts";
-import { ale, sumTx } from "../lib/metrics.ts";
+import { aleAlignedRigid, sumTx } from "../lib/metrics.ts";
 import { EXPERIMENT_WORLD_BOUNDS_M, type MotionScenarioName } from "../lib/types.ts";
 import { getCliSeed, makeSeed, seededRng, seedNodes } from "../lib/seed.ts";
 
@@ -46,28 +46,48 @@ export function runExperimentCScenarios(): ExperimentCScenarioTimeRow[] {
 			});
 			seedNodes(runner, layout);
 
-			let previousAle = Number.POSITIVE_INFINITY;
-			let stableSamples = 0;
+			// Convergence heuristic (paper-friendly, noise-tolerant):
+			//
+			// Cooperative localization without anchors is only identifiable up to a global
+			// rotation/translation. We therefore use an anchor-free ALE (rigid alignment to
+			// truth) and detect convergence by looking at a smoothed metric.
+			//
+			// Definition:
+			// - Let m(t) be the rolling mean of aligned ALE over a 30 second window.
+			// - Declare convergence at the first time where |m(t) - m(t-1)| <= 0.05m for
+			//   5 consecutive seconds.
+			//
+			// This avoids false "no convergence" when the per-second ALE jitters (which it
+			// will, with packet loss and measurement noise).
+			const meanWindowSamples = 30; // 30 seconds (because logEveryMs=1000)
+			const meanDeltaMeters = 0.05;
+			const stableSecondsRequired = 5;
+			const recent: number[] = [];
+			let prevMean: number | undefined;
+			let stableSeconds = 0;
 			let convergenceMs: number | undefined;
 
 			for (let t = 0; t <= simSeconds * 1000; t += logEveryMs) {
 				applyMotionScenario(runner, scenario, t);
 				const snap = runner.snapshot();
 				const totalTx = sumTx(snap.nodes);
-				const currentAle = ale(snap.nodes);
+				const currentAle = aleAlignedRigid(snap.nodes);
 
 				// Normalize by time elapsed so this stays meaningful even if we
 				// change the sample period.
 				const txPerNodePerMin = totalTx / nodeCount / (snap.timeMs / 60000 || 1);
 
-				// Convergence heuristic:
-				// - Track ALE changes
-				// - Declare converged once it stays within 0.01m for 5 consecutive samples
-				if (convergenceMs === undefined) {
-					const delta = Math.abs(currentAle - previousAle);
-					stableSamples = delta < 0.01 ? stableSamples + 1 : 0;
-					if (stableSamples >= 5) convergenceMs = snap.timeMs;
-					previousAle = currentAle;
+				if (convergenceMs === undefined && Number.isFinite(currentAle)) {
+					recent.push(currentAle);
+					if (recent.length > meanWindowSamples) recent.shift();
+					if (recent.length === meanWindowSamples) {
+						const mean = recent.reduce((s, v) => s + v, 0) / recent.length;
+						if (prevMean !== undefined) {
+							stableSeconds = Math.abs(mean - prevMean) <= meanDeltaMeters ? stableSeconds + 1 : 0;
+							if (stableSeconds >= stableSecondsRequired) convergenceMs = snap.timeMs;
+						}
+						prevMean = mean;
+					}
 				}
 
 				rows.push({
