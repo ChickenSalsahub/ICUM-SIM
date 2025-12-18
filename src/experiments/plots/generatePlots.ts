@@ -211,7 +211,7 @@ function plotExperimentA(opts: { repoRoot: string; outDir: string }) {
 			},
 			{
 				x,
-				y: sorted.map((r) => num(r, "Baseline_Tx")),
+				y: sorted.map((r) => num(r, "Baseline_RangeResidual_MAE")),
 				mode: "lines",
 				name: "Baseline",
 				showlegend: false,
@@ -221,7 +221,7 @@ function plotExperimentA(opts: { repoRoot: string; outDir: string }) {
 			},
 			{
 				x,
-				y: sorted.map((r) => num(r, "ETM_Tx")),
+				y: sorted.map((r) => num(r, "ETM_RangeResidual_MAE")),
 				mode: "lines",
 				name: "ETM",
 				showlegend: false,
@@ -229,17 +229,61 @@ function plotExperimentA(opts: { repoRoot: string; outDir: string }) {
 				xaxis: "x2",
 				yaxis: "y2",
 			},
+			{
+				x,
+				y: sorted.map((r) => num(r, "Baseline_AngleResidual_MAE")),
+				mode: "lines",
+				name: "Baseline",
+				showlegend: false,
+				line: { width: 2 },
+				xaxis: "x3",
+				yaxis: "y3",
+			},
+			{
+				x,
+				y: sorted.map((r) => num(r, "ETM_AngleResidual_MAE")),
+				mode: "lines",
+				name: "ETM",
+				showlegend: false,
+				line: { width: 2 },
+				xaxis: "x3",
+				yaxis: "y3",
+			},
+			{
+				x,
+				y: sorted.map((r) => num(r, "Baseline_Tx")),
+				mode: "lines",
+				name: "Baseline",
+				showlegend: false,
+				line: { width: 2 },
+				xaxis: "x4",
+				yaxis: "y4",
+			},
+			{
+				x,
+				y: sorted.map((r) => num(r, "ETM_Tx")),
+				mode: "lines",
+				name: "ETM",
+				showlegend: false,
+				line: { width: 2 },
+				xaxis: "x4",
+				yaxis: "y4",
+			},
 		];
 
 		const tag = csvName.replace("experiments_A_", "").replace(".csv", "");
 		const title = `Experiment A — ${scenario} — ${tag}`;
 		const layout: any = {
 			...baseLayout(title),
-			grid: { rows: 2, columns: 1, pattern: "independent" },
+			grid: { rows: 4, columns: 1, pattern: "independent" },
 			xaxis: { title: "Time (s)" },
 			yaxis: { title: "MAE_Aligned (m)", rangemode: "tozero" },
 			xaxis2: { title: "Time (s)" },
-			yaxis2: { title: "Tx total (count)", rangemode: "tozero" },
+			yaxis2: { title: "RangeResidual_MAE (m)", rangemode: "tozero" },
+			xaxis3: { title: "Time (s)" },
+			yaxis3: { title: "AngleResidual_MAE (rad)", rangemode: "tozero" },
+			xaxis4: { title: "Time (s)" },
+			yaxis4: { title: "Tx total (count)", rangemode: "tozero" },
 		};
 
 		const outFile = `experimentA_${escapeJsFilename(tag)}.html`;
@@ -445,6 +489,8 @@ function plotExperimentE(opts: { repoRoot: string; outDir: string }) {
 	for (const [scenario, scenarioFiles] of Array.from(byScenario.entries()).sort((a, b) => a[0].localeCompare(b[0]))) {
 		const policyToRmse = new Map<string, number>();
 		const policyToTx = new Map<string, number>();
+		const policyToRange = new Map<string, number>();
+		const policyToAngle = new Map<string, number>();
 
 		for (const csvName of scenarioFiles) {
 			const t = parseCsv(readText(path.join(opts.repoRoot, csvName)));
@@ -460,28 +506,56 @@ function plotExperimentE(opts: { repoRoot: string; outDir: string }) {
 			);
 			const rmseVals = finalPerSeed.map((r) => num(r, "RMSE")).filter(Number.isFinite);
 			const txVals = finalPerSeed.map((r) => num(r, "TxTotal")).filter(Number.isFinite);
+			const rangeVals = finalPerSeed.map((r) => num(r, "RangeResidual_MAE")).filter(Number.isFinite);
+			const angleVals = finalPerSeed.map((r) => num(r, "AngleResidual_MAE")).filter(Number.isFinite);
 
 			policyToRmse.set(policy, avg(rmseVals));
 			policyToTx.set(policy, avg(txVals));
+			policyToRange.set(policy, avg(rangeVals));
+			policyToAngle.set(policy, avg(angleVals));
 		}
 
 		const policies = Array.from(policyToRmse.keys()).sort();
 		const rmseByPolicy = policies.map((p) => policyToRmse.get(p) ?? Number.NaN);
 		const txByPolicy = policies.map((p) => policyToTx.get(p) ?? Number.NaN);
+		const rangeByPolicy = policies.map((p) => policyToRange.get(p) ?? Number.NaN);
+		const angleByPolicy = policies.map((p) => policyToAngle.get(p) ?? Number.NaN);
 
 		const traces: any[] = [
 			{ x: policies, y: rmseByPolicy, type: "bar", name: "RMSE (m)", xaxis: "x", yaxis: "y" },
-			{ x: policies, y: txByPolicy, type: "bar", name: "TxTotal", xaxis: "x2", yaxis: "y2", showlegend: false },
+			{
+				x: policies,
+				y: rangeByPolicy,
+				type: "bar",
+				name: "RangeResidual_MAE (m)",
+				xaxis: "x2",
+				yaxis: "y2",
+				showlegend: false,
+			},
+			{
+				x: policies,
+				y: angleByPolicy,
+				type: "bar",
+				name: "AngleResidual_MAE (rad)",
+				xaxis: "x3",
+				yaxis: "y3",
+				showlegend: false,
+			},
+			{ x: policies, y: txByPolicy, type: "bar", name: "TxTotal", xaxis: "x4", yaxis: "y4", showlegend: false },
 		];
 
 		const title = `Experiment E — ${scenario}`;
 		const layout: any = {
 			...baseLayout(title),
-			grid: { rows: 2, columns: 1, pattern: "independent" },
+			grid: { rows: 4, columns: 1, pattern: "independent" },
 			xaxis: { title: "Policy" },
 			yaxis: { title: "RMSE (m)", rangemode: "tozero" },
 			xaxis2: { title: "Policy" },
-			yaxis2: { title: "TxTotal", rangemode: "tozero" },
+			yaxis2: { title: "RangeResidual_MAE (m)", rangemode: "tozero" },
+			xaxis3: { title: "Policy" },
+			yaxis3: { title: "AngleResidual_MAE (rad)", rangemode: "tozero" },
+			xaxis4: { title: "Policy" },
+			yaxis4: { title: "TxTotal", rangemode: "tozero" },
 		};
 
 		const outFile = `experimentE_${escapeJsFilename(scenario)}.html`;

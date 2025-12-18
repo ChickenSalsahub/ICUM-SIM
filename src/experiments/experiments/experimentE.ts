@@ -1,6 +1,6 @@
 import { SimulationRunner } from "../../engine/SimulationRunner.ts";
 import { EXPERIMENT_WORLD_BOUNDS_M } from "../lib/types.ts";
-import { rmse, sumTx } from "../lib/metrics.ts";
+import { measurementAngleResidualMae, measurementRangeResidualMae, rmse, sumTx } from "../lib/metrics.ts";
 import { getCliSeed, makeSeed, seededRng, seedNodes } from "../lib/seed.ts";
 
 export interface ExperimentETimeRow {
@@ -10,6 +10,8 @@ export interface ExperimentETimeRow {
 	timeSeconds: number;
 	txTotal: number;
 	rmse: number;
+	rangeResidualMae: number;
+	angleResidualMae: number;
 }
 
 /**
@@ -105,6 +107,8 @@ export function runExperimentE(): ExperimentETimeRow[] {
 						timeSeconds: tMs / 1000,
 						txTotal: sumTx(snap.nodes),
 						rmse: rmse(snap.nodes),
+						rangeResidualMae: measurementRangeResidualMae(snap.nodes),
+						angleResidualMae: measurementAngleResidualMae(snap.nodes),
 					});
 					nextLog += logEveryMs;
 				}

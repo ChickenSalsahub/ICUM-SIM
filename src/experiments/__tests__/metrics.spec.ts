@@ -1,15 +1,25 @@
 import { describe, expect, it } from "vitest";
-import type { FirmwareSnapshot } from "../../firmware/types.ts";
+import type { FirmwareSnapshot, NeighborObservation } from "../../firmware/types.ts";
 import type { RunnerSnapshot } from "../lib/types.ts";
-import { ale, aleAlignedRigid, mae, pairwiseDistanceMae, rmse, rmseAlignedRigid } from "../lib/metrics.ts";
+import {
+	ale,
+	aleAlignedRigid,
+	mae,
+	measurementAngleResidualMae,
+	measurementRangeResidualMae,
+	pairwiseDistanceMae,
+	rmse,
+	rmseAlignedRigid,
+} from "../lib/metrics.ts";
 
 type RunnerNode = RunnerSnapshot["nodes"][number];
 
-type PartialFirmware = Pick<FirmwareSnapshot, "estPosition">;
+type PartialFirmware = Pick<FirmwareSnapshot, "estPosition" | "neighbors">;
 
 function makeNode(args: { id: number; trueX: number; trueY: number; estX: number; estY: number }): RunnerNode {
 	const firmware: PartialFirmware = {
 		estPosition: { x: args.estX, y: args.estY },
+		neighbors: [],
 	};
 
 	return {
@@ -265,5 +275,32 @@ describe("experiments metrics", () => {
 		];
 		expect(mae(nodes)).toBeCloseTo(err, 12);
 		expect(rmse(nodes)).toBeCloseTo(err, 12);
+	});
+
+	it("measurementRangeResidualMae computes MAE over observed neighbor ranges (undirected dedupe)", () => {
+		const n1 = makeNode({ id: 1, trueX: 0, trueY: 0, estX: 0, estY: 0 });
+		const n2 = makeNode({ id: 2, trueX: 0, trueY: 0, estX: 3, estY: 4 });
+		// Pred distance is 5. Measured is 5.5 => residual 0.5
+		n1.firmware.neighbors = [{ id: 2, rangeMeters: 5.5, timestamp: 0 } satisfies NeighborObservation];
+		// Duplicate opposite direction should be ignored (undirected dedupe)
+		n2.firmware.neighbors = [{ id: 1, rangeMeters: 5.5, timestamp: 0 } satisfies NeighborObservation];
+		expect(measurementRangeResidualMae([n1, n2])).toBeCloseTo(0.5, 12);
+	});
+
+	it("measurementAngleResidualMae computes MAE over directed AoA/bearing residuals with wrapping", () => {
+		const n1 = makeNode({ id: 1, trueX: 0, trueY: 0, estX: 0, estY: 0 });
+		const n2 = makeNode({ id: 2, trueX: 0, trueY: 0, estX: 1, estY: 0 });
+		// True bearing from 1->2 is 0. Use an angle near +pi to force wrap.
+		n1.firmware.neighbors = [
+			{ id: 2, rangeMeters: 1, angleRad: Math.PI - 0.05, timestamp: 0 } satisfies NeighborObservation,
+		];
+		// Error should be wrap(0 - (pi-0.05)) ~= -(pi-0.05) -> abs ~= pi-0.05
+		// Now add second directed observation with near -pi to ensure wrapping gives small residual.
+		n2.firmware.neighbors = [
+			{ id: 1, rangeMeters: 1, angleRad: -Math.PI + 0.02, timestamp: 0 } satisfies NeighborObservation,
+		];
+		// Bearing 2->1 is pi. Residual wrap(pi - (-pi+0.02)) = wrap(2pi-0.02) ~= -0.02
+		const maeRad = measurementAngleResidualMae([n1, n2]);
+		expect(maeRad).toBeCloseTo((Math.PI - 0.05 + 0.02) / 2, 10);
 	});
 });

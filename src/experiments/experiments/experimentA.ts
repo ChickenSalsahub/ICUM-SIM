@@ -1,6 +1,15 @@
 import { SimulationRunner } from "../../engine/SimulationRunner.ts";
 import { applyMotionScenario } from "../lib/motion.ts";
-import { aleAlignedRigid, mae, pairwiseDistanceMae, rmse, rmseAlignedRigid, sumTx } from "../lib/metrics.ts";
+import {
+	aleAlignedRigid,
+	mae,
+	measurementAngleResidualMae,
+	measurementRangeResidualMae,
+	pairwiseDistanceMae,
+	rmse,
+	rmseAlignedRigid,
+	sumTx,
+} from "../lib/metrics.ts";
 import { EXPERIMENT_WORLD_BOUNDS_M, type MotionScenarioName } from "../lib/types.ts";
 import { getCliSeed, makeSeed, seededRng, seedNodes } from "../lib/seed.ts";
 
@@ -12,12 +21,16 @@ export interface ExperimentATimeRow {
 	baselineRmseAligned: number;
 	baselineMaeAligned: number;
 	baselinePairwiseDistMae: number;
+	baselineRangeResidualMae: number;
+	baselineAngleResidualMae: number;
 	etmTx: number;
 	etmRmse: number;
 	etmMae: number;
 	etmRmseAligned: number;
 	etmMaeAligned: number;
 	etmPairwiseDistMae: number;
+	etmRangeResidualMae: number;
+	etmAngleResidualMae: number;
 }
 
 export interface ExperimentAScenarioTimeRow extends ExperimentATimeRow {
@@ -101,12 +114,16 @@ export function runExperimentAScenariosWithOptions(options: ExperimentAOptions):
 				baselineRmseAligned: rmseAlignedRigid(snapBaseline.nodes),
 				baselineMaeAligned: aleAlignedRigid(snapBaseline.nodes),
 				baselinePairwiseDistMae: pairwiseDistanceMae(snapBaseline.nodes),
+				baselineRangeResidualMae: measurementRangeResidualMae(snapBaseline.nodes),
+				baselineAngleResidualMae: measurementAngleResidualMae(snapBaseline.nodes),
 				etmTx: sumTx(snapEtm.nodes),
 				etmRmse: rmse(snapEtm.nodes),
 				etmMae: mae(snapEtm.nodes),
 				etmRmseAligned: rmseAlignedRigid(snapEtm.nodes),
 				etmMaeAligned: aleAlignedRigid(snapEtm.nodes),
 				etmPairwiseDistMae: pairwiseDistanceMae(snapEtm.nodes),
+				etmRangeResidualMae: measurementRangeResidualMae(snapEtm.nodes),
+				etmAngleResidualMae: measurementAngleResidualMae(snapEtm.nodes),
 			});
 
 			baseline.step(logEveryMs);

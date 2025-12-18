@@ -74,7 +74,7 @@ export function main() {
 			)}.csv`;
 			writeCsv(
 				filename,
-				"Scenario,Time,Baseline_Tx,Baseline_TxPerNodePerMin,Baseline_RMSE,ETM_Tx,ETM_TxPerNodePerMin,ETM_RMSE,Baseline_MAE,Baseline_RMSE_Aligned,Baseline_MAE_Aligned,Baseline_PairwiseDist_MAE,ETM_MAE,ETM_RMSE_Aligned,ETM_MAE_Aligned,ETM_PairwiseDist_MAE\n",
+				"Scenario,Time,Baseline_Tx,Baseline_TxPerNodePerMin,Baseline_RMSE,ETM_Tx,ETM_TxPerNodePerMin,ETM_RMSE,Baseline_MAE,Baseline_RMSE_Aligned,Baseline_MAE_Aligned,Baseline_PairwiseDist_MAE,Baseline_RangeResidual_MAE,Baseline_AngleResidual_MAE,ETM_MAE,ETM_RMSE_Aligned,ETM_MAE_Aligned,ETM_PairwiseDist_MAE,ETM_RangeResidual_MAE,ETM_AngleResidual_MAE\n",
 				scenarioRows.map((r) =>
 					[
 						r.scenario,
@@ -89,10 +89,14 @@ export function main() {
 						r.baselineRmseAligned,
 						r.baselineMaeAligned,
 						r.baselinePairwiseDistMae,
+						r.baselineRangeResidualMae,
+						r.baselineAngleResidualMae,
 						r.etmMae,
 						r.etmRmseAligned,
 						r.etmMaeAligned,
 						r.etmPairwiseDistMae,
+						r.etmRangeResidualMae,
+						r.etmAngleResidualMae,
 					].join(",")
 				)
 			);
@@ -146,7 +150,7 @@ export function main() {
 
 	{
 		const rows = runExperimentE();
-		const headerE = "Scenario,Policy,Seed,Time,TxTotal,TxPerNodePerMin,RMSE\n";
+		const headerE = "Scenario,Policy,Seed,Time,TxTotal,TxPerNodePerMin,RMSE,RangeResidual_MAE,AngleResidual_MAE\n";
 		const byScenario = groupBy(rows, (r) => r.scenario);
 		for (const [scenario, scenarioRows] of byScenario.entries()) {
 			const byPolicy = groupBy(scenarioRows, (r) => r.policy);
@@ -163,6 +167,8 @@ export function main() {
 							r.txTotal,
 							txPerNodePerMin(r.txTotal, 10, r.timeSeconds),
 							r.rmse,
+							r.rangeResidualMae,
+							r.angleResidualMae,
 						].join(",")
 					)
 				);

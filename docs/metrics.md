@@ -94,6 +94,32 @@ These metrics compare each node’s firmware estimate to the simulator ground tr
   - `pairwiseDistanceMae(...)` in [src/experiments/lib/metrics.ts](src/experiments/lib/metrics.ts)
   - Exported in Experiment A/B.
 
+### `RangeResidual_MAE` — range measurement residual
+
+- **Meaning**: how consistent the current estimated geometry is with the UWB ranges the nodes observe.
+- **Definition**:
+  - For each observed neighbor edge $(i,j)$ (deduplicated as an undirected edge), compute:
+    $$|\,\|\hat{p}_i-\hat{p}_j\| - r_{ij}\,|$$
+    then average over all available edges.
+- **Units**: **m**.
+- **Use**: deployable in anchor-free settings (no ground truth required).
+- **Where**:
+  - `measurementRangeResidualMae(...)` in [src/experiments/lib/metrics.ts](src/experiments/lib/metrics.ts)
+  - Exported in Experiment A/E CSVs.
+
+### `AngleResidual_MAE` — bearing/AoA measurement residual
+
+- **Meaning**: how consistent the _direction to neighbors_ implied by the estimated positions is with any measured AoA/bearing observations.
+- **Definition**:
+  - For each directed neighbor observation $i\to j$ that includes an angle measurement $\theta_{ij}$:
+    $$|\,\mathrm{wrap}(\mathrm{bearing}(\hat{p}_i\to\hat{p}_j) - \theta_{ij})\,|$$
+    where $\mathrm{wrap}(\cdot)$ maps angles to $[-\pi,\pi)$, then average.
+- **Units**: **rad**.
+- **Use**: deployable in anchor-free settings when an angle sensor/model exists.
+- **Where**:
+  - `measurementAngleResidualMae(...)` in [src/experiments/lib/metrics.ts](src/experiments/lib/metrics.ts)
+  - Exported in Experiment A/E CSVs.
+
 ---
 
 ## Messaging / energy proxy metrics

@@ -228,3 +228,89 @@ export function pairwiseDistanceMae(nodes: RunnerSnapshot["nodes"]) {
 	}
 	return pairs > 0 ? sum / pairs : 0;
 }
+
+function wrapAngleRad(angleRad: number): number {
+	// Normalize to [-pi, pi).
+	let a = (angleRad + Math.PI) % (2 * Math.PI);
+	if (a < 0) a += 2 * Math.PI;
+	return a - Math.PI;
+}
+
+/**
+ * Deployable, anchor-free range residual MAE (meters).
+ *
+ * For each observed neighbor edge (deduplicated as undirected), compute:
+ *   | ||p_i - p_j|| - r_ij |
+ * where p_i are estimated positions and r_ij is the measured UWB range.
+ *
+ * Returns NaN if no valid edges exist.
+ */
+export function measurementRangeResidualMae(nodes: RunnerSnapshot["nodes"]) {
+	const estById = new Map<number, Pt>();
+	for (const node of nodes) {
+		const p = node.firmware.estPosition;
+		if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) return Number.NaN;
+		estById.set(node.id, { x: p.x, y: p.y });
+	}
+
+	const seen = new Set<string>();
+	let sum = 0;
+	let count = 0;
+	for (const node of nodes) {
+		const pi = estById.get(node.id);
+		if (!pi) continue;
+		for (const obs of node.firmware.neighbors) {
+			const pj = estById.get(obs.id);
+			if (!pj) continue;
+			if (!Number.isFinite(obs.rangeMeters)) continue;
+			const a = Math.min(node.id, obs.id);
+			const b = Math.max(node.id, obs.id);
+			const key = `${a}-${b}`;
+			if (seen.has(key)) continue;
+			seen.add(key);
+
+			const pred = Math.hypot(pj.x - pi.x, pj.y - pi.y);
+			if (!Number.isFinite(pred)) continue;
+			sum += Math.abs(pred - obs.rangeMeters);
+			count++;
+		}
+	}
+
+	return count > 0 ? sum / count : Number.NaN;
+}
+
+/**
+ * Deployable, anchor-free bearing/AoA residual MAE (radians).
+ *
+ * For each directed neighbor observation that includes `angleRad`, compute:
+ *   |wrap( bearing(p_i -> p_j) - angle_ij )|
+ *
+ * Returns NaN if no valid angles exist.
+ */
+export function measurementAngleResidualMae(nodes: RunnerSnapshot["nodes"]) {
+	const estById = new Map<number, Pt>();
+	for (const node of nodes) {
+		const p = node.firmware.estPosition;
+		if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) return Number.NaN;
+		estById.set(node.id, { x: p.x, y: p.y });
+	}
+
+	let sum = 0;
+	let count = 0;
+	for (const node of nodes) {
+		const pi = estById.get(node.id);
+		if (!pi) continue;
+		for (const obs of node.firmware.neighbors) {
+			if (obs.angleRad === undefined) continue;
+			if (!Number.isFinite(obs.angleRad)) continue;
+			const pj = estById.get(obs.id);
+			if (!pj) continue;
+			const pred = Math.atan2(pj.y - pi.y, pj.x - pi.x);
+			const err = wrapAngleRad(pred - obs.angleRad);
+			sum += Math.abs(err);
+			count++;
+		}
+	}
+
+	return count > 0 ? sum / count : Number.NaN;
+}
