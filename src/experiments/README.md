@@ -4,7 +4,7 @@ This folder contains the headless experiment runner used to generate CSV outputs
 
 - Entry point: `src/experiments/runner.ts`
 - Run: `npm run experiments -- --seed=1`
-- Output: `experiments_A.csv` … `experiments_E.csv` (written to the repo root)
+- Output: `experiments_A_noise*.csv`, `experiments_B.csv` … `experiments_E.csv` (written to the repo root)
 
 All experiments are deterministic given the same seed. The seed is taken from (highest priority first):
 
@@ -35,13 +35,14 @@ Each experiment is implemented in its own file under `src/experiments/experiment
 ### Experiment A — Baseline vs ETM over time
 
 - Implementation: `src/experiments/experiments/experimentA.ts`
-- CSV: `experiments_A.csv`
+- CSV: `experiments_A_noise0.00.csv`, `experiments_A_noise0.05.csv`, `experiments_A_noise0.20.csv`
 - Columns:
   - `Scenario`: motion scenario
   - `Time`: seconds
   - `Baseline_Tx`: cumulative transmissions (sum over all nodes)
   - `Baseline_RMSE`: firmware position RMSE vs truth (all nodes)
   - `ETM_Tx`, `ETM_RMSE`: same metrics for event-driven (ETM/ICUM-style) sensing
+  - Also emitted (paper-friendly, anchor-free): `*_MAE`, `*_RMSE_Aligned`, `*_MAE_Aligned`, `*_PairwiseDist_MAE`
 
 This is the main time-series comparison of “periodic baseline” vs “event-driven” policies.
 
@@ -49,7 +50,7 @@ Parameters used
 
 - Node count: 10
 - World bounds: `EXPERIMENT_WORLD_BOUNDS_M`
-- UWB distance noise: `uwbNoiseSigma = 0.05` m
+- UWB distance noise sweep: `uwbNoiseSigma ∈ {0.00, 0.05, 0.20}` m
 - Duration: 600 s
 - Sampling/log cadence: 1,000 ms (one CSV row per second)
 - Simulation stepping: `step(logEveryMs)` (i.e., time advances in 1,000 ms chunks)
@@ -69,7 +70,7 @@ flowchart TD
   A2 --> A3["For each scenario: create 2 runners\n(baseline + ETM)"]
   A3 --> A4["For t = 0..T step dt:\n- apply motion scenario\n- snapshot\n- compute RMSE + total Tx\n- advance simulation"]
   A4 --> A5["Append CSV row per (scenario, time)"]
-  A5 --> A6["Write experiments_A.csv"]
+  A5 --> A6["Write experiments_A_noise*.csv"]
   A6 --> A7(("Done"))
 ```
 
@@ -80,7 +81,9 @@ flowchart TD
 - Columns:
   - `NodeCount`
   - `Noise`: UWB distance noise sigma (m)
-  - `RMSE`, `MAE`
+  - `RMSE`, `MAE` (absolute)
+  - `RMSE_Aligned`, `MAE_Aligned` (anchor-free / rigid alignment)
+  - `PairwiseDist_MAE` (structure error)
 
 This is a simple sweep over measurement noise to show sensitivity.
 

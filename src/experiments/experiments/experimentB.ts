@@ -1,5 +1,5 @@
 import { SimulationRunner } from "../../engine/SimulationRunner.ts";
-import { mae, rmse } from "../lib/metrics.ts";
+import { aleAlignedRigid, mae, pairwiseDistanceMae, rmse, rmseAlignedRigid } from "../lib/metrics.ts";
 import { EXPERIMENT_WORLD_BOUNDS_M } from "../lib/types.ts";
 import { getCliSeed, makeSeed, seededRng, seedNodes } from "../lib/seed.ts";
 
@@ -8,6 +8,9 @@ export interface ExperimentBRow {
 	noiseSigma: number;
 	rmse: number;
 	mae: number;
+	rmseAligned: number;
+	maeAligned: number;
+	pairwiseDistMae: number;
 }
 
 /**
@@ -41,6 +44,9 @@ export function runExperimentB(): ExperimentBRow[] {
 			noiseSigma: sigma,
 			rmse: rmse(snap.nodes),
 			mae: mae(snap.nodes),
+			rmseAligned: rmseAlignedRigid(snap.nodes),
+			maeAligned: aleAlignedRigid(snap.nodes),
+			pairwiseDistMae: pairwiseDistanceMae(snap.nodes),
 		});
 	}
 	return rows;

@@ -29,3 +29,6 @@ experiments_B.csv
 experiments_D.csv
 experiments_B.csv
 experiments_E.csv
+experiments_A_noise0.00.csv
+experiments_A_noise0.05.csv
+experiments_A_noise0.20.csv

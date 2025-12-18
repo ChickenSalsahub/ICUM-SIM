@@ -66,48 +66,79 @@ function meanPoint(points: Pt[]): Pt {
  * identifiable up to a global rotation/translation. Measuring raw absolute
  * error can look "stuck" even when the relative geometry has converged.
  */
-function bestFitRigid2D(truth: Pt[], est: Pt[]): { c: number; s: number; tx: number; ty: number } | undefined {
+type Rigid2D = { c: number; s: number; tx: number; ty: number; flipY?: boolean };
+
+function bestFitRigid2D(truth: Pt[], est: Pt[]): Rigid2D | undefined {
 	if (truth.length !== est.length) return undefined;
 	if (truth.length < 2) return undefined;
 
 	const muT = meanPoint(truth);
 	const muE = meanPoint(est);
 
-	// Covariance H = E^T * T (with centered coordinates).
-	let a = 0;
-	let b = 0;
-	let c = 0;
-	let d = 0;
+	const solve = (flipY: boolean): Rigid2D | undefined => {
+		// Covariance H = E^T * T (with centered coordinates).
+		let a = 0;
+		let b = 0;
+		let c0 = 0;
+		let d = 0;
+		for (let i = 0; i < truth.length; i++) {
+			const ex = est[i].x - muE.x;
+			const ey0 = est[i].y - muE.y;
+			const ey = flipY ? -ey0 : ey0;
+			const tx = truth[i].x - muT.x;
+			const ty = truth[i].y - muT.y;
+			a += ex * tx;
+			b += ex * ty;
+			c0 += ey * tx;
+			d += ey * ty;
+		}
+
+		// For 2D Kabsch, optimal rotation angle is:
+		// theta = atan2(b - c, a + d)
+		const denom = a + d;
+		const numer = b - c0;
+		if (!Number.isFinite(denom) || !Number.isFinite(numer)) return undefined;
+		const theta = Math.atan2(numer, denom);
+		const cosT = Math.cos(theta);
+		const sinT = Math.sin(theta);
+
+		// Translation: muT - R * muE (with optional reflection)
+		const yMu = flipY ? -muE.y : muE.y;
+		const rotMuEx = cosT * muE.x - sinT * yMu;
+		const rotMuEy = sinT * muE.x + cosT * yMu;
+		return { c: cosT, s: sinT, tx: muT.x - rotMuEx, ty: muT.y - rotMuEy, flipY: flipY ? true : undefined };
+	};
+
+	const tfNo = solve(false);
+	const tfFlip = solve(true);
+	if (!tfNo) return tfFlip;
+	if (!tfFlip) return tfNo;
+
+	const apply = (p: Pt, tf: Rigid2D): Pt => {
+		const y = tf.flipY ? -p.y : p.y;
+		return { x: tf.c * p.x - tf.s * y + tf.tx, y: tf.s * p.x + tf.c * y + tf.ty };
+	};
+	let sseNo = 0;
+	let sseFlip = 0;
 	for (let i = 0; i < truth.length; i++) {
-		const ex = est[i].x - muE.x;
-		const ey = est[i].y - muE.y;
-		const tx = truth[i].x - muT.x;
-		const ty = truth[i].y - muT.y;
-		a += ex * tx;
-		b += ex * ty;
-		c += ey * tx;
-		d += ey * ty;
+		const aNo = apply(est[i], tfNo);
+		const dxNo = aNo.x - truth[i].x;
+		const dyNo = aNo.y - truth[i].y;
+		sseNo += dxNo * dxNo + dyNo * dyNo;
+
+		const aFlip = apply(est[i], tfFlip);
+		const dxF = aFlip.x - truth[i].x;
+		const dyF = aFlip.y - truth[i].y;
+		sseFlip += dxF * dxF + dyF * dyF;
 	}
-
-	// For 2D Kabsch, optimal rotation angle is:
-	// theta = atan2(b - c, a + d)
-	const denom = a + d;
-	const numer = b - c;
-	if (!Number.isFinite(denom) || !Number.isFinite(numer)) return undefined;
-	const theta = Math.atan2(numer, denom);
-	const cosT = Math.cos(theta);
-	const sinT = Math.sin(theta);
-
-	// Translation: muT - R * muE
-	const rotMuEx = cosT * muE.x - sinT * muE.y;
-	const rotMuEy = sinT * muE.x + cosT * muE.y;
-	return { c: cosT, s: sinT, tx: muT.x - rotMuEx, ty: muT.y - rotMuEy };
+	return sseFlip < sseNo ? tfFlip : tfNo;
 }
 
-function applyRigid2D(p: Pt, tf: { c: number; s: number; tx: number; ty: number }): Pt {
+function applyRigid2D(p: Pt, tf: Rigid2D): Pt {
+	const y = tf.flipY ? -p.y : p.y;
 	return {
-		x: tf.c * p.x - tf.s * p.y + tf.tx,
-		y: tf.s * p.x + tf.c * p.y + tf.ty,
+		x: tf.c * p.x - tf.s * y + tf.tx,
+		y: tf.s * p.x + tf.c * y + tf.ty,
 	};
 }
 
@@ -138,4 +169,62 @@ export function aleAlignedRigid(nodes: RunnerSnapshot["nodes"]) {
 		sum += Math.sqrt(dx * dx + dy * dy);
 	}
 	return sum / nodes.length;
+}
+
+/**
+ * Anchor-free RMSE: rigidly aligns estimated positions to truth before scoring.
+ */
+export function rmseAlignedRigid(nodes: RunnerSnapshot["nodes"]) {
+	const truth: Pt[] = [];
+	const est: Pt[] = [];
+	for (const node of nodes) {
+		const p = node.firmware.estPosition;
+		if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) return Number.NaN;
+		truth.push({ x: node.trueX, y: node.trueY });
+		est.push({ x: p.x, y: p.y });
+	}
+
+	const tf = bestFitRigid2D(truth, est);
+	if (!tf) {
+		return rmse(nodes);
+	}
+
+	let sumSq = 0;
+	for (let i = 0; i < nodes.length; i++) {
+		const aligned = applyRigid2D(est[i], tf);
+		const dx = aligned.x - truth[i].x;
+		const dy = aligned.y - truth[i].y;
+		sumSq += dx * dx + dy * dy;
+	}
+	return Math.sqrt(sumSq / nodes.length);
+}
+
+/**
+ * Structure error: mean absolute error of pairwise distances (meters).
+ *
+ * This is rigid-transform invariant, so it remains meaningful without anchors.
+ */
+export function pairwiseDistanceMae(nodes: RunnerSnapshot["nodes"]) {
+	const truth: Pt[] = [];
+	const est: Pt[] = [];
+	for (const node of nodes) {
+		const p = node.firmware.estPosition;
+		if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) return Number.NaN;
+		truth.push({ x: node.trueX, y: node.trueY });
+		est.push({ x: p.x, y: p.y });
+	}
+	const n = truth.length;
+	if (n < 2) return 0;
+
+	let sum = 0;
+	let pairs = 0;
+	for (let i = 0; i < n; i++) {
+		for (let j = i + 1; j < n; j++) {
+			const dt = Math.hypot(truth[i].x - truth[j].x, truth[i].y - truth[j].y);
+			const de = Math.hypot(est[i].x - est[j].x, est[i].y - est[j].y);
+			sum += Math.abs(de - dt);
+			pairs++;
+		}
+	}
+	return pairs > 0 ? sum / pairs : 0;
 }

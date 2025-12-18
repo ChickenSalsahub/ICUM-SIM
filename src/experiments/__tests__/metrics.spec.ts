@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { FirmwareSnapshot } from "../../firmware/types.ts";
 import type { RunnerSnapshot } from "../lib/types.ts";
-import { ale, aleAlignedRigid, mae, rmse } from "../lib/metrics.ts";
+import { ale, aleAlignedRigid, mae, pairwiseDistanceMae, rmse, rmseAlignedRigid } from "../lib/metrics.ts";
 
 type RunnerNode = RunnerSnapshot["nodes"][number];
 
@@ -83,6 +83,139 @@ describe("experiments metrics", () => {
 		// Raw ALE is not zero (frame mismatch), but aligned ALE should be ~0.
 		expect(ale(nodes)).toBeGreaterThan(0.1);
 		expect(aleAlignedRigid(nodes)).toBeCloseTo(0, 8);
+	});
+
+	it("aleAlignedRigid can resolve a reflected solution (mirror) when needed", () => {
+		const truth: Array<{ x: number; y: number }> = [
+			{ x: 0, y: 0 },
+			{ x: 2, y: 0 },
+			{ x: 0, y: 1 },
+		];
+		const tx = 10;
+		const ty = -5;
+		const nodes: RunnerNode[] = truth.map((p, idx) =>
+			makeNode({ id: idx + 1, trueX: p.x, trueY: p.y, estX: p.x + tx, estY: -p.y + ty })
+		);
+		expect(ale(nodes)).toBeGreaterThan(0.1);
+		expect(aleAlignedRigid(nodes)).toBeCloseTo(0, 8);
+	});
+
+	it("rmseAlignedRigid is invariant to global rotation + translation", () => {
+		const truth = [
+			{ id: 1, trueX: 0, trueY: 0, estX: 0, estY: 0 },
+			{ id: 2, trueX: 2, trueY: 0, estX: 0, estY: 0 },
+			{ id: 3, trueX: 0, trueY: 1, estX: 0, estY: 0 },
+		];
+
+		// Apply a rigid transform to the estimates.
+		const theta = Math.PI / 3;
+		const c = Math.cos(theta);
+		const s = Math.sin(theta);
+		const tx = 7;
+		const ty = -4;
+
+		const nodes = truth.map((p) => {
+			const x = c * p.trueX - s * p.trueY + tx;
+			const y = s * p.trueX + c * p.trueY + ty;
+			return {
+				id: p.id,
+				trueX: p.trueX,
+				trueY: p.trueY,
+				txCount: 0,
+				firmware: {
+					estPosition: { x, y },
+					neighbors: [],
+					state: "STATIONARY",
+					role: "IDLE",
+				},
+			};
+		});
+
+		// Raw RMSE should be non-zero due to frame mismatch.
+		expect(rmse(nodes as any)).toBeGreaterThan(0.1);
+		// Aligned RMSE should be ~0.
+		expect(rmseAlignedRigid(nodes as any)).toBeCloseTo(0, 8);
+	});
+
+	it("rmseAlignedRigid can resolve a reflected solution (mirror) when needed", () => {
+		const truth = [
+			{ id: 1, trueX: 0, trueY: 0 },
+			{ id: 2, trueX: 2, trueY: 0 },
+			{ id: 3, trueX: 0, trueY: 1 },
+		];
+		const tx = 7;
+		const ty = 2;
+		const nodes = truth.map((p) => ({
+			id: p.id,
+			trueX: p.trueX,
+			trueY: p.trueY,
+			txCount: 0,
+			firmware: {
+				estPosition: { x: p.trueX + tx, y: -p.trueY + ty },
+				neighbors: [],
+				state: "STATIONARY",
+				role: "IDLE",
+			},
+		}));
+		expect(rmse(nodes as any)).toBeGreaterThan(0.1);
+		expect(rmseAlignedRigid(nodes as any)).toBeCloseTo(0, 8);
+	});
+
+	it("pairwiseDistanceMae is invariant to rigid transforms", () => {
+		const theta = Math.PI / 4;
+		const c = Math.cos(theta);
+		const s = Math.sin(theta);
+		const tx = 3.3;
+		const ty = -2.2;
+		const pts = [
+			{ id: 1, x: 0, y: 0 },
+			{ id: 2, x: 3, y: 0 },
+			{ id: 3, x: 0, y: 4 },
+			{ id: 4, x: 2, y: 2 },
+		];
+		const nodes = pts.map((p) => {
+			const ex = c * p.x - s * p.y + tx;
+			const ey = s * p.x + c * p.y + ty;
+			return {
+				id: p.id,
+				trueX: p.x,
+				trueY: p.y,
+				txCount: 0,
+				firmware: {
+					estPosition: { x: ex, y: ey },
+					neighbors: [],
+					state: "STATIONARY",
+					role: "IDLE",
+				},
+			};
+		});
+		expect(pairwiseDistanceMae(nodes as any)).toBeCloseTo(0, 10);
+	});
+
+	it("pairwiseDistanceMae returns 0 for N<2", () => {
+		const nodes: RunnerNode[] = [makeNode({ id: 1, trueX: 0, trueY: 0, estX: 5, estY: 0 })];
+		expect(pairwiseDistanceMae(nodes as any)).toBe(0);
+	});
+
+	it("rmseAlignedRigid returns NaN if any estimate is non-finite", () => {
+		const nodes: RunnerNode[] = [
+			makeNode({ id: 1, trueX: 0, trueY: 0, estX: 0, estY: 0 }),
+			makeNode({ id: 2, trueX: 1, trueY: 0, estX: Number.POSITIVE_INFINITY, estY: 0 }),
+		];
+		expect(Number.isNaN(rmseAlignedRigid(nodes as any))).toBe(true);
+	});
+
+	it("rmseAlignedRigid falls back to raw RMSE for N<2", () => {
+		const nodes: RunnerNode[] = [makeNode({ id: 1, trueX: 0, trueY: 0, estX: 5, estY: 0 })];
+		expect(rmseAlignedRigid(nodes as any)).toBeCloseTo(5, 12);
+	});
+
+	it("pairwiseDistanceMae returns NaN if any estimate is non-finite", () => {
+		const nodes: RunnerNode[] = [
+			makeNode({ id: 1, trueX: 0, trueY: 0, estX: 0, estY: 0 }),
+			makeNode({ id: 2, trueX: 1, trueY: 0, estX: Number.NaN, estY: 0 }),
+		];
+		expect(Number.isNaN(pairwiseDistanceMae(nodes as any))).toBe(true);
 	});
 
 	it("aleAlignedRigid returns NaN if any estimate is non-finite", () => {

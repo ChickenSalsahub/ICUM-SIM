@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { CloudBackend, type CloudBackendOptions, FusedRecord } from "./logic/CloudBackend";
 import { CloudPublishTracker } from "./logic/cloudPublishPolicy";
+import { computeCloudStructureStatsMeters } from "./logic/metrics/CloudTopologyMetrics";
 import { DraggableWindow } from "./components/DraggableWindow";
 import { NodeConfig, LogEntry, NodeRole, NodeType, Packet, PacketType, VisualPacket, Wall } from "./types";
 import { SimulationRunner } from "./engine/SimulationRunner";
@@ -194,6 +195,9 @@ const doIntersect = (
 	if (o1 !== o2 && o3 !== o4) return true;
 	return false;
 };
+
+// Note: absolute error metrics are only meaningful if the cloud solution is anchored to the world.
+// For anchor-free topology, prefer the aligned and pairwise-distance metrics below.
 
 const App: React.FC = () => {
 	const [nodes, setNodes] = useState<UiNode[]>([]);
@@ -1520,14 +1524,23 @@ const App: React.FC = () => {
 									}}
 								>
 									{(() => {
-										// Filter to get only the latest record per node for the topology
+										// Filter to get only the latest record per node for the topology.
 										const uniqueRecordsMap = new Map<number, FusedRecord>();
 										for (const r of fusedRecords) {
-											if (!uniqueRecordsMap.has(r.nodeId)) {
+											const prev = uniqueRecordsMap.get(r.nodeId);
+											if (!prev || r.timestamp > prev.timestamp) {
 												uniqueRecordsMap.set(r.nodeId, r);
 											}
 										}
 										const uniqueRecords = Array.from(uniqueRecordsMap.values());
+										const truthById = new Map<number, { x: number; y: number }>();
+										for (const n of nodes) {
+											const x = (n.x - OFFSET_X_PX) / PIXELS_PER_METER;
+											const y = (n.y - OFFSET_Y_PX) / PIXELS_PER_METER;
+											if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+											truthById.set(n.id, { x, y });
+										}
+										const cloudStats = computeCloudStructureStatsMeters({ records: uniqueRecords, truthById });
 
 										if (uniqueRecords.length === 0)
 											return (
@@ -1560,71 +1573,102 @@ const App: React.FC = () => {
 										});
 
 										return (
-											<svg
-												width="100%"
-												height="100%"
-												viewBox={`0 0 ${width} ${height}`}
-												preserveAspectRatio="xMidYMid meet"
-											>
-												{/* Edges */}
-												{uniqueRecords.map((r) => {
-													const start = transform(r.position.x, r.position.y);
-													return r.neighbors.map((n) => {
-														const target = uniqueRecords.find((t) => t.nodeId === n.id);
-														if (!target) return null;
-														const end = transform(target.position.x, target.position.y);
+											<>
+												<div
+													style={{
+														position: "absolute",
+														top: 8,
+														left: 8,
+														padding: "6px 8px",
+														borderRadius: "6px",
+														border: "1px solid #334155",
+														backgroundColor: "#0f172a",
+														color: "#e2e8f0",
+														fontFamily: "monospace",
+														fontSize: "10px",
+														opacity: 0.95,
+														pointerEvents: "none",
+													}}
+												>
+													<div>ABS RMSE: {cloudStats ? cloudStats.abs.rmse.toFixed(2) : "-"} m</div>
+													<div>ABS MAE: {cloudStats ? cloudStats.abs.mae.toFixed(2) : "-"} m</div>
+													<div style={{ marginTop: 4 }}>
+														ALIGNED RMSE: {cloudStats ? cloudStats.aligned.rmse.toFixed(2) : "-"} m
+													</div>
+													<div>ALIGNED MAE: {cloudStats ? cloudStats.aligned.mae.toFixed(2) : "-"} m</div>
+													<div style={{ marginTop: 4 }}>
+														PAIRWISE |Δd| MAE: {cloudStats ? cloudStats.pairwiseDistMae.toFixed(2) : "-"} m
+													</div>
+													<div style={{ opacity: 0.7 }}>
+														N: {cloudStats ? cloudStats.n : 0} | Pairs: {cloudStats ? cloudStats.pairs : 0}
+													</div>
+												</div>
+												<svg
+													width="100%"
+													height="100%"
+													viewBox={`0 0 ${width} ${height}`}
+													preserveAspectRatio="xMidYMid meet"
+												>
+													{/* Edges */}
+													{uniqueRecords.map((r) => {
+														const start = transform(r.position.x, r.position.y);
+														return r.neighbors.map((n) => {
+															const target = uniqueRecords.find((t) => t.nodeId === n.id);
+															if (!target) return null;
+															const end = transform(target.position.x, target.position.y);
 
-														// Calculate midpoint for text
-														const midX = start.x + (end.x - start.x) * 0.3; // 30% from source
-														const midY = start.y + (end.y - start.y) * 0.3;
+															// Calculate midpoint for text
+															const midX = start.x + (end.x - start.x) * 0.3; // 30% from source
+															const midY = start.y + (end.y - start.y) * 0.3;
 
+															return (
+																<g key={`${r.nodeId}-${n.id}`}>
+																	<line
+																		x1={start.x}
+																		y1={start.y}
+																		x2={end.x}
+																		y2={end.y}
+																		stroke="#334155"
+																		strokeWidth="1"
+																		opacity="0.5"
+																	/>
+																	<text
+																		x={midX}
+																		y={midY}
+																		fill="#94a3b8"
+																		fontSize="8"
+																		fontFamily="monospace"
+																		textAnchor="middle"
+																		style={{ pointerEvents: "none" }}
+																	>
+																		{n.range.toFixed(1)}m / {((n.aoa * 180) / Math.PI).toFixed(0)}°
+																	</text>
+																</g>
+															);
+														});
+													})}
+
+													{/* Nodes */}
+													{uniqueRecords.map((r) => {
+														const pos = transform(r.position.x, r.position.y);
 														return (
-															<g key={`${r.nodeId}-${n.id}`}>
-																<line
-																	x1={start.x}
-																	y1={start.y}
-																	x2={end.x}
-																	y2={end.y}
-																	stroke="#334155"
-																	strokeWidth="1"
-																	opacity="0.5"
-																/>
+															<g key={r.nodeId} transform={`translate(${pos.x}, ${pos.y})`}>
+																<circle r="6" fill={r.status === "STABLE" ? "#4ade80" : "#facc15"} />
 																<text
-																	x={midX}
-																	y={midY}
-																	fill="#94a3b8"
-																	fontSize="8"
-																	fontFamily="monospace"
+																	y="-10"
 																	textAnchor="middle"
-																	style={{ pointerEvents: "none" }}
+																	fill="#cbd5e1"
+																	fontSize="10"
+																	fontFamily="monospace"
+																	fontWeight="bold"
 																>
-																	{n.range.toFixed(1)}m / {((n.aoa * 180) / Math.PI).toFixed(0)}°
+																	{r.nodeId}
 																</text>
 															</g>
 														);
-													});
-												})}
-
-												{/* Nodes */}
-												{uniqueRecords.map((r) => {
-													const pos = transform(r.position.x, r.position.y);
-													return (
-														<g key={r.nodeId} transform={`translate(${pos.x}, ${pos.y})`}>
-															<circle r="6" fill={r.status === "STABLE" ? "#4ade80" : "#facc15"} />
-															<text
-																y="-10"
-																textAnchor="middle"
-																fill="#cbd5e1"
-																fontSize="10"
-																fontFamily="monospace"
-																fontWeight="bold"
-															>
-																{r.nodeId}
-															</text>
-														</g>
-													);
-												})}
-											</svg>
+													})}
+												</svg>
+											</>
 										);
 									})()}
 								</div>

@@ -1,6 +1,6 @@
 import { SimulationRunner } from "../../engine/SimulationRunner.ts";
 import { applyMotionScenario } from "../lib/motion.ts";
-import { rmse, sumTx } from "../lib/metrics.ts";
+import { aleAlignedRigid, mae, pairwiseDistanceMae, rmse, rmseAlignedRigid, sumTx } from "../lib/metrics.ts";
 import { EXPERIMENT_WORLD_BOUNDS_M, type MotionScenarioName } from "../lib/types.ts";
 import { getCliSeed, makeSeed, seededRng, seedNodes } from "../lib/seed.ts";
 
@@ -8,12 +8,25 @@ export interface ExperimentATimeRow {
 	timeSeconds: number;
 	baselineTx: number;
 	baselineRmse: number;
+	baselineMae: number;
+	baselineRmseAligned: number;
+	baselineMaeAligned: number;
+	baselinePairwiseDistMae: number;
 	etmTx: number;
 	etmRmse: number;
+	etmMae: number;
+	etmRmseAligned: number;
+	etmMaeAligned: number;
+	etmPairwiseDistMae: number;
 }
 
 export interface ExperimentAScenarioTimeRow extends ExperimentATimeRow {
 	scenario: MotionScenarioName;
+}
+
+export interface ExperimentAOptions {
+	/** UWB range noise sigma (meters). */
+	uwbNoiseSigma: number;
 }
 
 /**
@@ -32,6 +45,10 @@ export interface ExperimentAScenarioTimeRow extends ExperimentATimeRow {
  * - Time series sampled every 1s
  */
 export function runExperimentAScenarios(): ExperimentAScenarioTimeRow[] {
+	return runExperimentAScenariosWithOptions({ uwbNoiseSigma: 0.05 });
+}
+
+export function runExperimentAScenariosWithOptions(options: ExperimentAOptions): ExperimentAScenarioTimeRow[] {
 	const baseSeed = getCliSeed(1);
 	const layout = makeSeed(10, seededRng(baseSeed + 100));
 	const scenarios: MotionScenarioName[] = ["none_moving", "few_moving", "many_moving"];
@@ -43,7 +60,7 @@ export function runExperimentAScenarios(): ExperimentAScenarioTimeRow[] {
 
 		// Baseline: periodic HELLO/RANGING regardless of motion state.
 		const baseline = new SimulationRunner({
-			uwbNoiseSigma: 0.05,
+			uwbNoiseSigma: options.uwbNoiseSigma,
 			worldBounds: EXPERIMENT_WORLD_BOUNDS_M,
 			seed: baseSeed + 101 + scenarioOffset,
 			firmwareConfig: {
@@ -58,7 +75,7 @@ export function runExperimentAScenarios(): ExperimentAScenarioTimeRow[] {
 
 		// ETM/ICUM: event-driven sensing while stationary+stable.
 		const etm = new SimulationRunner({
-			uwbNoiseSigma: 0.05,
+			uwbNoiseSigma: options.uwbNoiseSigma,
 			worldBounds: EXPERIMENT_WORLD_BOUNDS_M,
 			seed: baseSeed + 102 + scenarioOffset,
 			firmwareConfig: { eventDrivenSensing: true },
@@ -80,8 +97,16 @@ export function runExperimentAScenarios(): ExperimentAScenarioTimeRow[] {
 				timeSeconds: t / 1000,
 				baselineTx: sumTx(snapBaseline.nodes),
 				baselineRmse: rmse(snapBaseline.nodes),
+				baselineMae: mae(snapBaseline.nodes),
+				baselineRmseAligned: rmseAlignedRigid(snapBaseline.nodes),
+				baselineMaeAligned: aleAlignedRigid(snapBaseline.nodes),
+				baselinePairwiseDistMae: pairwiseDistanceMae(snapBaseline.nodes),
 				etmTx: sumTx(snapEtm.nodes),
 				etmRmse: rmse(snapEtm.nodes),
+				etmMae: mae(snapEtm.nodes),
+				etmRmseAligned: rmseAlignedRigid(snapEtm.nodes),
+				etmMaeAligned: aleAlignedRigid(snapEtm.nodes),
+				etmPairwiseDistMae: pairwiseDistanceMae(snapEtm.nodes),
 			});
 
 			baseline.step(logEveryMs);
