@@ -16,11 +16,12 @@ import {
 	TrendingDown,
 	BrickWall,
 } from "lucide-react";
-import { CloudBackend, FusedRecord } from "./logic/CloudBackend";
+import { CloudBackend, type CloudBackendOptions, FusedRecord } from "./logic/CloudBackend";
 import { CloudPublishTracker } from "./logic/cloudPublishPolicy";
 import { DraggableWindow } from "./components/DraggableWindow";
 import { NodeConfig, LogEntry, NodeRole, NodeType, Packet, PacketType, VisualPacket, Wall } from "./types";
 import { SimulationRunner } from "./engine/SimulationRunner";
+import type { FirmwareConfig } from "./firmware/types";
 
 const PIXELS_PER_METER = 20;
 const CANVAS_WIDTH = 1200;
@@ -221,6 +222,39 @@ const App: React.FC = () => {
 	const [tick, setTick] = useState(0);
 	const [isPlaying, setIsPlaying] = useState(true);
 
+	const exportSnifferPackets = useCallback(() => {
+		const filtered = packets.filter((p) => packetFilter === "ALL" || p.type === packetFilter);
+		const header = ["timestamp", "type", "payloadType", "srcId", "destId", "payload"].join(",");
+		const csvEscape = (v: unknown) => {
+			const s = String(v ?? "");
+			return `"${s.replace(/"/g, '""')}"`;
+		};
+		const rows = filtered.map((p) => {
+			const payloadType =
+				p.type === PacketType.DATA && p.payload && typeof p.payload === "object" && "type" in p.payload
+					? String((p.payload as { type?: unknown }).type ?? "DATA")
+					: "";
+			return [
+				csvEscape(p.timestamp),
+				csvEscape(p.type),
+				csvEscape(payloadType),
+				csvEscape(p.srcId),
+				csvEscape(p.destId),
+				csvEscape(JSON.stringify(p.payload ?? null)),
+			].join(",");
+		});
+
+		const csv = [header, ...rows].join("\n");
+		const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+		const url = URL.createObjectURL(blob);
+		const a = document.createElement("a");
+		const ts = new Date().toISOString().replace(/[:.]/g, "-");
+		a.href = url;
+		a.download = `packet-sniffer_${packetFilter}_${ts}.csv`;
+		a.click();
+		URL.revokeObjectURL(url);
+	}, [packets, packetFilter]);
+
 	const [config, setConfig] = useState<NodeConfig>({
 		uwbRange: 15,
 		isolationTimeout: 5,
@@ -230,10 +264,39 @@ const App: React.FC = () => {
 		minClusterSize: 5,
 	});
 
+	const [simTuning, setSimTuning] = useState({
+		uwbNoiseSigmaMeters: 0.01,
+		uwbAngleNoiseStdDeg: 3.0,
+		packetLoss: 0.1,
+	});
+
+	const [firmwareTuning, setFirmwareTuning] = useState<FirmwareConfig>({
+		accelMoveThresholdG: 0.5,
+		isolationNoAckMs: 30_000,
+		neighborTimeoutMs: 20_000,
+		eventDrivenSensing: true,
+		helloIntervalMovingMs: 1_000,
+		helloIntervalIdleMs: 15_000,
+		rangingIntervalMovingMs: 1_000,
+		rangingIntervalIdleMs: 10_000,
+		rangingMaintenanceMs: 0,
+		lambdaDistance: 1.0,
+		lambdaAngle: 0.5,
+		learningRate: 0.2,
+	});
+
+	const [cloudTuning, setCloudTuning] = useState<CloudBackendOptions>({
+		huberK: 2.5,
+		distanceSigma: 0.15,
+		angleSigma: (20 * Math.PI) / 180,
+		warmupIterations: 15,
+		finalIterations: 50,
+	});
+
 	const nodesRef = useRef<UiNode[]>([]);
 	const runnerRef = useRef<SimulationRunner | null>(null);
-	const cloudBackendBaselineRef = useRef<CloudBackend>(new CloudBackend({ robustFusion: false }));
-	const cloudBackendRobustRef = useRef<CloudBackend>(new CloudBackend({ robustFusion: true }));
+	const cloudBackendBaselineRef = useRef<CloudBackend>(new CloudBackend({ robustFusion: false, ...cloudTuning }));
+	const cloudBackendRobustRef = useRef<CloudBackend>(new CloudBackend({ robustFusion: true, ...cloudTuning }));
 	const visualPacketsRef = useRef<VisualPacket[]>([]);
 	const wallsRef = useRef<Wall[]>([]);
 	const animationRef = useRef<number | undefined>(undefined);
@@ -255,13 +318,61 @@ const App: React.FC = () => {
 		if (runnerRef.current) return runnerRef.current;
 		const runner = new SimulationRunner({
 			uwbRangeMeters: config.uwbRange,
-			uwbNoiseSigma: 0.01,
-			packetLoss: 0.1,
+			uwbNoiseSigma: simTuning.uwbNoiseSigmaMeters,
+			uwbAngleNoiseStdRad: (simTuning.uwbAngleNoiseStdDeg * Math.PI) / 180,
+			packetLoss: simTuning.packetLoss,
+			firmwareConfig: firmwareTuning,
 			worldBounds: WORLD_BOUNDS_M,
 		});
 		runnerRef.current = runner;
 		return runner;
-	}, [config.uwbRange]);
+	}, [
+		config.uwbRange,
+		simTuning.packetLoss,
+		simTuning.uwbAngleNoiseStdDeg,
+		simTuning.uwbNoiseSigmaMeters,
+		firmwareTuning,
+	]);
+
+	const applyFirmwareTuning = useCallback(
+		(override?: FirmwareConfig) => {
+			// Firmware config only applies at node creation time. Rebuild the runner and re-add nodes.
+			const prevNodes = nodesRef.current;
+			const fwCfg = override ?? firmwareTuning;
+			const runner = new SimulationRunner({
+				uwbRangeMeters: config.uwbRange,
+				uwbNoiseSigma: simTuning.uwbNoiseSigmaMeters,
+				uwbAngleNoiseStdRad: (simTuning.uwbAngleNoiseStdDeg * Math.PI) / 180,
+				packetLoss: simTuning.packetLoss,
+				firmwareConfig: fwCfg,
+				worldBounds: WORLD_BOUNDS_M,
+			});
+			runnerRef.current = runner;
+			for (const n of prevNodes) {
+				runner.addNode(
+					n.id,
+					{ x: (n.x - OFFSET_X_PX) / PIXELS_PER_METER, y: (n.y - OFFSET_Y_PX) / PIXELS_PER_METER },
+					{ vx: 0, vy: 0 },
+					3.7,
+					n.type === "HARDWARE_GW"
+				);
+			}
+		},
+		[
+			config.uwbRange,
+			firmwareTuning,
+			simTuning.packetLoss,
+			simTuning.uwbAngleNoiseStdDeg,
+			simTuning.uwbNoiseSigmaMeters,
+		]
+	);
+
+	const applyCloudTuning = useCallback(() => {
+		cloudBackendBaselineRef.current = new CloudBackend({ robustFusion: false, ...cloudTuning });
+		cloudBackendRobustRef.current = new CloudBackend({ robustFusion: true, ...cloudTuning });
+		setFusedRecordsBaseline([]);
+		setFusedRecordsRobust([]);
+	}, [cloudTuning]);
 
 	useEffect(() => {
 		nodesRef.current = nodes;
@@ -331,6 +442,9 @@ const App: React.FC = () => {
 			// 2. ENGINE STEP (physics + firmware + RF)
 			const runner = ensureRunner();
 			runner.setUwbRangeMeters(config.uwbRange);
+			runner.setPacketLoss(simTuning.packetLoss);
+			runner.setUwbNoiseSigma(simTuning.uwbNoiseSigmaMeters);
+			runner.setUwbAngleNoiseStdRad((simTuning.uwbAngleNoiseStdDeg * Math.PI) / 180);
 			runner.setWalls(
 				currentWalls.map((w) => ({
 					...w,
@@ -517,6 +631,8 @@ const App: React.FC = () => {
 
 					const isGateway = node.type === "HARDWARE_GW";
 					const isMoving = node.firmwareState === "MOVING";
+					const isPanic = node.role === NodeRole.ISOLATED && node.isolationTimer > config.isolationTimeout;
+					const lteCapable = Boolean((sn.firmware as { lteCapable?: boolean }).lteCapable);
 					const shouldPublish = cloudPublishRef.current.shouldPublish({
 						nodeId: node.id,
 						nowMs,
@@ -524,7 +640,7 @@ const App: React.FC = () => {
 						isMoving,
 						neighborIds: sn.firmware.neighbors.map((nb) => nb.id),
 					});
-					if (!shouldPublish) continue;
+					if (!shouldPublish && !(isPanic && lteCapable)) continue;
 
 					const report = {
 						nodeId: node.id,
@@ -532,7 +648,7 @@ const App: React.FC = () => {
 						battery: node.battery,
 						status: node.firmwareState === "ISOLATED" ? "STATIONARY" : node.firmwareState,
 						neighbors: sn.firmware.neighbors.map((nb) => ({ id: nb.id, range: nb.rangeMeters, aoa: nb.angleRad })),
-						...(isGateway ? { x: sn.trueX, y: sn.trueY } : {}),
+						...(isGateway || (isPanic && lteCapable) ? { x: sn.trueX, y: sn.trueY } : {}),
 					};
 					baselineCloud.ingest(report);
 					robustCloud.ingest(report);
@@ -553,7 +669,7 @@ const App: React.FC = () => {
 			setNodes([...currentNodes]);
 			animationRef.current = requestAnimationFrame(gameLoop);
 		},
-		[isPlaying, config, capturePacket, ensureRunner]
+		[isPlaying, config, simTuning, capturePacket, ensureRunner]
 	);
 
 	useEffect(() => {
@@ -748,6 +864,10 @@ const App: React.FC = () => {
 			backgroundColor: "#1e293b",
 			borderRight: "1px solid #334155",
 			padding: "20px",
+			boxSizing: "border-box" as const,
+			height: "100%",
+			overflowY: "auto" as const,
+			overflowX: "hidden" as const,
 			display: "flex",
 			flexDirection: "column" as const,
 			gap: "15px",
@@ -887,15 +1007,24 @@ const App: React.FC = () => {
 
 					<div style={styles.panel}>
 						<span style={styles.label}>Configuration</span>
+						<div style={{ fontSize: "10px", color: "#94a3b8", lineHeight: 1.2 }}>
+							Top sliders apply live. Firmware/Cloud changes may require <b>Apply</b>.
+						</div>
+
+						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600 }}>UWB Max Range</div>
 						<input
 							type="range"
 							min="5"
 							max="30"
 							value={config.uwbRange}
 							onChange={(e) => setConfig({ ...config, uwbRange: Number(e.target.value) })}
+							title="Max radio/UWB interaction distance (meters)"
 							style={{ width: "100%" }}
 						/>
-						<div style={{ fontSize: "9px", color: "#cbd5e1", textAlign: "right" }}>{config.uwbRange}m</div>
+						<div style={{ fontSize: "9px", color: "#cbd5e1", textAlign: "right" }}>{config.uwbRange} m</div>
+						<div style={{ fontSize: "9px", color: "#64748b" }}>Higher range increases links and chatter.</div>
+
+						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 6 }}>Movement Speed</div>
 						<input
 							type="range"
 							min="0.1"
@@ -903,9 +1032,13 @@ const App: React.FC = () => {
 							step="0.1"
 							value={config.movingSpeed}
 							onChange={(e) => setConfig({ ...config, movingSpeed: Number(e.target.value) })}
+							title="UI motion multiplier for nodes in MOVING mode"
 							style={{ width: "100%" }}
 						/>
 						<div style={{ fontSize: "9px", color: "#cbd5e1", textAlign: "right" }}>{config.movingSpeed}x</div>
+						<div style={{ fontSize: "9px", color: "#64748b" }}>Only affects nodes you toggle to MOVING.</div>
+
+						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 6 }}>Max Leaders</div>
 						<input
 							type="range"
 							min="1"
@@ -913,11 +1046,13 @@ const App: React.FC = () => {
 							step="1"
 							value={config.maxLeaders}
 							onChange={(e) => setConfig({ ...config, maxLeaders: Number(e.target.value) })}
+							title="UI constraint: limit how many leader nodes can exist"
 							style={{ width: "100%", accentColor: "#ec4899" }}
 						/>
 						<div style={{ fontSize: "9px", color: "#f472b6", textAlign: "right" }}>{config.maxLeaders} Leaders</div>
 
 						{/* RESTORED SLIDER */}
+						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 6 }}>Min Cluster Size</div>
 						<input
 							type="range"
 							min="2"
@@ -925,11 +1060,279 @@ const App: React.FC = () => {
 							step="1"
 							value={config.minClusterSize}
 							onChange={(e) => setConfig({ ...config, minClusterSize: Number(e.target.value) })}
+							title="UI constraint: minimum nodes needed before forming a cluster"
 							style={{ width: "100%", accentColor: "#a855f7" }}
 						/>
 						<div style={{ fontSize: "9px", color: "#a855f7", textAlign: "right" }}>
 							Min Size: {config.minClusterSize}
 						</div>
+						<div style={{ fontSize: "9px", color: "#64748b" }}>Used by the UI/cluster visualization.</div>
+
+						<div style={{ height: 1, backgroundColor: "#334155", margin: "8px 0" }} />
+						<div style={{ fontSize: "10px", color: "#94a3b8", fontWeight: 600 }}>Simulation (Live)</div>
+						<div style={{ fontSize: "9px", color: "#64748b" }}>Affects RF delivery + measurement noise.</div>
+						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 6 }}>Packet Loss</div>
+						<input
+							type="range"
+							min="0"
+							max="0.5"
+							step="0.01"
+							value={simTuning.packetLoss}
+							onChange={(e) => setSimTuning({ ...simTuning, packetLoss: Number(e.target.value) })}
+							title="Probability a packet is dropped (0–50%)"
+							style={{ width: "100%" }}
+						/>
+						<div style={{ fontSize: "9px", color: "#cbd5e1", textAlign: "right" }}>
+							Packet Loss: {(simTuning.packetLoss * 100).toFixed(0)}%
+						</div>
+						<div style={{ fontSize: "9px", color: "#64748b" }}>
+							Higher loss increases isolation + delays convergence.
+						</div>
+						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 6 }}>
+							UWB Distance Noise (σ)
+						</div>
+						<input
+							type="range"
+							min="0"
+							max="0.25"
+							step="0.005"
+							value={simTuning.uwbNoiseSigmaMeters}
+							onChange={(e) => setSimTuning({ ...simTuning, uwbNoiseSigmaMeters: Number(e.target.value) })}
+							title="Standard deviation of range measurements (meters)"
+							style={{ width: "100%" }}
+						/>
+						<div style={{ fontSize: "9px", color: "#cbd5e1", textAlign: "right" }}>
+							UWB σ: {simTuning.uwbNoiseSigmaMeters.toFixed(3)} m
+						</div>
+						<div style={{ fontSize: "9px", color: "#64748b" }}>Adds noise to measured distance between neighbors.</div>
+						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 6 }}>
+							UWB Bearing (AoA) Noise (σ)
+						</div>
+						<input
+							type="range"
+							min="0"
+							max="30"
+							step="0.5"
+							value={simTuning.uwbAngleNoiseStdDeg}
+							onChange={(e) => setSimTuning({ ...simTuning, uwbAngleNoiseStdDeg: Number(e.target.value) })}
+							title="Standard deviation of bearing (AoA) measurements (degrees)"
+							style={{ width: "100%" }}
+						/>
+						<div style={{ fontSize: "9px", color: "#cbd5e1", textAlign: "right" }}>
+							Bearing σ: {simTuning.uwbAngleNoiseStdDeg.toFixed(1)}°
+						</div>
+						<div style={{ fontSize: "9px", color: "#64748b" }}>
+							Adds noise to measured neighbor bearing (angle-of-arrival).
+						</div>
+
+						<div style={{ height: 1, backgroundColor: "#334155", margin: "8px 0" }} />
+						<div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+							<div style={{ fontSize: "10px", color: "#94a3b8", fontWeight: 600 }}>Firmware</div>
+							<button
+								style={{ ...styles.btn, backgroundColor: "#334155", padding: "4px 8px", fontSize: "10px" }}
+								onClick={() => applyFirmwareTuning()}
+							>
+								Apply
+							</button>
+						</div>
+						<div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+							<div style={{ fontSize: "9px", color: "#cbd5e1" }}>Event-driven</div>
+							<input
+								type="checkbox"
+								checked={!!firmwareTuning.eventDrivenSensing}
+								onChange={(e) => {
+									const checked = e.target.checked;
+									const next: FirmwareConfig = {
+										...firmwareTuning,
+										eventDrivenSensing: checked,
+									};
+									setFirmwareTuning(next);
+									applyFirmwareTuning(next);
+								}}
+							/>
+						</div>
+						<div style={{ fontSize: "9px", color: "#64748b" }}>
+							On: stationary nodes only range on events. Off: periodic HELLO/RANGING.
+						</div>
+						<div style={{ fontSize: "9px", color: "#64748b" }}>
+							Cadence sliders below require <b>Apply</b>.
+						</div>
+
+						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 8 }}>
+							HELLO Interval (moving)
+						</div>
+						<input
+							type="range"
+							min="250"
+							max="5000"
+							step="250"
+							value={firmwareTuning.helloIntervalMovingMs ?? 1000}
+							onChange={(e) => setFirmwareTuning({ ...firmwareTuning, helloIntervalMovingMs: Number(e.target.value) })}
+							title="How often a node sends HELLO while moving/topology-changing"
+							style={{ width: "100%" }}
+						/>
+						<div style={{ fontSize: "9px", color: "#cbd5e1", textAlign: "right" }}>
+							{((firmwareTuning.helloIntervalMovingMs ?? 1000) / 1000).toFixed(2)} s
+						</div>
+
+						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 6 }}>
+							HELLO Interval (idle)
+						</div>
+						<input
+							type="range"
+							min="1000"
+							max="60000"
+							step="1000"
+							value={firmwareTuning.helloIntervalIdleMs ?? 15000}
+							onChange={(e) => setFirmwareTuning({ ...firmwareTuning, helloIntervalIdleMs: Number(e.target.value) })}
+							title="How often a node sends HELLO while stationary and stable"
+							style={{ width: "100%" }}
+						/>
+						<div style={{ fontSize: "9px", color: "#cbd5e1", textAlign: "right" }}>
+							{((firmwareTuning.helloIntervalIdleMs ?? 15000) / 1000).toFixed(0)} s
+						</div>
+
+						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 8 }}>
+							RANGING Poll Interval (moving)
+						</div>
+						<input
+							type="range"
+							min="250"
+							max="5000"
+							step="250"
+							value={firmwareTuning.rangingIntervalMovingMs ?? 1000}
+							onChange={(e) =>
+								setFirmwareTuning({ ...firmwareTuning, rangingIntervalMovingMs: Number(e.target.value) })
+							}
+							title="How often a node broadcasts RANGING_POLL while moving/topology-changing"
+							style={{ width: "100%" }}
+						/>
+						<div style={{ fontSize: "9px", color: "#cbd5e1", textAlign: "right" }}>
+							{((firmwareTuning.rangingIntervalMovingMs ?? 1000) / 1000).toFixed(2)} s
+						</div>
+
+						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 6 }}>
+							RANGING Poll Interval (idle)
+						</div>
+						<input
+							type="range"
+							min="1000"
+							max="60000"
+							step="1000"
+							value={firmwareTuning.rangingIntervalIdleMs ?? 10000}
+							onChange={(e) => setFirmwareTuning({ ...firmwareTuning, rangingIntervalIdleMs: Number(e.target.value) })}
+							title="How often a node broadcasts RANGING_POLL while stationary and stable"
+							style={{ width: "100%" }}
+						/>
+						<div style={{ fontSize: "9px", color: "#cbd5e1", textAlign: "right" }}>
+							{((firmwareTuning.rangingIntervalIdleMs ?? 10000) / 1000).toFixed(0)} s
+						</div>
+
+						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 8 }}>
+							Maintenance Ranging (event-driven)
+						</div>
+						<input
+							type="range"
+							min="0"
+							max="60000"
+							step="1000"
+							value={firmwareTuning.rangingMaintenanceMs ?? 0}
+							onChange={(e) => setFirmwareTuning({ ...firmwareTuning, rangingMaintenanceMs: Number(e.target.value) })}
+							title="When event-driven is ON, allow a slow periodic ranging poll (0 disables)"
+							style={{ width: "100%" }}
+						/>
+						<div style={{ fontSize: "9px", color: "#cbd5e1", textAlign: "right" }}>
+							{(firmwareTuning.rangingMaintenanceMs ?? 0) === 0
+								? "Off"
+								: `${((firmwareTuning.rangingMaintenanceMs ?? 0) / 1000).toFixed(0)} s`}
+						</div>
+						<div style={{ fontSize: "9px", color: "#64748b" }}>Use this to prevent complete silence while idle.</div>
+						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 6 }}>Move Threshold</div>
+						<input
+							type="range"
+							min="0.1"
+							max="2.0"
+							step="0.05"
+							value={firmwareTuning.accelMoveThresholdG}
+							onChange={(e) => setFirmwareTuning({ ...firmwareTuning, accelMoveThresholdG: Number(e.target.value) })}
+							style={{ width: "100%" }}
+						/>
+						<div style={{ fontSize: "9px", color: "#cbd5e1", textAlign: "right" }}>
+							Move Threshold: {firmwareTuning.accelMoveThresholdG.toFixed(2)} g
+						</div>
+						<div style={{ fontSize: "9px", color: "#64748b" }}>Higher = fewer MOVING detections.</div>
+						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 6 }}>Isolation No-ACK</div>
+						<input
+							type="range"
+							min="5000"
+							max="120000"
+							step="1000"
+							value={firmwareTuning.isolationNoAckMs}
+							onChange={(e) => setFirmwareTuning({ ...firmwareTuning, isolationNoAckMs: Number(e.target.value) })}
+							style={{ width: "100%" }}
+						/>
+						<div style={{ fontSize: "9px", color: "#cbd5e1", textAlign: "right" }}>
+							Isolation No-ACK: {(firmwareTuning.isolationNoAckMs / 1000).toFixed(0)} s
+						</div>
+						<div style={{ fontSize: "9px", color: "#64748b" }}>
+							Time without received packets before entering ISOLATED.
+						</div>
+
+						<div style={{ height: 1, backgroundColor: "#334155", margin: "8px 0" }} />
+						<div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+							<div style={{ fontSize: "10px", color: "#94a3b8", fontWeight: 600 }}>Cloud Fusion</div>
+							<button
+								style={{ ...styles.btn, backgroundColor: "#334155", padding: "4px 8px", fontSize: "10px" }}
+								onClick={applyCloudTuning}
+							>
+								Apply
+							</button>
+						</div>
+						<div style={{ fontSize: "9px", color: "#64748b" }}>Affects how the cloud optimizer weights residuals.</div>
+						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 6 }}>
+							Robustness (Huber K)
+						</div>
+						<input
+							type="range"
+							min="0.5"
+							max="10"
+							step="0.1"
+							value={cloudTuning.huberK ?? 2.5}
+							onChange={(e) => setCloudTuning({ ...cloudTuning, huberK: Number(e.target.value) })}
+							style={{ width: "100%" }}
+						/>
+						<div style={{ fontSize: "9px", color: "#cbd5e1", textAlign: "right" }}>
+							Huber K: {(cloudTuning.huberK ?? 2.5).toFixed(1)}
+						</div>
+						<div style={{ fontSize: "9px", color: "#64748b" }}>Lower = more aggressive outlier rejection.</div>
+						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 6 }}>Distance σ (Cloud)</div>
+						<input
+							type="range"
+							min="0.01"
+							max="1.0"
+							step="0.01"
+							value={cloudTuning.distanceSigma ?? 0.15}
+							onChange={(e) => setCloudTuning({ ...cloudTuning, distanceSigma: Number(e.target.value) })}
+							style={{ width: "100%" }}
+						/>
+						<div style={{ fontSize: "9px", color: "#cbd5e1", textAlign: "right" }}>
+							Distance σ: {(cloudTuning.distanceSigma ?? 0.15).toFixed(2)} m
+						</div>
+						<div style={{ fontSize: "9px", color: "#64748b" }}>Expected range noise used for weighting.</div>
+						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 6 }}>Angle σ (Cloud)</div>
+						<input
+							type="range"
+							min="0"
+							max="60"
+							step="1"
+							value={(cloudTuning.angleSigma ?? (20 * Math.PI) / 180) * (180 / Math.PI)}
+							onChange={(e) => setCloudTuning({ ...cloudTuning, angleSigma: (Number(e.target.value) * Math.PI) / 180 })}
+							style={{ width: "100%" }}
+						/>
+						<div style={{ fontSize: "9px", color: "#cbd5e1", textAlign: "right" }}>
+							Angle σ: {(((cloudTuning.angleSigma ?? (20 * Math.PI) / 180) * 180) / Math.PI).toFixed(0)}°
+						</div>
+						<div style={{ fontSize: "9px", color: "#64748b" }}>Expected bearing noise used for weighting.</div>
 					</div>
 
 					<div style={styles.panel}>
@@ -1263,24 +1666,65 @@ const App: React.FC = () => {
 							onFocus={() => focusWindow("sniffer")}
 							zIndex={100}
 						>
-							<div style={{ padding: "8px", borderBottom: "1px solid #334155", display: "flex", gap: "4px" }}>
-								{["ALL", "HELLO", "DATA", "ELECTION", "PANIC"].map((f) => (
+							<div
+								style={{
+									padding: "8px",
+									borderBottom: "1px solid #334155",
+									display: "flex",
+									gap: "6px",
+									alignItems: "center",
+									justifyContent: "space-between",
+								}}
+							>
+								<div style={{ display: "flex", gap: "4px", alignItems: "center" }}>
+									{["ALL", "HELLO", "DATA", "ELECTION", "PANIC"].map((f) => (
+										<button
+											key={f}
+											onClick={() => setPacketFilter(f)}
+											style={{
+												fontSize: "9px",
+												padding: "4px 8px",
+												borderRadius: "4px",
+												border: "none",
+												backgroundColor: packetFilter === f ? "#38bdf8" : "#1e293b",
+												color: packetFilter === f ? "#0f172a" : "#94a3b8",
+												cursor: "pointer",
+											}}
+										>
+											{f}
+										</button>
+									))}
+								</div>
+								<div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
 									<button
-										key={f}
-										onClick={() => setPacketFilter(f)}
+										onClick={() => setPackets([])}
 										style={{
 											fontSize: "9px",
 											padding: "4px 8px",
 											borderRadius: "4px",
 											border: "none",
-											backgroundColor: packetFilter === f ? "#38bdf8" : "#1e293b",
-											color: packetFilter === f ? "#0f172a" : "#94a3b8",
+											backgroundColor: "#1e293b",
+											color: "#94a3b8",
 											cursor: "pointer",
 										}}
 									>
-										{f}
+										Clear
 									</button>
-								))}
+									<button
+										onClick={exportSnifferPackets}
+										style={{
+											fontSize: "9px",
+											padding: "4px 8px",
+											borderRadius: "4px",
+											border: "none",
+											backgroundColor: "#1e293b",
+											color: "#94a3b8",
+											cursor: "pointer",
+										}}
+									>
+										Export
+									</button>
+								</div>
 							</div>
 							<div style={{ display: "flex", flexDirection: "column", gap: "2px", padding: "8px" }}>
 								{packets

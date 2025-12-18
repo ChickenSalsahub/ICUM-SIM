@@ -78,6 +78,30 @@ describe("NodeFirmware FSM", () => {
 		fw.tick(100);
 		expect(fw.getSnapshot().state).toBe("STATIONARY");
 	});
+
+	it("emits a PANIC packet when entering ISOLATED", () => {
+		let now = 0;
+		const { hal, radioOut } = makeHal({ linearAccelG: 0.0, batteryV: 3.7, now });
+		(hal.getTimeMs as unknown as () => number) = () => now;
+		(hal.pollRadio as unknown as () => Packet[]) = () => [];
+
+		const fw = new NodeFirmware(1, hal, {
+			isolationNoAckMs: 1_000,
+			neighborTimeoutMs: 100_000,
+			helloIntervalIdleMs: 1_000_000,
+			helloIntervalMovingMs: 1_000_000,
+			rangingIntervalIdleMs: 1_000_000,
+			rangingIntervalMovingMs: 1_000_000,
+		});
+
+		fw.tick(100);
+		expect(radioOut.some((p) => p.type === PacketType.PANIC)).toBe(false);
+
+		now = 2_000;
+		fw.tick(100);
+		expect(fw.getSnapshot().state).toBe("ISOLATED");
+		expect(radioOut.some((p) => p.type === PacketType.PANIC)).toBe(true);
+	});
 });
 
 describe("Leader Election", () => {

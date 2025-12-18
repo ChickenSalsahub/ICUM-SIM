@@ -33,6 +33,7 @@ export interface RunnerSnapshot {
 export interface SimulationOptions {
 	uwbRangeMeters?: number;
 	uwbNoiseSigma?: number;
+	uwbAngleNoiseStdRad?: number;
 	packetLoss?: number; // 0..1
 	firmwareConfig?: Partial<FirmwareConfig>;
 	seed?: number;
@@ -65,7 +66,7 @@ export class SimulationRunner {
 	private walls: Wall[] = [];
 	private uwbRangeMeters: number;
 	private packetLoss: number;
-	private readonly uwb: UWBRanging;
+	private uwb: UWBRanging;
 	private readonly rng: RngFn;
 	private worldBounds: { minX: number; maxX: number; minY: number; maxY: number } | undefined;
 	private hooks: SimulationHooks | undefined;
@@ -79,7 +80,11 @@ export class SimulationRunner {
 		this.worldBounds = opts?.worldBounds;
 		// Share the same stochastic UWB model as the UI.
 		// Engine units are meters, so treat them as "pixels" with pixelsPerMeter=1.
-		this.uwb = new UWBRanging(1, { rng: this.rng, noiseStdMeters: opts?.uwbNoiseSigma ?? 0.05 });
+		this.uwb = new UWBRanging(1, {
+			rng: this.rng,
+			noiseStdMeters: opts?.uwbNoiseSigma ?? 0.05,
+			angleNoiseStdRad: opts?.uwbAngleNoiseStdRad ?? 0.05,
+		});
 	}
 
 	public setWorldBounds(bounds: { minX: number; maxX: number; minY: number; maxY: number } | undefined) {
@@ -92,6 +97,14 @@ export class SimulationRunner {
 
 	public setUwbRangeMeters(rangeMeters: number) {
 		this.uwbRangeMeters = rangeMeters;
+	}
+
+	public setUwbNoiseSigma(noiseStdMeters: number) {
+		this.uwb.setNoiseStdMeters(noiseStdMeters);
+	}
+
+	public setUwbAngleNoiseStdRad(stdRad: number) {
+		this.uwb.setAngleNoiseStdRad(stdRad);
 	}
 
 	public setPacketLoss(packetLoss: number) {

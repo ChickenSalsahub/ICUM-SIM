@@ -60,6 +60,7 @@ export interface FirmwareSnapshot {
 	id: number;
 	role: string;
 	state: "STATIONARY" | "MOVING" | "ISOLATED";
+	lteCapable?: boolean;
 	batteryV: number;
 	estPosition: NodePoseEstimate;
 	neighbors: NeighborObservation[];

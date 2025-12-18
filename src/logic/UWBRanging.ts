@@ -8,11 +8,24 @@ import { RangingEngine, RangingOptions, RangingResult, Wall } from "../types";
 export class UWBRanging implements RangingEngine {
 	private rng: () => number;
 	private noiseStdMeters: number;
+	private angleNoiseStdRad: number;
 
-	constructor(_pixelsPerMeter: number, opts?: { rng?: () => number; noiseStdMeters?: number }) {
+	constructor(
+		_pixelsPerMeter: number,
+		opts?: { rng?: () => number; noiseStdMeters?: number; angleNoiseStdRad?: number }
+	) {
 		// Default RNG: Math.random
 		this.rng = opts?.rng ?? Math.random;
 		this.noiseStdMeters = opts?.noiseStdMeters ?? 0.05; // 5cm default noise
+		this.angleNoiseStdRad = opts?.angleNoiseStdRad ?? 0.05; // ~3 degrees default
+	}
+
+	public setNoiseStdMeters(stdMeters: number) {
+		this.noiseStdMeters = Math.max(0, stdMeters);
+	}
+
+	public setAngleNoiseStdRad(stdRad: number) {
+		this.angleNoiseStdRad = Math.max(0, stdRad);
 	}
 
 	public measure(
@@ -57,8 +70,8 @@ export class UWBRanging implements RangingEngine {
 
 		// Bearing from sender to receiver; use as AoD (transmit) and as AoA at sender-side consumer
 		const bearing = Math.atan2(dy, dx);
-		const aoaNoise = this.gaussian() * 0.05; // ~3 degrees noise
-		const aodNoise = this.gaussian() * 0.05;
+		const aoaNoise = this.gaussian() * this.angleNoiseStdRad;
+		const aodNoise = this.gaussian() * this.angleNoiseStdRad;
 		const aoa = bearing + aoaNoise; // what the initiator/firmware cares about (direction to peer)
 		const aod = bearing + aodNoise; // transmitter departure angle (should closely match aoa)
 

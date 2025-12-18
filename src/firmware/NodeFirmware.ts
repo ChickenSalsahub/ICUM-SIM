@@ -31,6 +31,7 @@ export class NodeFirmware {
 	private lastTopologyChangeMs = 0;
 	private lteCapable: boolean;
 	private leaderId: number | null = null;
+	private lastPanicMs = -1;
 
 	constructor(id: number, hal: INodeHAL, cfg?: Partial<FirmwareConfig>, opts?: { lteCapable?: boolean }) {
 		this.id = id;
@@ -61,10 +62,40 @@ export class NodeFirmware {
 		this.detectTopologyChange(now);
 		this.updateStateFromImu(now);
 		const stateChanged = this.state !== prevState;
+
+		// If we have entered (or remain in) ISOLATED, emit a PANIC packet.
+		// This is primarily for observability (packet sniffer) and can also be used by
+		// other components as an explicit alarm signal.
+		if (this.state === "ISOLATED") {
+			const PANIC_REPEAT_MS = 5_000;
+			if (prevState !== "ISOLATED" || this.lastPanicMs < 0 || now - this.lastPanicMs >= PANIC_REPEAT_MS) {
+				this.sendPanic(now);
+			}
+		}
+
 		this.runLeaderElection(now);
 		this.maybeSendRangingPoll(now, prevState, stateChanged);
 		this.maybeSendHello(now);
 		this.runGraphOptimization(dtMs);
+	}
+
+	private sendPanic(now: number) {
+		this.lastPanicMs = now;
+		const degree = this.neighbors.size;
+		const pkt: Packet = {
+			id: `${this.id}-panic-${now}`,
+			type: PacketType.PANIC,
+			srcId: this.id,
+			destId: -1,
+			payload: {
+				type: "PANIC",
+				degree,
+				batteryV: this.hal.getBatteryVoltage(),
+				lteCapable: this.lteCapable,
+			},
+			timestamp: now,
+		};
+		this.hal.radioSend(pkt);
 	}
 
 	private detectTopologyChange(now: number) {
@@ -176,7 +207,12 @@ export class NodeFirmware {
 			}
 		}
 
-		const intervalMs = isMoving || topologyRecentlyChanged ? movingIntervalMs : idleIntervalMs;
+		const intervalMs =
+			this.cfg.eventDrivenSensing === false
+				? movingIntervalMs
+				: isMoving || topologyRecentlyChanged
+				? movingIntervalMs
+				: idleIntervalMs;
 		if (now - this.lastRangePollMs < intervalMs) return;
 		this.lastRangePollMs = now;
 		const degree = this.neighbors.size;
@@ -282,7 +318,8 @@ export class NodeFirmware {
 		const TOPOLOGY_RECENT_MS = 5_000;
 		const isMoving = this.state === "MOVING";
 		const topologyRecentlyChanged = now - this.lastTopologyChangeMs <= TOPOLOGY_RECENT_MS;
-		const intervalMs = isMoving || topologyRecentlyChanged ? FAST_MS : SLOW_MS;
+		const intervalMs =
+			this.cfg.eventDrivenSensing === false ? FAST_MS : isMoving || topologyRecentlyChanged ? FAST_MS : SLOW_MS;
 		if (now - this.lastHelloMs < intervalMs) return;
 		this.lastHelloMs = now;
 		const degree = this.neighbors.size;
@@ -341,6 +378,7 @@ export class NodeFirmware {
 			id: this.id,
 			role: this.role,
 			state: this.state,
+			lteCapable: this.lteCapable,
 			batteryV: this.hal.getBatteryVoltage(),
 			estPosition: { ...this.est },
 			neighbors: Array.from(this.neighbors.values()).map((n) => ({
