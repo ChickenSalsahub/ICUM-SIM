@@ -28,7 +28,7 @@ export function applyMotionScenario(runner: SimulationRunner, scenario: MotionSc
 	}
 
 	// Circular motion parameters
-	const speedCombined = 0.5; // m/s
+	const speedCombined = 1.2; // m/s - realistic walking speed
 	const radius = 5; // meters
 	const omega = speedCombined / radius; // rad/s
 

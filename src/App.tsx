@@ -297,7 +297,7 @@ const App: React.FC = () => {
 	const [config, setConfig] = useState<NodeConfig>({
 		uwbRange: 15,
 		isolationTimeout: 5,
-		movingSpeed: 0.8,
+		movingSpeed: 0.4,
 		showRange: false,
 		maxLeaders: 1,
 		minClusterSize: 5,
@@ -311,8 +311,8 @@ const App: React.FC = () => {
 
 	const [firmwareTuning, setFirmwareTuning] = useState<FirmwareConfig>({
 		accelMoveThresholdG: 0.5,
-		isolationNoAckMs: 30_000,
-		neighborTimeoutMs: 20_000,
+		isolationNoAckMs: 10_000,
+		neighborTimeoutMs: 5_000,
 		eventDrivenSensing: true,
 		helloIntervalMovingMs: 1_000,
 		helloIntervalIdleMs: 15_000,

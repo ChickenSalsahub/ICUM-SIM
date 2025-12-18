@@ -25,6 +25,9 @@ export function cloudRmse(latest: Map<number, FusedRecord>, truth: Map<number, {
 	for (const [id, t] of truth.entries()) {
 		const r = latest.get(id);
 		if (!r) continue;
+		// Skip nodes that are explicitly uncertain/isolated (e.g. panic state)
+		if (r.status === "UNCERTAIN") continue;
+
 		const dx = r.position.x - t.x;
 		const dy = r.position.y - t.y;
 		sumSq += dx * dx + dy * dy;
@@ -46,6 +49,9 @@ export function cloudRmseAligned(latest: Map<number, FusedRecord>, truth: Map<nu
 	for (const [id, t] of truth.entries()) {
 		const r = latest.get(id);
 		if (!r) continue;
+		// Skip nodes that are explicitly uncertain/isolated (e.g. panic state)
+		if (r.status === "UNCERTAIN") continue;
+
 		estPoints.push({ x: r.position.x, y: r.position.y });
 		truePoints.push({ x: t.x, y: t.y });
 	}

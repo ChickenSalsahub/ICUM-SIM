@@ -8,6 +8,7 @@ export interface CloudBackendOptions {
 	// Optimization budget.
 	warmupIterations?: number;
 	finalIterations?: number;
+	pruneAgeMs?: number;
 }
 
 /**
@@ -106,7 +107,16 @@ export class CloudBackend {
 			angleSigma: opts?.angleSigma ?? (20 * Math.PI) / 180,
 			warmupIterations: opts?.warmupIterations ?? 15,
 			finalIterations: opts?.finalIterations ?? 50,
+			pruneAgeMs: opts?.pruneAgeMs ?? 30_000,
 		};
+	}
+
+	private pruneStaleRecords(currentTime: number) {
+		const cutoff = currentTime - this.opts.pruneAgeMs;
+		// Prune the main DB
+		if (this.db.length > 0) {
+			this.db = this.db.filter((r) => r.timestamp >= cutoff);
+		}
 	}
 
 	public recordEvent(event: Omit<CloudEvent, "id">) {
@@ -126,6 +136,27 @@ export class CloudBackend {
 			nodeId: opts.nodeId,
 			message: opts.message ?? "PANIC",
 		});
+
+		// Immediate topology update:
+		// If a node is panicking, it is likely isolated. We should reflect this in the topology
+		// immediately rather than waiting for the prune timeout.
+		// We inject a synthetic record with NO neighbors.
+		const prev = this.db.find((r) => r.nodeId === opts.nodeId);
+		const lastPos = prev?.position ?? { x: 0, y: 0 }; // We don't know where it is, just keep last pos
+		
+		const isolatedRecord: FusedRecord = {
+			id: `${opts.nodeId}-panic-${this.recordCounter++}`,
+			nodeId: opts.nodeId,
+			timestamp: opts.timestamp,
+			sampleCount: 1,
+			position: lastPos,
+			avgBattery: prev?.avgBattery ?? 0,
+			status: "UNCERTAIN",
+			neighbors: [], // Clears the edges
+		};
+		// Add to DB at the front
+		this.db.unshift(isolatedRecord);
+		if (this.db.length > 500) this.db = this.db.slice(0, 500);
 	}
 
 	public getEvents(): CloudEvent[] {
@@ -150,6 +181,7 @@ export class CloudBackend {
 		if (currentTime - this.lastFusionTime > this.FUSION_WINDOW_MS) {
 			this.runFusion();
 			this.lastFusionTime = currentTime;
+			this.pruneStaleRecords(currentTime);
 			return true; // Indicates database updated
 		}
 		return false;
