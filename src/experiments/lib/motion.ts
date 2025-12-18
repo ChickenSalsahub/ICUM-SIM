@@ -18,8 +18,13 @@ export function applyMotionScenario(runner: SimulationRunner, scenario: MotionSc
 	const nodeIds = new Set(runner.getNodeIds());
 
 	if (!moving) {
-		// Only force-stop at the transition boundaries to avoid redundant updates
-		if (tMs === MOTION_STOP_MS || tMs === MOTION_START_MS - 1000) {
+		// Stop nodes if we are past the motion window or just before it starts.
+		// We use a small window check to avoid setting velocity 0 every single tick
+		// while still ensuring it happens at the transitions even with different dtMs.
+		const isAtEnd = tMs >= MOTION_STOP_MS && tMs < MOTION_STOP_MS + 2000;
+		const isAtStart = tMs >= MOTION_START_MS - 2000 && tMs < MOTION_START_MS;
+		
+		if (isAtEnd || isAtStart) {
 			for (const id of nodeIds) {
 				runner.setNodeVelocity(id, { vx: 0, vy: 0 });
 			}
@@ -27,20 +32,30 @@ export function applyMotionScenario(runner: SimulationRunner, scenario: MotionSc
 		return;
 	}
 
-	// Circular motion parameters
-	const speedCombined = 1.2; // m/s - realistic walking speed
-	const radius = 5; // meters
-	const omega = speedCombined / radius; // rad/s
+	const allNodeIds = Array.from(nodeIds).sort((a, b) => a - b);
+	const gatewayId = allNodeIds[0]; // Assume first node is gateway
+	const candidates = allNodeIds.filter(id => id !== gatewayId);
 
-	const movingIds = scenario === "few_moving" 
-		? [2, 3, 4] 
-		: [2, 3, 4, 5, 6, 7, 8];
+	// Select how many nodes to move
+	let movingCount = 0;
+	if (scenario === "few_moving") {
+		movingCount = Math.max(1, Math.floor(candidates.length * 0.3));
+	} else if (scenario === "many_moving") {
+		movingCount = Math.max(1, Math.floor(candidates.length * 0.7));
+	}
+	
+	const movingIds = candidates.slice(0, movingCount);
 
 	const elapsedSec = (tMs - MOTION_START_MS) / 1000;
 
 	for (const id of movingIds) {
-		if (!nodeIds.has(id)) continue;
-		
+		// Circular motion parameters
+		const speedCombined = 1.2; // m/s - realistic walking speed
+		// Varied radius based on ID so they don't overlap perfectly
+		// Tighter radius (1-3m) to keep nodes within their local clusters
+		const radius = 1 + (id % 3); 
+		const omega = speedCombined / radius; // rad/s
+
 		// Different phase for each node so they don't move in sync
 		const phase = (id * Math.PI) / 4; 
 		const angle = phase + omega * elapsedSec;

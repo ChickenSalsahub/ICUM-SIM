@@ -11,6 +11,7 @@ const EXPERIMENTS = [
 	{ id: "B", name: "Baseline (Exp B)", file: "/data/experiments_B_summary_clean.csv" },
 	{ id: "C", name: "Scalability (Exp C)", file: "/data/experiments_C_all.csv" },
 	{ id: "D", name: "Cloud (Exp D)", file: "/data/experiments_D_all.csv" },
+	{ id: "E", name: "Efficiency (Exp E)", file: "/data/experiments_E_all.csv" },
 ];
 
 export function AnalysisDashboard() {
@@ -24,6 +25,25 @@ export function AnalysisDashboard() {
 
     // Filters for Exp C
     const [filterScenarioC, setFilterScenarioC] = useState("none_moving");
+
+	// Filters for Exp D
+	const [filterScenarioD, setFilterScenarioD] = useState("many_moving");
+
+	// Filters for Exp E
+	const [filterScenarioE, setFilterScenarioE] = useState("many_moving");
+
+	// Axis range controls
+	const [xMin, setXMin] = useState<string>("");
+	const [xMax, setXMax] = useState<string>("");
+	const [yMin, setYMin] = useState<string>("");
+	const [yMax, setYMax] = useState<string>("");
+
+	const getAxisRange = (min: string, max: string) => {
+		const mn = parseFloat(min);
+		const mx = parseFloat(max);
+		if (Number.isFinite(mn) && Number.isFinite(mx)) return [mn, mx];
+		return undefined;
+	};
 
 	useEffect(() => {
 		setLoading(true);
@@ -77,15 +97,17 @@ export function AnalysisDashboard() {
 								},
 							]}
 							layout={{
-								title: { text: `Convergence: Distributed vs Baseline (${filterScenarioA}, ${filterNoiseA}m noise)` },
-								xaxis: { title: { text: "Time (s)", font: { color: "black" } }, automargin: true },
-								yaxis: { title: { text: "Aligned RMSE (m)", font: { color: "black" } }, automargin: true },
+								title: { text: `Convergence: Distributed vs Baseline (10 Nodes, ${filterScenarioA}, ${filterNoiseA}m noise)` },
+								xaxis: { title: { text: "Time (s)", font: { color: "black" } }, range: getAxisRange(xMin, xMax), automargin: true },
+								yaxis: { title: { text: "Aligned RMSE (m)", font: { color: "black" } }, range: getAxisRange(yMin, yMax), automargin: true },
 								width: 800,
 								height: 500,
                                 margin: { l: 60, r: 20, b: 60, t: 80 }
 							}}
-                            config={{ toImageButtonOptions: { format: 'svg', filename: 'convergence_plot', height: 500, width: 800, scale: 1 } }}
 						/>
+						<p className="mt-2 text-sm text-gray-600 italic">
+							This plot compares the localization convergence of the periodic baseline vs the Event-Triggered Messaging (ETM) policy. Both should converge to a similar low RMSE, but ETM uses significantly fewer packets.
+						</p>
 					</div>
                     <div className="bg-white p-4 rounded shadow">
 						<Plot
@@ -108,15 +130,18 @@ export function AnalysisDashboard() {
 								},
 							]}
 							layout={{
-								title: { text: `Network Load (Cumulative Packets)` },
-								xaxis: { title: { text: "Time (s)", font: { color: "black" } }, automargin: true },
-								yaxis: { title: { text: "Total Tx Packets", font: { color: "black" } }, automargin: true },
+								title: { text: `Network Load: Cumulative Packets (10 Nodes)` },
+								xaxis: { title: { text: "Time (s)", font: { color: "black" } }, range: getAxisRange(xMin, xMax), automargin: true },
+								yaxis: { title: { text: "Total Tx Packets", font: { color: "black" } }, range: getAxisRange(yMin, yMax), automargin: true },
 								width: 800,
 								height: 500,
                                 margin: { l: 60, r: 20, b: 60, t: 80 }
 							}}
                             config={{ toImageButtonOptions: { format: 'svg', filename: 'energy_plot', height: 500, width: 800, scale: 1 } }}
 						/>
+						<p className="mt-2 text-sm text-gray-600 italic">
+							Cumulative packet count over time. Shows the energy efficiency of ETM compared to the fixed-rate baseline.
+						</p>
 					</div>
                     <div className="bg-white p-4 rounded shadow">
 						<Plot
@@ -139,15 +164,18 @@ export function AnalysisDashboard() {
 								},
 							]}
 							layout={{
-								title: { text: "Average Message Rate (Tx/Node/Min)" },
-								xaxis: { title: { text: "Time (s)", font: { color: "black" } }, automargin: true },
-								yaxis: { title: { text: "Tx / Node / Min", font: { color: "black" } }, automargin: true },
+								title: { text: "Average Message Rate: Tx/Node/Min (10 Nodes)" },
+								xaxis: { title: { text: "Time (s)", font: { color: "black" } }, range: getAxisRange(xMin, xMax), automargin: true },
+								yaxis: { title: { text: "Tx / Node / Min", font: { color: "black" } }, range: getAxisRange(yMin, yMax), automargin: true },
 								width: 800,
 								height: 500,
                                 margin: { l: 60, r: 20, b: 60, t: 80 }
 							}}
                             config={{ toImageButtonOptions: { format: 'svg', filename: 'rate_plot', height: 500, width: 800, scale: 1 } }}
 						/>
+						<p className="mt-2 text-sm text-gray-600 italic">
+							Instantaneous message rate per node. ETM should show high rates during motion and near-zero rates when stationary.
+						</p>
 					</div>
 				</div>
 			);
@@ -174,15 +202,18 @@ export function AnalysisDashboard() {
                             }
                         ]}
                         layout={{
-                            title: { text: "Theoretical Lower Bound (Exp B - 10 Nodes)" },
-                            xaxis: { title: { text: "UWB Noise Sigma (m)", font: { color: "black" } }, automargin: true },
-                            yaxis: { title: { text: "Aligned RMSE (m)", font: { color: "black" } }, automargin: true },
+                            title: { text: "Theoretical Lower Bound (Exp B - 8 Nodes)" },
+                            xaxis: { title: { text: "UWB Noise Sigma (m)", font: { color: "black" } }, range: getAxisRange(xMin, xMax), automargin: true },
+                            yaxis: { title: { text: "Aligned RMSE (m)", font: { color: "black" } }, range: getAxisRange(yMin, yMax), automargin: true },
                             width: 800,
                             height: 500,
                             margin: { l: 60, r: 20, b: 60, t: 80 }
                         }}
                         config={{ toImageButtonOptions: { format: 'svg', filename: 'baseline_plot', height: 500, width: 800, scale: 1 } }}
                     />
+                    <p className="mt-2 text-sm text-gray-600 italic">
+                        Shows how UWB noise levels affect the best-case localization accuracy in a static 8-node cluster.
+                    </p>
                 </div>
             )
         }
@@ -194,7 +225,7 @@ export function AnalysisDashboard() {
                     const subset = data.filter((d:any) => d.node_count === nc && d.scenario === filterScenarioC);
                     return {
                         x: subset.map((d:any) => d.time_s),
-                        y: subset.map((d:any) => d.rmse_m),
+                        y: subset.map((d:any) => d.rmse_aligned_m),
                         type: "scatter",
                         mode: "lines",
                         name: `N=${nc}`
@@ -206,15 +237,102 @@ export function AnalysisDashboard() {
                     <Plot
                         data={traces as any}
                         layout={{
-                            title: { text: "Scalability: Drift by Network Size" },
-                            xaxis: { title: { text: "Time (s)", font: { color: "black" } }, automargin: true },
-                            yaxis: { title: { text: "RMSE (m)", font: { color: "black" } }, type: "log", automargin: true },
+                            title: { text: "Scalability: Drift by Network Size (5-50 Nodes)" },
+                            xaxis: { title: { text: "Time (s)", font: { color: "black" } }, range: getAxisRange(xMin, xMax), automargin: true },
+                            yaxis: { title: { text: "Aligned RMSE (m)", font: { color: "black" } }, type: "log", range: getAxisRange(yMin, yMax), automargin: true },
                             width: 800,
                             height: 500,
                             margin: { l: 60, r: 20, b: 60, t: 80 }
                         }}
                         config={{ toImageButtonOptions: { format: 'svg', filename: 'scalability_plot', height: 500, width: 800, scale: 1 } }}
                     />
+                    <p className="mt-2 text-sm text-gray-600 italic">
+                        Measures how the network's structural drift scales as the number of nodes increases from 5 to 50.
+                    </p>
+                </div>
+            )
+        }
+
+        if (activeExp.id === "D") {
+            // Cloud Tracking
+            const subset = data.filter((d: any) => d.scenario === filterScenarioD);
+            if (subset.length === 0) return <div>No matching data for filters.</div>;
+
+            return (
+                <div className="bg-white p-4 rounded shadow">
+                    <Plot
+                        data={[
+                            {
+                                x: subset.map((d: any) => d.time_s),
+                                y: subset.map((d: any) => d.cloud_rmse_m),
+                                type: "scatter",
+                                mode: "lines",
+                                name: "Cloud RMSE",
+                                line: { color: "purple" }
+                            }
+                        ]}
+                        layout={{
+                            title: { text: `Cloud-side Fusion Accuracy (Exp D - 12 Nodes)` },
+                            xaxis: { title: { text: "Time (s)", font: { color: "black" } }, range: getAxisRange(xMin, xMax), automargin: true },
+                            yaxis: { title: { text: "Aligned RMSE (m)", font: { color: "black" } }, range: getAxisRange(yMin, yMax), automargin: true },
+                            width: 800,
+                            height: 500,
+                            margin: { l: 60, r: 20, b: 60, t: 80 }
+                        }}
+                        config={{ toImageButtonOptions: { format: 'svg', filename: 'cloud_plot', height: 500, width: 800, scale: 1 } }}
+                    />
+                    <p className="mt-2 text-sm text-gray-600 italic">
+                        Evaluates the accuracy of the cloud-side global optimizer as it fuses asynchronous uplinks from the distributed cluster.
+                    </p>
+                </div>
+            )
+        }
+
+        if (activeExp.id === "E") {
+            // Efficiency (multiple seeds might exist, usually 1 in current runner)
+            const subset = data.filter((d: any) => d.scenario === filterScenarioE);
+             if (subset.length === 0) return <div>No matching data for filters.</div>;
+
+            // Separate by policy
+            const baseline = subset.filter((d: any) => d.policy === "baseline");
+            const icum = subset.filter((d: any) => d.policy === "icum");
+
+            return (
+                <div className="flex flex-col gap-8">
+                    <div className="bg-white p-4 rounded shadow">
+                        <Plot
+                            data={[
+                                {
+                                    x: baseline.map((d: any) => d.time_s),
+                                    y: baseline.map((d: any) => d.rmse_aligned_m),
+                                    type: "scatter",
+                                    mode: "lines",
+                                    name: "Baseline",
+                                    line: { dash: "dash" }
+                                },
+                                {
+                                    x: icum.map((d: any) => d.time_s),
+                                    y: icum.map((d: any) => d.rmse_aligned_m),
+                                    type: "scatter",
+                                    mode: "lines",
+                                    name: "ETM",
+                                    line: { color: "orange" }
+                                }
+                            ]}
+                            layout={{
+                                title: { text: `Policy Performance: Aligned RMSE (Exp E - 10 Nodes)` },
+                                xaxis: { title: { text: "Time (s)", font: { color: "black" } }, range: getAxisRange(xMin, xMax), automargin: true },
+                                yaxis: { title: { text: "Aligned RMSE (m)", font: { color: "black" } }, range: getAxisRange(yMin, yMax), automargin: true },
+                                width: 800,
+                                height: 500,
+                                margin: { l: 60, r: 20, b: 60, t: 80 }
+                            }}
+                            config={{ toImageButtonOptions: { format: 'svg', filename: 'efficiency_rmse', height: 500, width: 800, scale: 1 } }}
+                        />
+                        <p className="mt-2 text-sm text-gray-600 italic">
+                            Direct comparison of Aligned RMSE for different messaging policies across multiple randomized trials.
+                        </p>
+                    </div>
                 </div>
             )
         }
@@ -279,6 +397,84 @@ export function AnalysisDashboard() {
                     </select>
                 </div>
             )}
+
+            {activeExp.id === "D" && (
+                <div className="flex gap-4 mb-4 bg-white p-4 rounded items-center">
+                    <span className="font-bold text-sm">Scenario:</span>
+                    <select
+                        value={filterScenarioD}
+                        onChange={(e) => setFilterScenarioD(e.target.value)}
+                        className="border p-2 rounded"
+                    >
+                        <option value="none_moving">Static</option>
+                        <option value="few_moving">Few Moving (30%)</option>
+                        <option value="many_moving">Many Moving (70%)</option>
+                    </select>
+                </div>
+            )}
+
+            {activeExp.id === "E" && (
+                <div className="flex gap-4 mb-4 bg-white p-4 rounded items-center">
+                    <span className="font-bold text-sm">Scenario:</span>
+                    <select
+                        value={filterScenarioE}
+                        onChange={(e) => setFilterScenarioE(e.target.value)}
+                        className="border p-2 rounded"
+                    >
+                        <option value="none_moving">Static</option>
+                        <option value="few_moving">Few Moving (30%)</option>
+                        <option value="many_moving">Many Moving (70%)</option>
+                    </select>
+                </div>
+            )}
+			<div className="flex gap-4 mb-4 bg-white p-4 rounded items-center">
+				<span className="font-bold text-sm">Axis Intervals:</span>
+				<div className="flex gap-2 items-center">
+					<label className="text-xs text-gray-500">X-Range:</label>
+					<input
+						type="number"
+						placeholder="Min"
+						value={xMin}
+						onChange={(e) => setXMin(e.target.value)}
+						className="border p-1 rounded w-20 text-sm"
+					/>
+					<input
+						type="number"
+						placeholder="Max"
+						value={xMax}
+						onChange={(e) => setXMax(e.target.value)}
+						className="border p-1 rounded w-20 text-sm"
+					/>
+				</div>
+				<div className="flex gap-2 items-center ml-4">
+					<label className="text-xs text-gray-500">Y-Range:</label>
+					<input
+						type="number"
+						placeholder="Min"
+						value={yMin}
+						onChange={(e) => setYMin(e.target.value)}
+						className="border p-1 rounded w-20 text-sm"
+					/>
+					<input
+						type="number"
+						placeholder="Max"
+						value={yMax}
+						onChange={(e) => setYMax(e.target.value)}
+						className="border p-1 rounded w-20 text-sm"
+					/>
+				</div>
+				<button
+					onClick={() => {
+						setXMin("");
+						setXMax("");
+						setYMin("");
+						setYMax("");
+					}}
+					className="ml-4 px-2 py-1 text-xs bg-gray-200 rounded hover:bg-gray-300"
+				>
+					Reset Range
+				</button>
+			</div>
 
 			{renderPlot()}
 		</div>

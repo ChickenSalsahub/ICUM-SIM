@@ -123,7 +123,7 @@ export function main() {
 		const rows = runExperimentCScenarios();
 		writePublicCsv(
 			`experiments_C_all.csv`,
-			"scenario,time_s,node_count,tx_per_node_per_min,rmse_m\n",
+			"scenario,time_s,node_count,tx_per_node_per_min,rmse_aligned_m\n",
 			rows.map((r) =>
 				[
 					r.scenario,
@@ -157,7 +157,7 @@ export function main() {
 		const rows = runExperimentE();
 		writePublicCsv(
 			`experiments_E_all.csv`,
-			"scenario,policy,seed,time_s,tx_total,tx_per_node_per_min,rmse_m\n",
+			"scenario,policy,seed,time_s,tx_total,tx_per_node_per_min,rmse_aligned_m\n",
 			rows.map((r) =>
 				[
 					r.scenario,

@@ -200,13 +200,12 @@ export function aleAlignedRigid(nodes: RunnerSnapshot["nodes"]) {
 	}
 
 	let sum = 0;
+	let validCount = 0;
 	for (const comp of components) {
 		if (comp.length < 2) {
-			const i = comp[0];
-			if (i === undefined) continue;
-			const dx = est[i].x - truth[i].x;
-			const dy = est[i].y - truth[i].y;
-			sum += Math.hypot(dx, dy);
+			// Skip isolated nodes in anchor-free ALE calculation.
+			// Falling back to absolute error for single nodes is misleading
+			// because the coordinate frame origin is arbitrary.
 			continue;
 		}
 
@@ -214,11 +213,6 @@ export function aleAlignedRigid(nodes: RunnerSnapshot["nodes"]) {
 		const estC = comp.map((i) => est[i]);
 		const tf = bestFitRigid2D(truthC, estC);
 		if (!tf) {
-			for (const i of comp) {
-				const dx = est[i].x - truth[i].x;
-				const dy = est[i].y - truth[i].y;
-				sum += Math.hypot(dx, dy);
-			}
 			continue;
 		}
 
@@ -227,9 +221,10 @@ export function aleAlignedRigid(nodes: RunnerSnapshot["nodes"]) {
 			const dx = aligned.x - truth[i].x;
 			const dy = aligned.y - truth[i].y;
 			sum += Math.hypot(dx, dy);
+			validCount++;
 		}
 	}
-	return sum / nodes.length;
+	return validCount > 0 ? sum / validCount : Number.NaN;
 }
 
 /**
@@ -288,13 +283,12 @@ export function rmseAlignedRigid(nodes: RunnerSnapshot["nodes"]) {
 	}
 
 	let sumSq = 0;
+	let validCount = 0;
 	for (const comp of components) {
 		if (comp.length < 2) {
-			const i = comp[0];
-			if (i === undefined) continue;
-			const dx = est[i].x - truth[i].x;
-			const dy = est[i].y - truth[i].y;
-			sumSq += dx * dx + dy * dy;
+			// Skip isolated nodes in anchor-free RMSE calculation.
+			// Falling back to absolute error for single nodes is misleading
+			// because the coordinate frame origin is arbitrary.
 			continue;
 		}
 
@@ -302,11 +296,6 @@ export function rmseAlignedRigid(nodes: RunnerSnapshot["nodes"]) {
 		const estC = comp.map((i) => est[i]);
 		const tf = bestFitRigid2D(truthC, estC);
 		if (!tf) {
-			for (const i of comp) {
-				const dx = est[i].x - truth[i].x;
-				const dy = est[i].y - truth[i].y;
-				sumSq += dx * dx + dy * dy;
-			}
 			continue;
 		}
 
@@ -315,9 +304,10 @@ export function rmseAlignedRigid(nodes: RunnerSnapshot["nodes"]) {
 			const dx = aligned.x - truth[i].x;
 			const dy = aligned.y - truth[i].y;
 			sumSq += dx * dx + dy * dy;
+			validCount++;
 		}
 	}
-	return Math.sqrt(sumSq / nodes.length);
+	return validCount > 0 ? Math.sqrt(sumSq / validCount) : Number.NaN;
 }
 
 /**
