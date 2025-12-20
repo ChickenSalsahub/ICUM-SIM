@@ -1,6 +1,6 @@
 import { SimulationRunner } from "../../engine/SimulationRunner.ts";
 import { EXPERIMENT_WORLD_BOUNDS_M, type MotionScenarioName } from "../lib/types.ts";
-import { measurementAngleResidualMae, measurementRangeResidualMae, rmse, sumTx } from "../lib/metrics.ts";
+import { measurementAngleResidualMae, measurementRangeResidualMae, rmseAlignedRigid, sumTx } from "../lib/metrics.ts";
 import { getCliSeed, makeSeed, seededRng, seedNodes } from "../lib/seed.ts";
 import { applyMotionScenario } from "../lib/motion.ts";
 
@@ -76,7 +76,7 @@ export function runExperimentE(): ExperimentETimeRow[] {
 						seed,
 						timeSeconds: tMs / 1000,
 						txTotal: sumTx(snap.nodes),
-						rmse: rmse(snap.nodes),
+						rmse: rmseAlignedRigid(snap.nodes),
 						rangeResidualMae: measurementRangeResidualMae(snap.nodes),
 						angleResidualMae: measurementAngleResidualMae(snap.nodes),
 					});

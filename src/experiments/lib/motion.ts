@@ -1,5 +1,11 @@
 import type { SimulationRunner } from "../../engine/SimulationRunner.ts";
-import { MOTION_START_MS, MOTION_STOP_MS, type MotionScenarioName } from "./types.ts";
+import {
+	MOTION_2_START_MS,
+	MOTION_2_STOP_MS,
+	MOTION_START_MS,
+	MOTION_STOP_MS,
+	type MotionScenarioName,
+} from "./types.ts";
 
 /**
  * Applies the shared motion scenario used across multiple experiments.
@@ -14,17 +20,21 @@ import { MOTION_START_MS, MOTION_STOP_MS, type MotionScenarioName } from "./type
 export function applyMotionScenario(runner: SimulationRunner, scenario: MotionScenarioName, tMs: number) {
 	if (scenario === "none_moving") return;
 
-	const moving = tMs >= MOTION_START_MS && tMs < MOTION_STOP_MS;
+	const moving1 = tMs >= MOTION_START_MS && tMs < MOTION_STOP_MS;
+	const moving2 = tMs >= MOTION_2_START_MS && tMs < MOTION_2_STOP_MS;
+	const moving = moving1 || moving2;
 	const nodeIds = new Set(runner.getNodeIds());
 
 	if (!moving) {
 		// Stop nodes if we are past the motion window or just before it starts.
 		// We use a small window check to avoid setting velocity 0 every single tick
 		// while still ensuring it happens at the transitions even with different dtMs.
-		const isAtEnd = tMs >= MOTION_STOP_MS && tMs < MOTION_STOP_MS + 2000;
-		const isAtStart = tMs >= MOTION_START_MS - 2000 && tMs < MOTION_START_MS;
-		
-		if (isAtEnd || isAtStart) {
+		const isAtEnd1 = tMs >= MOTION_STOP_MS && tMs < MOTION_STOP_MS + 2000;
+		const isAtStart1 = tMs >= MOTION_START_MS - 2000 && tMs < MOTION_START_MS;
+		const isAtEnd2 = tMs >= MOTION_2_STOP_MS && tMs < MOTION_2_STOP_MS + 2000;
+		const isAtStart2 = tMs >= MOTION_2_START_MS - 2000 && tMs < MOTION_2_START_MS;
+
+		if (isAtEnd1 || isAtStart1 || isAtEnd2 || isAtStart2) {
 			for (const id of nodeIds) {
 				runner.setNodeVelocity(id, { vx: 0, vy: 0 });
 			}

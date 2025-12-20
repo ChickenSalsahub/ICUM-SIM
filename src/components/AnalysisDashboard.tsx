@@ -25,6 +25,7 @@ export function AnalysisDashboard() {
 
     // Filters for Exp C
     const [filterScenarioC, setFilterScenarioC] = useState("none_moving");
+    const [useLogScaleC, setUseLogScaleC] = useState(false);
 
 	// Filters for Exp D
 	const [filterScenarioD, setFilterScenarioD] = useState("many_moving");
@@ -183,26 +184,31 @@ export function AnalysisDashboard() {
 
         if (activeExp.id === "B") {
             // Baseline Limits
+            // Group by node count
+            const nodeCounts = Array.from(new Set(data.map((d: any) => d.node_count))).sort((a: any, b: any) => a - b);
+            const traces = nodeCounts.map((nc: any) => {
+                const subset = data.filter((d: any) => d.node_count === nc);
+                return {
+                    x: subset.map((d: any) => d.uwb_sigma_m),
+                    y: subset.map((d: any) => d.rmse_aligned_median_m),
+                    error_y: {
+                        type: 'data',
+                        array: subset.map((d: any) => d.rmse_aligned_p75_m - d.rmse_aligned_median_m),
+                        arrayminus: subset.map((d: any) => d.rmse_aligned_median_m - d.rmse_aligned_p25_m),
+                        visible: true
+                    },
+                    type: "scatter",
+                    mode: "lines+markers",
+                    name: `N=${nc}`,
+                };
+            });
+
             return (
                 <div className="bg-white p-4 rounded shadow">
                     <Plot
-                        data={[
-                            {
-                                x: data.map((d: any) => d.uwb_sigma_m),
-                                y: data.map((d: any) => d.rmse_aligned_median_m),
-                                error_y: {
-                                    type: 'data',
-                                    array: data.map((d: any) => d.rmse_aligned_p75_m - d.rmse_aligned_median_m),
-                                    arrayminus: data.map((d: any) => d.rmse_aligned_median_m - d.rmse_aligned_p25_m),
-                                    visible: true
-                                },
-                                type: "scatter",
-                                mode: "lines+markers",
-                                name: "Median RMSE",
-                            }
-                        ]}
+                        data={traces as any}
                         layout={{
-                            title: { text: "Theoretical Lower Bound (Exp B - 8 Nodes)" },
+                            title: { text: "Theoretical Lower Bound: Noise vs Redundancy" },
                             xaxis: { title: { text: "UWB Noise Sigma (m)", font: { color: "black" } }, range: getAxisRange(xMin, xMax), automargin: true },
                             yaxis: { title: { text: "Aligned RMSE (m)", font: { color: "black" } }, range: getAxisRange(yMin, yMax), automargin: true },
                             width: 800,
@@ -212,7 +218,7 @@ export function AnalysisDashboard() {
                         config={{ toImageButtonOptions: { format: 'svg', filename: 'baseline_plot', height: 500, width: 800, scale: 1 } }}
                     />
                     <p className="mt-2 text-sm text-gray-600 italic">
-                        Shows how UWB noise levels affect the best-case localization accuracy in a static 8-node cluster.
+                        Shows how redundancy improves accuracy. N=15 (more links) should have much lower error than N=3 (minimal links) for the same noise level.
                     </p>
                 </div>
             )
@@ -233,22 +239,65 @@ export function AnalysisDashboard() {
                 });
 
              return (
-                <div className="bg-white p-4 rounded shadow">
-                    <Plot
-                        data={traces as any}
-                        layout={{
-                            title: { text: "Scalability: Drift by Network Size (5-50 Nodes)" },
-                            xaxis: { title: { text: "Time (s)", font: { color: "black" } }, range: getAxisRange(xMin, xMax), automargin: true },
-                            yaxis: { title: { text: "Aligned RMSE (m)", font: { color: "black" } }, type: "log", range: getAxisRange(yMin, yMax), automargin: true },
-                            width: 800,
-                            height: 500,
-                            margin: { l: 60, r: 20, b: 60, t: 80 }
-                        }}
-                        config={{ toImageButtonOptions: { format: 'svg', filename: 'scalability_plot', height: 500, width: 800, scale: 1 } }}
-                    />
-                    <p className="mt-2 text-sm text-gray-600 italic">
-                        Measures how the network's structural drift scales as the number of nodes increases from 5 to 50.
-                    </p>
+                <div className="flex flex-col gap-8">
+                    <div className="bg-white p-4 rounded shadow">
+                        <div className="flex justify-between items-center mb-2">
+                             <h3 className="font-bold text-lg">Position Error (RMSE)</h3>
+                             <label className="flex items-center gap-2 text-sm text-gray-600">
+                                <input
+                                    type="checkbox"
+                                    checked={useLogScaleC}
+                                    onChange={(e) => setUseLogScaleC(e.target.checked)}
+                                    className="rounded"
+                                />
+                                Use Log Scale
+                             </label>
+                        </div>
+                        <Plot
+                            data={traces as any}
+                            layout={{
+                                title: { text: "Scalability: Drift by Network Size (5-50 Nodes)" },
+                                xaxis: { title: { text: "Time (s)", font: { color: "black" } }, range: getAxisRange(xMin, xMax), automargin: true },
+                                yaxis: { title: { text: "Aligned RMSE (m)", font: { color: "black" } }, type: useLogScaleC ? "log" : "linear", range: getAxisRange(yMin, yMax), automargin: true },
+                                width: 800,
+                                height: 500,
+                                margin: { l: 60, r: 20, b: 60, t: 80 }
+                            }}
+                            config={{ toImageButtonOptions: { format: 'svg', filename: 'scalability_plot', height: 500, width: 800, scale: 1 } }}
+                        />
+                        <p className="mt-2 text-sm text-gray-600 italic">
+                            Measures how the network's structural drift scales as the number of nodes increases from 5 to 50.
+                        </p>
+                    </div>
+
+                    <div className="bg-white p-4 rounded shadow">
+                        <Plot
+                            data={
+                                nodeCounts.map((nc: any) => {
+                                    const subset = data.filter((d:any) => d.node_count === nc && d.scenario === filterScenarioC);
+                                    return {
+                                        x: subset.map((d:any) => d.time_s),
+                                        y: subset.map((d:any) => d.tx_per_node_per_min),
+                                        type: "scatter",
+                                        mode: "lines",
+                                        name: `N=${nc}`
+                                    };
+                                }) as any
+                            }
+                            layout={{
+                                title: { text: "Scalability: Message Rate by Network Size" },
+                                xaxis: { title: { text: "Time (s)", font: { color: "black" } }, range: getAxisRange(xMin, xMax), automargin: true },
+                                yaxis: { title: { text: "Tx / Node / Min", font: { color: "black" } }, range: getAxisRange(yMin, yMax), automargin: true },
+                                width: 800,
+                                height: 500,
+                                margin: { l: 60, r: 20, b: 60, t: 80 }
+                            }}
+                            config={{ toImageButtonOptions: { format: 'svg', filename: 'scalability_rate_plot', height: 500, width: 800, scale: 1 } }}
+                        />
+                        <p className="mt-2 text-sm text-gray-600 italic">
+                             Measures the average message rate required per node to maintain formation. As N increases, the contention might increase, but the rate per node should ideally remain stable or scale linearly.
+                        </p>
+                    </div>
                 </div>
             )
         }

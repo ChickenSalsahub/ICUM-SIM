@@ -31,6 +31,9 @@ export const EXPERIMENT_WORLD_BOUNDS_M = {
 export const MOTION_START_MS = 60_000;
 export const MOTION_STOP_MS = 120_000;
 
+export const MOTION_2_START_MS = 240_000;
+export const MOTION_2_STOP_MS = 300_000;
+
 export type SeededNode = { id: number; x: number; y: number };
 
 export type RunnerSnapshot = ReturnType<SimulationRunner["snapshot"]>;

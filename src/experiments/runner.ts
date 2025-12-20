@@ -76,9 +76,13 @@ export function main() {
 		);
 	}
 
+	console.log("Starting Experiment B...");
 	const b = runExperimentB();
+	console.log("Finished b (aggregated)");
 	const bRaw = runExperimentBRaw();
+	console.log("Finished bRaw");
 	const bSummary = runExperimentBSummary();
+	console.log("Finished bSummary");
 
 	// Experiment B (clean): anchor-free metrics only.
 	const headerBClean = "node_count,uwb_sigma_m,rmse_aligned_m,mae_aligned_m,pairwise_dist_mae_m\n";

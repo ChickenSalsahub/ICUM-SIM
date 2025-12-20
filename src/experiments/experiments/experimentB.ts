@@ -182,18 +182,23 @@ export function runExperimentB(): ExperimentBRow[] {
 	// Default Experiment B output is aggregated (median over multiple seeds) so that
 	// the resulting curve isn't dominated by one lucky/unlucky random realization.
 	const raw = runExperimentBRaw();
-	const bySigma = new Map<number, ExperimentBRowRaw[]>();
+	const byParams = new Map<string, ExperimentBRowRaw[]>();
 	for (const r of raw) {
-		const arr = bySigma.get(r.noiseSigma);
+		const key = `${r.nodeCount}_${r.noiseSigma}`;
+		const arr = byParams.get(key);
 		if (arr) arr.push(r);
-		else bySigma.set(r.noiseSigma, [r]);
+		else byParams.set(key, [r]);
 	}
 
-	return [...bySigma.entries()]
-		.sort(([a], [b]) => a - b)
-		.map(([sigma, rows]) => ({
-			nodeCount: rows[0]?.nodeCount ?? 0,
-			noiseSigma: sigma,
+	return [...byParams.values()]
+		.sort((a, b) => {
+			const nc = a[0].nodeCount - b[0].nodeCount;
+			if (nc !== 0) return nc;
+			return a[0].noiseSigma - b[0].noiseSigma;
+		})
+		.map((rows) => ({
+			nodeCount: rows[0].nodeCount,
+			noiseSigma: rows[0].noiseSigma,
 			rmse: median(rows.map((r) => r.rmse)),
 			mae: median(rows.map((r) => r.mae)),
 			rmseAligned: median(rows.map((r) => r.rmseAligned)),
@@ -210,16 +215,22 @@ export function runExperimentB(): ExperimentBRow[] {
  */
 export function runExperimentBSummary(): ExperimentBSummaryRow[] {
 	const raw = runExperimentBRaw();
-	const bySigma = new Map<number, ExperimentBRowRaw[]>();
+	const byParams = new Map<string, ExperimentBRowRaw[]>();
 	for (const r of raw) {
-		const arr = bySigma.get(r.noiseSigma);
+		const key = `${r.nodeCount}_${r.noiseSigma}`;
+		const arr = byParams.get(key);
 		if (arr) arr.push(r);
-		else bySigma.set(r.noiseSigma, [r]);
+		else byParams.set(key, [r]);
 	}
 
-	return [...bySigma.entries()]
-		.sort(([a], [b]) => a - b)
-		.map(([sigma, rows]) => {
+	return [...byParams.values()]
+		.sort((a, b) => {
+			const nc = a[0].nodeCount - b[0].nodeCount;
+			if (nc !== 0) return nc;
+			return a[0].noiseSigma - b[0].noiseSigma;
+		})
+		.map((rows) => {
+			const sigma = rows[0].noiseSigma;
 			const rmseAlignedVals = rows.map((r) => r.rmseAligned);
 			const maeAlignedVals = rows.map((r) => r.maeAligned);
 			const pairwiseVals = rows.map((r) => r.pairwiseDistMae);
@@ -272,31 +283,38 @@ export function runExperimentBSummary(): ExperimentBSummaryRow[] {
 export function runExperimentBRaw(): ExperimentBRowRaw[] {
 	const rows: ExperimentBRowRaw[] = [];
 	const simSeconds = 300;
-	const nodeCount = 8;
 	const baseSeed = getCliSeed(1);
-	const layout = makeSeed(nodeCount, seededRng(baseSeed + 200));
+	const nodeCounts = [3, 8, 15];
 
 	// Keep this list stable: it defines the X-axis for the sensitivity curve.
 	const noiseSigmas = [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0];
 
 	// Increase for tighter confidence intervals; keep modest to avoid slow runs.
-	const seedCount = 10;
+	const seedCount = 5;
 
-	for (let k = 0; k < seedCount; k++) {
-		// Seed depends only on replicate index (NOT sigma) so randomness is comparable across the sweep.
-		const seed = baseSeed + 210 + k * 10_000;
-		for (const sigma of noiseSigmas) {
-			const { estNodes } = solvePoseGraphFromRanging({ seed, nodeLayout: layout, simSeconds, uwbNoiseSigma: sigma });
-			rows.push({
-				seed,
-				nodeCount,
-				noiseSigma: sigma,
-				rmse: rmse(estNodes as any),
-				mae: mae(estNodes as any),
-				rmseAligned: rmseAlignedRigid(estNodes as any),
-				maeAligned: aleAlignedRigid(estNodes as any),
-				pairwiseDistMae: pairwiseDistanceMae(estNodes as any),
-			});
+	for (const nodeCount of nodeCounts) {
+		const layout = makeSeed(nodeCount, seededRng(baseSeed + 200 + nodeCount));
+
+		for (let k = 0; k < seedCount; k++) {
+			// Seed depends only on replicate index (NOT sigma) so randomness is comparable across the sweep.
+			const seed = baseSeed + 210 + k * 10_000 + nodeCount;
+			for (const sigma of noiseSigmas) {
+				try {
+					const { estNodes } = solvePoseGraphFromRanging({ seed, nodeLayout: layout, simSeconds, uwbNoiseSigma: sigma });
+					rows.push({
+						seed,
+						nodeCount,
+						noiseSigma: sigma,
+						rmse: rmse(estNodes as any),
+						mae: mae(estNodes as any),
+						rmseAligned: rmseAlignedRigid(estNodes as any),
+						maeAligned: aleAlignedRigid(estNodes as any),
+						pairwiseDistMae: pairwiseDistanceMae(estNodes as any),
+					});
+				} catch (e: unknown) {
+					console.error(`ExpB Failed N=${nodeCount} Sig=${sigma}`, e);
+				}
+			}
 		}
 	}
 
