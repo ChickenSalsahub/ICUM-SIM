@@ -13,6 +13,7 @@ export enum PacketType {
 	DATA = "DATA",
 	ELECTION = "ELECTION",
 	PANIC = "PANIC",
+	UPLINK = "UPLINK",
 }
 
 export interface Packet {
@@ -32,6 +33,7 @@ export interface VisualPacket {
 	startX: number;
 	startY: number;
 	targetId: number;
+	sourceId?: number; // Optional source ID for dynamic link tracking
 	progress: number;
 	speed: number;
 	style: "LINE" | "RING";

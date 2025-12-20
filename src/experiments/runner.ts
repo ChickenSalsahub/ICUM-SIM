@@ -1,51 +1,31 @@
 import fs from "node:fs";
+import path from "node:path";
 import { pathToFileURL } from "url";
 import { EXPERIMENT_WORLD_BOUNDS_M } from "./lib/types.ts";
-import { writeCsv } from "./lib/csv.ts";
 import { runExperimentAScenariosWithOptions } from "./experiments/experimentA.ts";
-import { runExperimentB } from "./experiments/experimentB.ts";
+import { runExperimentB, runExperimentBRaw, runExperimentBSummary } from "./experiments/experimentB.ts";
 import { runExperimentCScenarios } from "./experiments/experimentC.ts";
 import { runExperimentDScenarios } from "./experiments/experimentD.ts";
 import { runExperimentE } from "./experiments/experimentE.ts";
 
-function fmtNoiseForFilename(noiseSigma: number): string {
-	// Keep filenames stable and easy to sort.
-	return noiseSigma.toFixed(2);
-}
-
-function scenarioToFilenameToken(scenario: string): string {
-	// e.g. "none_moving" -> "nonemoving" (matches paper/report-friendly filenames)
-	return scenario.replaceAll("_", "");
-}
-
-function policyToFilenameToken(policy: string): string {
-	// Keep policy tokens stable and filesystem-friendly.
-	return policy
-		.trim()
-		.toLowerCase()
-		.replaceAll(/[^a-z0-9]+/g, "");
-}
-
-function groupBy<T>(items: T[], keyFn: (t: T) => string): Map<string, T[]> {
-	const m = new Map<string, T[]>();
-	for (const item of items) {
-		const k = keyFn(item);
-		const arr = m.get(k);
-		if (arr) arr.push(item);
-		else m.set(k, [item]);
+function writePublicCsv(filename: string, header: string, rows: string[]) {
+	const outDir = path.join(process.cwd(), "public", "data");
+	if (!fs.existsSync(outDir)) {
+		fs.mkdirSync(outDir, { recursive: true });
 	}
-	return m;
+	const fullPath = path.join(outDir, filename);
+	fs.writeFileSync(fullPath, header + rows.join("\n"));
+	console.log(`${filename} written to public/data/`);
 }
 
-function cleanupLegacyOutputs(repoRoot: string) {
-	for (const entry of fs.readdirSync(repoRoot)) {
-		if (/^experiments_A_noise\d+\.\d{2}\.csv$/.test(entry)) {
-			fs.rmSync(entry);
+function cleanupLegacyOutputs() {
+	const outDir = path.join(process.cwd(), "public", "data");
+	if (fs.existsSync(outDir)) {
+		for (const entry of fs.readdirSync(outDir)) {
+			if (/^experiments_.*\.csv$/.test(entry)) {
+				fs.rmSync(path.join(outDir, entry));
+			}
 		}
-	}
-
-	for (const filename of ["experiments_C.csv", "experiments_D.csv", "experiments_E.csv"]) {
-		if (fs.existsSync(filename)) fs.rmSync(filename);
 	}
 }
 
@@ -57,123 +37,143 @@ function txPerNodePerMin(totalTx: number, nodeCount: number, timeSeconds: number
 }
 
 export function main() {
-	cleanupLegacyOutputs(process.cwd());
+	cleanupLegacyOutputs();
 
 	console.log(
 		`World bounds enabled: x=[${EXPERIMENT_WORLD_BOUNDS_M.minX}, ${EXPERIMENT_WORLD_BOUNDS_M.maxX}] y=[${EXPERIMENT_WORLD_BOUNDS_M.minY}, ${EXPERIMENT_WORLD_BOUNDS_M.maxY}]`
 	);
 
 	// Experiment A: compare baseline periodic vs ETM across a few noise levels.
-	const noiseSigmasA = [0, 0.05, 0.2];
-	for (const uwbNoiseSigma of noiseSigmasA) {
-		const rows = runExperimentAScenariosWithOptions({ uwbNoiseSigma });
-		const byScenario = groupBy(rows, (r) => r.scenario);
-		for (const [scenario, scenarioRows] of byScenario.entries()) {
-			const filename = `experiments_A_${scenarioToFilenameToken(scenario)}_noise${fmtNoiseForFilename(
-				uwbNoiseSigma
-			)}.csv`;
-			writeCsv(
-				filename,
-				"Scenario,Time,Baseline_Tx,Baseline_TxPerNodePerMin,Baseline_RMSE,ETM_Tx,ETM_TxPerNodePerMin,ETM_RMSE,Baseline_MAE,Baseline_RMSE_Aligned,Baseline_MAE_Aligned,Baseline_PairwiseDist_MAE,Baseline_RangeResidual_MAE,Baseline_AngleResidual_MAE,ETM_MAE,ETM_RMSE_Aligned,ETM_MAE_Aligned,ETM_PairwiseDist_MAE,ETM_RangeResidual_MAE,ETM_AngleResidual_MAE\n",
-				scenarioRows.map((r) =>
-					[
-						r.scenario,
-						r.timeSeconds,
-						r.baselineTx,
-						txPerNodePerMin(r.baselineTx, 10, r.timeSeconds),
-						r.baselineRmse,
-						r.etmTx,
-						txPerNodePerMin(r.etmTx, 10, r.timeSeconds),
-						r.etmRmse,
-						r.baselineMae,
-						r.baselineRmseAligned,
-						r.baselineMaeAligned,
-						r.baselinePairwiseDistMae,
-						r.baselineRangeResidualMae,
-						r.baselineAngleResidualMae,
-						r.etmMae,
-						r.etmRmseAligned,
-						r.etmMaeAligned,
-						r.etmPairwiseDistMae,
-						r.etmRangeResidualMae,
-						r.etmAngleResidualMae,
-					].join(",")
-				)
-			);
+	{
+		const noiseSigmasA = [0, 0.1, 0.5];
+		const allRows: any[] = [];
+
+		for (const uwbNoiseSigma of noiseSigmasA) {
+			const rows = runExperimentAScenariosWithOptions({ uwbNoiseSigma });
+			for (const r of rows) {
+				allRows.push({ ...r, uwbNoiseSigma });
+			}
 		}
+
+		writePublicCsv(
+			"experiments_A_all.csv",
+			"scenario,noise_sigma,time_s,baseline_tx_total,baseline_tx_per_node_per_min,baseline_rmse_aligned_m,baseline_mae_aligned_m,icum_tx_total,icum_tx_per_node_per_min,icum_rmse_aligned_m,icum_mae_aligned_m\n",
+			allRows.map((r) =>
+				[
+					r.scenario,
+					r.uwbNoiseSigma,
+					r.timeSeconds,
+					r.baselineTx,
+					txPerNodePerMin(r.baselineTx, 10, r.timeSeconds),
+					r.baselineRmseAligned,
+					r.baselineMaeAligned,
+					r.etmTx,
+					txPerNodePerMin(r.etmTx, 10, r.timeSeconds),
+					r.etmRmseAligned,
+					r.etmMaeAligned,
+				].join(",")
+			)
+		);
 	}
 
-	const headerB = "NodeCount,Noise,RMSE,MAE,RMSE_Aligned,MAE_Aligned,PairwiseDist_MAE\n";
-	writeCsv(
-		"experiments_B.csv",
-		headerB,
-		runExperimentB().map((r) =>
-			[r.nodeCount, r.noiseSigma, r.rmse, r.mae, r.rmseAligned, r.maeAligned, r.pairwiseDistMae].join(",")
+	console.log("Starting Experiment B...");
+	const b = runExperimentB();
+	console.log("Finished b (aggregated)");
+	const bRaw = runExperimentBRaw();
+	console.log("Finished bRaw");
+	const bSummary = runExperimentBSummary();
+	console.log("Finished bSummary");
+
+	// Experiment B (clean): anchor-free metrics only.
+	const headerBClean = "node_count,uwb_sigma_m,rmse_aligned_m,mae_aligned_m,pairwise_dist_mae_m\n";
+	writePublicCsv(
+		"experiments_B_clean.csv",
+		headerBClean,
+		b.map((r) => [r.nodeCount, r.noiseSigma, r.rmseAligned, r.maeAligned, r.pairwiseDistMae].join(","))
+	);
+
+	const headerBRawClean = "node_count,uwb_sigma_m,seed,rmse_aligned_m,mae_aligned_m,pairwise_dist_mae_m\n";
+	writePublicCsv(
+		"experiments_B_raw_clean.csv",
+		headerBRawClean,
+		bRaw.map((r) => [r.nodeCount, r.noiseSigma, r.seed, r.rmseAligned, r.maeAligned, r.pairwiseDistMae].join(","))
+	);
+
+	// Cleaner summary: median + IQR only for the anchor-free metrics most used in the report.
+	const headerBSummaryClean =
+		"node_count,uwb_sigma_m,n_seeds,rmse_aligned_median_m,rmse_aligned_p25_m,rmse_aligned_p75_m,mae_aligned_median_m,mae_aligned_p25_m,mae_aligned_p75_m,pairwise_dist_mae_median_m,pairwise_dist_mae_p25_m,pairwise_dist_mae_p75_m\n";
+	writePublicCsv(
+		"experiments_B_summary_clean.csv",
+		headerBSummaryClean,
+		bSummary.map((r) =>
+			[
+				r.nodeCount,
+				r.noiseSigma,
+				r.n,
+				r.rmseAligned_median,
+				r.rmseAligned_p25,
+				r.rmseAligned_p75,
+				r.maeAligned_median,
+				r.maeAligned_p25,
+				r.maeAligned_p75,
+				r.pairwiseDistMae_median,
+				r.pairwiseDistMae_p25,
+				r.pairwiseDistMae_p75,
+			].join(",")
 		)
 	);
 
 	{
 		const rows = runExperimentCScenarios();
-		const byScenario = groupBy(rows, (r) => r.scenario);
-		for (const [scenario, scenarioRows] of byScenario.entries()) {
-			writeCsv(
-				`experiments_C_${scenarioToFilenameToken(scenario)}.csv`,
-				"Scenario,Time,Nodes,TxPerNodePerMin,ALE,ConvergenceMs\n",
-				scenarioRows.map((r) =>
-					[r.scenario, r.timeSeconds, r.nodes, r.txPerNodePerMin, r.ale, r.convergenceMs ?? ""].join(",")
-				)
-			);
-		}
+		writePublicCsv(
+			`experiments_C_all.csv`,
+			"scenario,time_s,node_count,tx_per_node_per_min,rmse_aligned_m\n",
+			rows.map((r) =>
+				[
+					r.scenario,
+					r.timeSeconds,
+					r.nodes,
+					r.txPerNodePerMin,
+					r.rmse,
+				].join(",")
+			)
+		);
 	}
 
 	{
 		const rows = runExperimentDScenarios();
-		const byScenario = groupBy(rows, (r) => r.scenario);
-		for (const [scenario, scenarioRows] of byScenario.entries()) {
-			writeCsv(
-				`experiments_D_${scenarioToFilenameToken(scenario)}.csv`,
-				"Scenario,Time,Nodes,CloudBaseline_RMSE,CloudRobust_RMSE,CoverageBaseline,CoverageRobust\n",
-				scenarioRows.map((r) =>
-					[
-						r.scenario,
-						r.timeSeconds,
-						r.nodes,
-						r.cloudBaselineRmse,
-						r.cloudRobustRmse,
-						r.coverageBaseline,
-						r.coverageRobust,
-					].join(",")
-				)
-			);
-		}
+		writePublicCsv(
+			`experiments_D_all.csv`,
+			"scenario,time_s,node_count,cloud_rmse_m,cloud_coverage_nodes\n",
+			rows.map((r) =>
+				[
+					r.scenario,
+					r.timeSeconds,
+					r.nodes,
+					r.cloudRmse,
+					r.cloudCoverage,
+				].join(",")
+			)
+		);
 	}
 
 	{
 		const rows = runExperimentE();
-		const headerE = "Scenario,Policy,Seed,Time,TxTotal,TxPerNodePerMin,RMSE,RangeResidual_MAE,AngleResidual_MAE\n";
-		const byScenario = groupBy(rows, (r) => r.scenario);
-		for (const [scenario, scenarioRows] of byScenario.entries()) {
-			const byPolicy = groupBy(scenarioRows, (r) => r.policy);
-			for (const [policy, policyRows] of byPolicy.entries()) {
-				writeCsv(
-					`experiments_E_${scenarioToFilenameToken(scenario)}_${policyToFilenameToken(policy)}.csv`,
-					headerE,
-					policyRows.map((r) =>
-						[
-							r.scenario,
-							r.policy,
-							r.seed,
-							r.timeSeconds,
-							r.txTotal,
-							txPerNodePerMin(r.txTotal, 10, r.timeSeconds),
-							r.rmse,
-							r.rangeResidualMae,
-							r.angleResidualMae,
-						].join(",")
-					)
-				);
-			}
-		}
+		writePublicCsv(
+			`experiments_E_all.csv`,
+			"scenario,policy,seed,time_s,tx_total,tx_per_node_per_min,rmse_aligned_m\n",
+			rows.map((r) =>
+				[
+					r.scenario,
+					r.policy,
+					r.seed,
+					r.timeSeconds,
+					r.txTotal,
+					txPerNodePerMin(r.txTotal, 10, r.timeSeconds),
+					r.rmse,
+				].join(",")
+			)
+		);
 	}
 }
 const isMain = () => import.meta.url === pathToFileURL(process.argv[1]).href;

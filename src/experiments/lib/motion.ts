@@ -1,5 +1,11 @@
 import type { SimulationRunner } from "../../engine/SimulationRunner.ts";
-import { MOTION_START_MS, MOTION_STOP_MS, type MotionScenarioName } from "./types.ts";
+import {
+	MOTION_2_START_MS,
+	MOTION_2_STOP_MS,
+	MOTION_START_MS,
+	MOTION_STOP_MS,
+	type MotionScenarioName,
+} from "./types.ts";
 
 /**
  * Applies the shared motion scenario used across multiple experiments.
@@ -13,28 +19,63 @@ import { MOTION_START_MS, MOTION_STOP_MS, type MotionScenarioName } from "./type
  */
 export function applyMotionScenario(runner: SimulationRunner, scenario: MotionScenarioName, tMs: number) {
 	if (scenario === "none_moving") return;
-	if (tMs !== MOTION_START_MS && tMs !== MOTION_STOP_MS) return;
 
-	const moving = tMs === MOTION_START_MS;
+	const moving1 = tMs >= MOTION_START_MS && tMs < MOTION_STOP_MS;
+	const moving2 = tMs >= MOTION_2_START_MS && tMs < MOTION_2_STOP_MS;
+	const moving = moving1 || moving2;
 	const nodeIds = new Set(runner.getNodeIds());
-	const setVel = (id: number, v: { vx: number; vy: number }) => {
-		if (!nodeIds.has(id)) return;
-		runner.setNodeVelocity(id, v);
-	};
 
-	// Velocity palette (m/s).
-	const palette: Array<{ id: number; v: { vx: number; vy: number } }> = [
-		{ id: 2, v: { vx: 0.5, vy: 0.0 } },
-		{ id: 3, v: { vx: 0.0, vy: 0.5 } },
-		{ id: 4, v: { vx: -0.35, vy: 0.35 } },
-		{ id: 5, v: { vx: 0.25, vy: -0.4 } },
-		{ id: 6, v: { vx: -0.45, vy: 0.1 } },
-		{ id: 7, v: { vx: 0.15, vy: 0.45 } },
-		{ id: 8, v: { vx: -0.2, vy: -0.35 } },
-	];
+	if (!moving) {
+		// Stop nodes if we are past the motion window or just before it starts.
+		// We use a small window check to avoid setting velocity 0 every single tick
+		// while still ensuring it happens at the transitions even with different dtMs.
+		const isAtEnd1 = tMs >= MOTION_STOP_MS && tMs < MOTION_STOP_MS + 2000;
+		const isAtStart1 = tMs >= MOTION_START_MS - 2000 && tMs < MOTION_START_MS;
+		const isAtEnd2 = tMs >= MOTION_2_STOP_MS && tMs < MOTION_2_STOP_MS + 2000;
+		const isAtStart2 = tMs >= MOTION_2_START_MS - 2000 && tMs < MOTION_2_START_MS;
 
-	const subset = scenario === "few_moving" ? palette.slice(0, 3) : palette; // 2-4 vs 2-8
-	for (const { id, v } of subset) {
-		setVel(id, moving ? v : { vx: 0, vy: 0 });
+		if (isAtEnd1 || isAtStart1 || isAtEnd2 || isAtStart2) {
+			for (const id of nodeIds) {
+				runner.setNodeVelocity(id, { vx: 0, vy: 0 });
+			}
+		}
+		return;
+	}
+
+	const allNodeIds = Array.from(nodeIds).sort((a, b) => a - b);
+	const gatewayId = allNodeIds[0]; // Assume first node is gateway
+	const candidates = allNodeIds.filter(id => id !== gatewayId);
+
+	// Select how many nodes to move
+	let movingCount = 0;
+	if (scenario === "few_moving") {
+		movingCount = Math.max(1, Math.floor(candidates.length * 0.3));
+	} else if (scenario === "many_moving") {
+		movingCount = Math.max(1, Math.floor(candidates.length * 0.7));
+	}
+	
+	const movingIds = candidates.slice(0, movingCount);
+
+	const elapsedSec = (tMs - MOTION_START_MS) / 1000;
+
+	for (const id of movingIds) {
+		// Circular motion parameters
+		const speedCombined = 1.2; // m/s - realistic walking speed
+		// Varied radius based on ID so they don't overlap perfectly
+		// Tighter radius (1-3m) to keep nodes within their local clusters
+		const radius = 1 + (id % 3); 
+		const omega = speedCombined / radius; // rad/s
+
+		// Different phase for each node so they don't move in sync
+		const phase = (id * Math.PI) / 4; 
+		const angle = phase + omega * elapsedSec;
+
+		const vx = speedCombined * Math.cos(angle);
+		const vy = speedCombined * Math.sin(angle);
+
+		// Flip direction for some nodes to add variety
+		const dir = id % 2 === 0 ? 1 : -1;
+		
+		runner.setNodeVelocity(id, { vx: vx * dir, vy: vy * dir });
 	}
 }

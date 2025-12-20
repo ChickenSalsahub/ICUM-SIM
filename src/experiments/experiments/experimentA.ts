@@ -62,36 +62,47 @@ export function runExperimentAScenarios(): ExperimentAScenarioTimeRow[] {
 }
 
 export function runExperimentAScenariosWithOptions(options: ExperimentAOptions): ExperimentAScenarioTimeRow[] {
+	const perfectChannel = options.uwbNoiseSigma === 0;
+	const packetLoss = perfectChannel ? 0 : 0.1;
+	const uwbAngleNoiseStdRad = perfectChannel ? 0 : 0.05;
+
 	const baseSeed = getCliSeed(1);
 	const layout = makeSeed(10, seededRng(baseSeed + 100));
 	const scenarios: MotionScenarioName[] = ["none_moving", "few_moving", "many_moving"];
 	const rows: ExperimentAScenarioTimeRow[] = [];
 
 	for (const scenario of scenarios) {
-		// Separate seeds per scenario so stochastic effects don't correlate across scenarios.
-		const scenarioOffset = scenario === "none_moving" ? 0 : scenario === "few_moving" ? 10_000 : 20_000;
-
 		// Baseline: periodic HELLO/RANGING regardless of motion state.
 		const baseline = new SimulationRunner({
 			uwbNoiseSigma: options.uwbNoiseSigma,
+			uwbAngleNoiseStdRad,
+			packetLoss,
 			worldBounds: EXPERIMENT_WORLD_BOUNDS_M,
-			seed: baseSeed + 101 + scenarioOffset,
+			seed: baseSeed + 101, // Same seed across scenarios for fair comparison
 			firmwareConfig: {
 				eventDrivenSensing: false,
-				helloIntervalMovingMs: 2_000,
-				helloIntervalIdleMs: 2_000,
-				rangingIntervalMovingMs: 2_000,
-				rangingIntervalIdleMs: 2_000,
+				helloIntervalMovingMs: 500,
+				helloIntervalIdleMs: 500,
+				rangingIntervalMovingMs: 500,
+				rangingIntervalIdleMs: 500,
 				neighborTimeoutMs: 5_000,
+				learningRate: 0.8,
 			},
 		});
 
 		// ETM/ICUM: event-driven sensing while stationary+stable.
 		const etm = new SimulationRunner({
 			uwbNoiseSigma: options.uwbNoiseSigma,
+			uwbAngleNoiseStdRad,
+			packetLoss,
 			worldBounds: EXPERIMENT_WORLD_BOUNDS_M,
-			seed: baseSeed + 102 + scenarioOffset,
-			firmwareConfig: { eventDrivenSensing: true },
+			seed: baseSeed + 102, // Same seed across scenarios for fair comparison
+			firmwareConfig: {
+				eventDrivenSensing: true,
+				rangingIntervalMovingMs: 500,
+				helloIntervalMovingMs: 500,
+				learningRate: 0.8,
+			},
 		});
 
 		seedNodes(baseline, layout);

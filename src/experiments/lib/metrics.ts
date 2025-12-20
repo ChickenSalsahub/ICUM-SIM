@@ -45,7 +45,8 @@ export function ale(nodes: RunnerSnapshot["nodes"]) {
 	return mae(nodes);
 }
 
-type Pt = { x: number; y: number };
+
+export type Pt = { x: number; y: number };
 
 function meanPoint(points: Pt[]): Pt {
 	let sumX = 0;
@@ -66,9 +67,9 @@ function meanPoint(points: Pt[]): Pt {
  * identifiable up to a global rotation/translation. Measuring raw absolute
  * error can look "stuck" even when the relative geometry has converged.
  */
-type Rigid2D = { c: number; s: number; tx: number; ty: number; flipY?: boolean };
+export type Rigid2D = { c: number; s: number; tx: number; ty: number; flipY?: boolean };
 
-function bestFitRigid2D(truth: Pt[], est: Pt[]): Rigid2D | undefined {
+export function bestFitRigid2D(truth: Pt[], est: Pt[]): Rigid2D | undefined {
 	if (truth.length !== est.length) return undefined;
 	if (truth.length < 2) return undefined;
 
@@ -134,7 +135,7 @@ function bestFitRigid2D(truth: Pt[], est: Pt[]): Rigid2D | undefined {
 	return sseFlip < sseNo ? tfFlip : tfNo;
 }
 
-function applyRigid2D(p: Pt, tf: Rigid2D): Pt {
+export function applyRigid2D(p: Pt, tf: Rigid2D): Pt {
 	const y = tf.flipY ? -p.y : p.y;
 	return {
 		x: tf.c * p.x - tf.s * y + tf.tx,
@@ -146,57 +147,167 @@ function applyRigid2D(p: Pt, tf: Rigid2D): Pt {
  * Anchor-free ALE: aligns estimated positions to truth before scoring.
  */
 export function aleAlignedRigid(nodes: RunnerSnapshot["nodes"]) {
+	const nodeIds: number[] = [];
 	const truth: Pt[] = [];
 	const est: Pt[] = [];
 	for (const node of nodes) {
 		const p = node.firmware.estPosition;
 		if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) return Number.NaN;
+		nodeIds.push(node.id);
 		truth.push({ x: node.trueX, y: node.trueY });
 		est.push({ x: p.x, y: p.y });
 	}
 
-	const tf = bestFitRigid2D(truth, est);
-	if (!tf) {
-		// Fallback to raw ALE (mainly for tiny N).
-		return ale(nodes);
+	const idToIndex = new Map<number, number>();
+	for (let i = 0; i < nodeIds.length; i++) idToIndex.set(nodeIds[i], i);
+
+	const adjacency: number[][] = Array.from({ length: nodes.length }, () => []);
+	let edgeCount = 0;
+	for (const node of nodes) {
+		const i = idToIndex.get(node.id);
+		if (i === undefined) continue;
+		for (const nb of node.firmware.neighbors) {
+			const j = idToIndex.get(nb.id);
+			if (j === undefined || j === i) continue;
+			adjacency[i].push(j);
+			// Treat as undirected.
+			adjacency[j].push(i);
+			edgeCount++;
+		}
+	}
+
+	const components: number[][] = [];
+	if (edgeCount === 0) {
+		components.push(Array.from({ length: nodes.length }, (_, i) => i));
+	} else {
+		const visited = new Array<boolean>(nodes.length).fill(false);
+		for (let i = 0; i < nodes.length; i++) {
+			if (visited[i]) continue;
+			const comp: number[] = [];
+			const stack = [i];
+			visited[i] = true;
+			while (stack.length > 0) {
+				const cur = stack.pop()!;
+				comp.push(cur);
+				for (const nb of adjacency[cur]) {
+					if (visited[nb]) continue;
+					visited[nb] = true;
+					stack.push(nb);
+				}
+			}
+			components.push(comp);
+		}
 	}
 
 	let sum = 0;
-	for (let i = 0; i < nodes.length; i++) {
-		const aligned = applyRigid2D(est[i], tf);
-		const dx = aligned.x - truth[i].x;
-		const dy = aligned.y - truth[i].y;
-		sum += Math.sqrt(dx * dx + dy * dy);
+	let validCount = 0;
+	for (const comp of components) {
+		if (comp.length < 2) {
+			// Skip isolated nodes in anchor-free ALE calculation.
+			// Falling back to absolute error for single nodes is misleading
+			// because the coordinate frame origin is arbitrary.
+			continue;
+		}
+
+		const truthC = comp.map((i) => truth[i]);
+		const estC = comp.map((i) => est[i]);
+		const tf = bestFitRigid2D(truthC, estC);
+		if (!tf) {
+			continue;
+		}
+
+		for (const i of comp) {
+			const aligned = applyRigid2D(est[i], tf);
+			const dx = aligned.x - truth[i].x;
+			const dy = aligned.y - truth[i].y;
+			sum += Math.hypot(dx, dy);
+			validCount++;
+		}
 	}
-	return sum / nodes.length;
+	return validCount > 0 ? sum / validCount : Number.NaN;
 }
 
 /**
  * Anchor-free RMSE: rigidly aligns estimated positions to truth before scoring.
  */
 export function rmseAlignedRigid(nodes: RunnerSnapshot["nodes"]) {
+	const nodeIds: number[] = [];
 	const truth: Pt[] = [];
 	const est: Pt[] = [];
 	for (const node of nodes) {
 		const p = node.firmware.estPosition;
 		if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) return Number.NaN;
+		nodeIds.push(node.id);
 		truth.push({ x: node.trueX, y: node.trueY });
 		est.push({ x: p.x, y: p.y });
 	}
 
-	const tf = bestFitRigid2D(truth, est);
-	if (!tf) {
-		return rmse(nodes);
+	const idToIndex = new Map<number, number>();
+	for (let i = 0; i < nodeIds.length; i++) idToIndex.set(nodeIds[i], i);
+
+	const adjacency: number[][] = Array.from({ length: nodes.length }, () => []);
+	let edgeCount = 0;
+	for (const node of nodes) {
+		const i = idToIndex.get(node.id);
+		if (i === undefined) continue;
+		for (const nb of node.firmware.neighbors) {
+			const j = idToIndex.get(nb.id);
+			if (j === undefined || j === i) continue;
+			adjacency[i].push(j);
+			adjacency[j].push(i);
+			edgeCount++;
+		}
+	}
+
+	const components: number[][] = [];
+	if (edgeCount === 0) {
+		components.push(Array.from({ length: nodes.length }, (_, i) => i));
+	} else {
+		const visited = new Array<boolean>(nodes.length).fill(false);
+		for (let i = 0; i < nodes.length; i++) {
+			if (visited[i]) continue;
+			const comp: number[] = [];
+			const stack = [i];
+			visited[i] = true;
+			while (stack.length > 0) {
+				const cur = stack.pop()!;
+				comp.push(cur);
+				for (const nb of adjacency[cur]) {
+					if (visited[nb]) continue;
+					visited[nb] = true;
+					stack.push(nb);
+				}
+			}
+			components.push(comp);
+		}
 	}
 
 	let sumSq = 0;
-	for (let i = 0; i < nodes.length; i++) {
-		const aligned = applyRigid2D(est[i], tf);
-		const dx = aligned.x - truth[i].x;
-		const dy = aligned.y - truth[i].y;
-		sumSq += dx * dx + dy * dy;
+	let validCount = 0;
+	for (const comp of components) {
+		if (comp.length < 2) {
+			// Skip isolated nodes in anchor-free RMSE calculation.
+			// Falling back to absolute error for single nodes is misleading
+			// because the coordinate frame origin is arbitrary.
+			continue;
+		}
+
+		const truthC = comp.map((i) => truth[i]);
+		const estC = comp.map((i) => est[i]);
+		const tf = bestFitRigid2D(truthC, estC);
+		if (!tf) {
+			continue;
+		}
+
+		for (const i of comp) {
+			const aligned = applyRigid2D(est[i], tf);
+			const dx = aligned.x - truth[i].x;
+			const dy = aligned.y - truth[i].y;
+			sumSq += dx * dx + dy * dy;
+			validCount++;
+		}
 	}
-	return Math.sqrt(sumSq / nodes.length);
+	return validCount > 0 ? Math.sqrt(sumSq / validCount) : Number.NaN;
 }
 
 /**

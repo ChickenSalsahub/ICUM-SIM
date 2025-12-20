@@ -7,7 +7,7 @@ function link(id: number, range: number) {
 
 describe("CloudBackend", () => {
 	it("produces fused records without any x/y anchors", () => {
-		const cloud = new CloudBackend({ robustFusion: false });
+		const cloud = new CloudBackend();
 		// Triangle-ish ranges; AoA omitted/ignored by using 0.
 		cloud.ingest({
 			nodeId: 1,

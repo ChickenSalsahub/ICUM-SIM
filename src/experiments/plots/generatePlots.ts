@@ -178,8 +178,8 @@ function listCsvFilesMatching(repoRoot: string, re: RegExp): string[] {
 }
 
 function plotExperimentA(opts: { repoRoot: string; outDir: string }) {
-	// A produces one CSV per (scenario, noise): experiments_A_<scenario>_noise<xx>.csv
-	const files = listCsvFilesMatching(opts.repoRoot, /^experiments_A_[a-z]+_noise\d+\.\d{2}\.csv$/);
+	// A produces one CSV per (scenario, noise): experiments_A_<scenario>_noise<xx>_clean.csv
+	const files = listCsvFilesMatching(opts.repoRoot, /^experiments_A_[a-z]+_noise\d+\.\d{2}_clean\.csv$/);
 	const outputs: { file: string; label: string }[] = [];
 
 	for (const csvName of files) {
@@ -187,13 +187,13 @@ function plotExperimentA(opts: { repoRoot: string; outDir: string }) {
 		const t = parseCsv(readText(csvPath));
 		const rows = t.rows;
 		if (rows.length === 0) continue;
-		const scenario = rows[0]?.["Scenario"] ?? "";
-		const sorted = [...rows].sort((a, b) => num(a, "Time") - num(b, "Time"));
-		const x = sorted.map((r) => num(r, "Time"));
+		const scenario = rows[0]?.["scenario"] ?? "";
+		const sorted = [...rows].sort((a, b) => num(a, "time_s") - num(b, "time_s"));
+		const x = sorted.map((r) => num(r, "time_s"));
 		const traces: any[] = [
 			{
 				x,
-				y: sorted.map((r) => num(r, "Baseline_MAE_Aligned")),
+				y: sorted.map((r) => num(r, "baseline_mae_aligned_m")),
 				mode: "lines",
 				name: "Baseline",
 				line: { width: 2 },
@@ -202,16 +202,16 @@ function plotExperimentA(opts: { repoRoot: string; outDir: string }) {
 			},
 			{
 				x,
-				y: sorted.map((r) => num(r, "ETM_MAE_Aligned")),
+				y: sorted.map((r) => num(r, "icum_mae_aligned_m")),
 				mode: "lines",
-				name: "ETM",
+				name: "ICUM",
 				line: { width: 2 },
 				xaxis: "x",
 				yaxis: "y",
 			},
 			{
 				x,
-				y: sorted.map((r) => num(r, "Baseline_RangeResidual_MAE")),
+				y: sorted.map((r) => num(r, "baseline_tx_total")),
 				mode: "lines",
 				name: "Baseline",
 				showlegend: false,
@@ -221,69 +221,25 @@ function plotExperimentA(opts: { repoRoot: string; outDir: string }) {
 			},
 			{
 				x,
-				y: sorted.map((r) => num(r, "ETM_RangeResidual_MAE")),
+				y: sorted.map((r) => num(r, "icum_tx_total")),
 				mode: "lines",
-				name: "ETM",
+				name: "ICUM",
 				showlegend: false,
 				line: { width: 2 },
 				xaxis: "x2",
 				yaxis: "y2",
-			},
-			{
-				x,
-				y: sorted.map((r) => num(r, "Baseline_AngleResidual_MAE")),
-				mode: "lines",
-				name: "Baseline",
-				showlegend: false,
-				line: { width: 2 },
-				xaxis: "x3",
-				yaxis: "y3",
-			},
-			{
-				x,
-				y: sorted.map((r) => num(r, "ETM_AngleResidual_MAE")),
-				mode: "lines",
-				name: "ETM",
-				showlegend: false,
-				line: { width: 2 },
-				xaxis: "x3",
-				yaxis: "y3",
-			},
-			{
-				x,
-				y: sorted.map((r) => num(r, "Baseline_Tx")),
-				mode: "lines",
-				name: "Baseline",
-				showlegend: false,
-				line: { width: 2 },
-				xaxis: "x4",
-				yaxis: "y4",
-			},
-			{
-				x,
-				y: sorted.map((r) => num(r, "ETM_Tx")),
-				mode: "lines",
-				name: "ETM",
-				showlegend: false,
-				line: { width: 2 },
-				xaxis: "x4",
-				yaxis: "y4",
 			},
 		];
 
-		const tag = csvName.replace("experiments_A_", "").replace(".csv", "");
+		const tag = csvName.replace("experiments_A_", "").replace("_clean.csv", "");
 		const title = `Experiment A — ${scenario} — ${tag}`;
 		const layout: any = {
 			...baseLayout(title),
-			grid: { rows: 4, columns: 1, pattern: "independent" },
+			grid: { rows: 2, columns: 1, pattern: "independent" },
 			xaxis: { title: "Time (s)" },
-			yaxis: { title: "MAE_Aligned (m)", rangemode: "tozero" },
+			yaxis: { title: "MAE aligned (m)", rangemode: "tozero" },
 			xaxis2: { title: "Time (s)" },
-			yaxis2: { title: "RangeResidual_MAE (m)", rangemode: "tozero" },
-			xaxis3: { title: "Time (s)" },
-			yaxis3: { title: "AngleResidual_MAE (rad)", rangemode: "tozero" },
-			xaxis4: { title: "Time (s)" },
-			yaxis4: { title: "Tx total (count)", rangemode: "tozero" },
+			yaxis2: { title: "Tx total (count)", rangemode: "tozero" },
 		};
 
 		const outFile = `experimentA_${escapeJsFilename(tag)}.html`;
@@ -295,19 +251,19 @@ function plotExperimentA(opts: { repoRoot: string; outDir: string }) {
 }
 
 function plotExperimentB(opts: { repoRoot: string; outDir: string }) {
-	const csvPath = path.join(opts.repoRoot, "experiments_B.csv");
+	const csvPath = path.join(opts.repoRoot, "experiments_B_clean.csv");
 	if (!fs.existsSync(csvPath)) return [];
 	const t = parseCsv(readText(csvPath));
 
 	// Report-friendly: one metric per chart.
-	const byNodeCount = groupBy(t.rows, (r) => r["NodeCount"] ?? "");
+	const byNodeCount = groupBy(t.rows, (r) => r["node_count"] ?? "");
 
 	const buildTraces = (yKey: string, label: string) => {
 		const traces: any[] = [];
 		for (const [nodeCount, rows] of byNodeCount.entries()) {
-			const sorted = [...rows].sort((a, b) => num(a, "Noise") - num(b, "Noise"));
+			const sorted = [...rows].sort((a, b) => num(a, "uwb_sigma_m") - num(b, "uwb_sigma_m"));
 			traces.push({
-				x: sorted.map((r) => num(r, "Noise")),
+				x: sorted.map((r) => num(r, "uwb_sigma_m")),
 				y: sorted.map((r) => num(r, yKey)),
 				mode: "lines+markers",
 				name: `N=${nodeCount}`,
@@ -324,13 +280,13 @@ function plotExperimentB(opts: { repoRoot: string; outDir: string }) {
 
 	const pages: { file: string; label: string }[] = [];
 	{
-		const { traces, title, layout } = buildTraces("MAE_Aligned", "MAE_Aligned");
+		const { traces, title, layout } = buildTraces("mae_aligned_m", "MAE aligned");
 		const outFile = "experimentB_maeAligned.html";
 		writeHtml(path.join(opts.outDir, outFile), title, JSON.stringify(traces), JSON.stringify(layout));
 		pages.push({ file: outFile, label: title });
 	}
 	{
-		const { traces, title, layout } = buildTraces("PairwiseDist_MAE", "PairwiseDist_MAE");
+		const { traces, title, layout } = buildTraces("pairwise_dist_mae_m", "Pairwise dist MAE");
 		const outFile = "experimentB_pairwise.html";
 		writeHtml(path.join(opts.outDir, outFile), title, JSON.stringify(traces), JSON.stringify(layout));
 		pages.push({ file: outFile, label: title });
@@ -340,21 +296,21 @@ function plotExperimentB(opts: { repoRoot: string; outDir: string }) {
 }
 
 function plotExperimentC(opts: { repoRoot: string; outDir: string }) {
-	const files = listCsvFilesMatching(opts.repoRoot, /^experiments_C_[a-z]+\.csv$/);
+	const files = listCsvFilesMatching(opts.repoRoot, /^experiments_C_[a-z]+_clean\.csv$/);
 	const pages: { file: string; label: string }[] = [];
 	for (const csvName of files) {
 		const t = parseCsv(readText(path.join(opts.repoRoot, csvName)));
 		if (t.rows.length === 0) continue;
-		const scenario = t.rows[0]?.["Scenario"] ?? csvName.replace("experiments_C_", "").replace(".csv", "");
+		const scenario = t.rows[0]?.["scenario"] ?? csvName.replace("experiments_C_", "").replace("_clean.csv", "");
 
-		const byNodes = groupBy(t.rows, (r) => r["Nodes"] ?? "");
+		const byNodes = groupBy(t.rows, (r) => r["node_count"] ?? "");
 		const points = Array.from(byNodes.entries()).map(([nodes, samples]) => {
-			const best = [...samples].sort((a, b) => num(b, "Time") - num(a, "Time"))[0];
+			const best = [...samples].sort((a, b) => num(b, "time_s") - num(a, "time_s"))[0];
 			return {
 				nodes: Number(nodes),
-				ale: num(best, "ALE"),
-				tx: num(best, "TxPerNodePerMin"),
-				convMs: num(best, "ConvergenceMs"),
+				ale: num(best, "ale_aligned_m"),
+				tx: num(best, "tx_per_node_per_min"),
+				convMs: num(best, "convergence_stable_ms"),
 			};
 		});
 		points.sort((a, b) => a.nodes - b.nodes);
@@ -407,18 +363,18 @@ function plotExperimentC(opts: { repoRoot: string; outDir: string }) {
 }
 
 function plotExperimentD(opts: { repoRoot: string; outDir: string }) {
-	const files = listCsvFilesMatching(opts.repoRoot, /^experiments_D_[a-z]+\.csv$/);
+	const files = listCsvFilesMatching(opts.repoRoot, /^experiments_D_[a-z]+_clean\.csv$/);
 	const pages: { file: string; label: string }[] = [];
 	for (const csvName of files) {
 		const t = parseCsv(readText(path.join(opts.repoRoot, csvName)));
 		if (t.rows.length === 0) continue;
-		const scenario = t.rows[0]?.["Scenario"] ?? csvName.replace("experiments_D_", "").replace(".csv", "");
-		const sorted = [...t.rows].sort((a, b) => num(a, "Time") - num(b, "Time"));
-		const x = sorted.map((r) => num(r, "Time"));
+		const scenario = t.rows[0]?.["scenario"] ?? csvName.replace("experiments_D_", "").replace("_clean.csv", "");
+		const sorted = [...t.rows].sort((a, b) => num(a, "time_s") - num(b, "time_s"));
+		const x = sorted.map((r) => num(r, "time_s"));
 		const traces: any[] = [
 			{
 				x,
-				y: sorted.map((r) => num(r, "CloudBaseline_RMSE")),
+				y: sorted.map((r) => num(r, "cloud_baseline_rmse_m")),
 				mode: "lines",
 				name: "Baseline",
 				xaxis: "x",
@@ -426,7 +382,7 @@ function plotExperimentD(opts: { repoRoot: string; outDir: string }) {
 			},
 			{
 				x,
-				y: sorted.map((r) => num(r, "CloudRobust_RMSE")),
+				y: sorted.map((r) => num(r, "cloud_robust_rmse_m")),
 				mode: "lines",
 				name: "Robust",
 				xaxis: "x",
@@ -434,7 +390,7 @@ function plotExperimentD(opts: { repoRoot: string; outDir: string }) {
 			},
 			{
 				x,
-				y: sorted.map((r) => num(r, "CoverageBaseline")),
+				y: sorted.map((r) => num(r, "coverage_baseline_nodes")),
 				mode: "lines",
 				name: "Baseline",
 				showlegend: false,
@@ -443,7 +399,7 @@ function plotExperimentD(opts: { repoRoot: string; outDir: string }) {
 			},
 			{
 				x,
-				y: sorted.map((r) => num(r, "CoverageRobust")),
+				y: sorted.map((r) => num(r, "coverage_robust_nodes")),
 				mode: "lines",
 				name: "Robust",
 				showlegend: false,
@@ -471,15 +427,15 @@ function plotExperimentD(opts: { repoRoot: string; outDir: string }) {
 }
 
 function plotExperimentE(opts: { repoRoot: string; outDir: string }) {
-	// E produces one CSV per (scenario, policy): experiments_E_<scenario>_<policy>.csv
-	const files = listCsvFilesMatching(opts.repoRoot, /^experiments_E_[a-z]+_[a-z0-9]+\.csv$/);
+	// E produces one CSV per (scenario, policy): experiments_E_<scenario>_<policy>_clean.csv
+	const files = listCsvFilesMatching(opts.repoRoot, /^experiments_E_[a-z]+_[a-z0-9]+_clean\.csv$/);
 	const pages: { file: string; label: string }[] = [];
 
 	const byScenario = new Map<string, string[]>();
 	for (const csvName of files) {
 		const t = parseCsv(readText(path.join(opts.repoRoot, csvName)));
 		if (t.rows.length === 0) continue;
-		const scenario = t.rows[0]?.["Scenario"] ?? "";
+		const scenario = t.rows[0]?.["scenario"] ?? "";
 		if (!scenario) continue;
 		const arr = byScenario.get(scenario);
 		if (arr) arr.push(csvName);
@@ -489,73 +445,43 @@ function plotExperimentE(opts: { repoRoot: string; outDir: string }) {
 	for (const [scenario, scenarioFiles] of Array.from(byScenario.entries()).sort((a, b) => a[0].localeCompare(b[0]))) {
 		const policyToRmse = new Map<string, number>();
 		const policyToTx = new Map<string, number>();
-		const policyToRange = new Map<string, number>();
-		const policyToAngle = new Map<string, number>();
 
 		for (const csvName of scenarioFiles) {
 			const t = parseCsv(readText(path.join(opts.repoRoot, csvName)));
 			if (t.rows.length === 0) continue;
 			const rows = t.rows;
-			const policy = rows[0]?.["Policy"] ?? "";
+			const policy = rows[0]?.["policy"] ?? "";
 			if (!policy) continue;
 
 			// Choose last time sample per seed, then average across seeds.
-			const bySeed = groupBy(rows, (r) => r["Seed"] ?? "");
+			const bySeed = groupBy(rows, (r) => r["seed"] ?? "");
 			const finalPerSeed = Array.from(bySeed.values()).map(
-				(seedRows) => [...seedRows].sort((a, b) => num(b, "Time") - num(a, "Time"))[0]
+				(seedRows) => [...seedRows].sort((a, b) => num(b, "time_s") - num(a, "time_s"))[0]
 			);
-			const rmseVals = finalPerSeed.map((r) => num(r, "RMSE")).filter(Number.isFinite);
-			const txVals = finalPerSeed.map((r) => num(r, "TxTotal")).filter(Number.isFinite);
-			const rangeVals = finalPerSeed.map((r) => num(r, "RangeResidual_MAE")).filter(Number.isFinite);
-			const angleVals = finalPerSeed.map((r) => num(r, "AngleResidual_MAE")).filter(Number.isFinite);
+			const rmseVals = finalPerSeed.map((r) => num(r, "rmse_m")).filter(Number.isFinite);
+			const txVals = finalPerSeed.map((r) => num(r, "tx_total")).filter(Number.isFinite);
 
 			policyToRmse.set(policy, avg(rmseVals));
 			policyToTx.set(policy, avg(txVals));
-			policyToRange.set(policy, avg(rangeVals));
-			policyToAngle.set(policy, avg(angleVals));
 		}
 
 		const policies = Array.from(policyToRmse.keys()).sort();
 		const rmseByPolicy = policies.map((p) => policyToRmse.get(p) ?? Number.NaN);
 		const txByPolicy = policies.map((p) => policyToTx.get(p) ?? Number.NaN);
-		const rangeByPolicy = policies.map((p) => policyToRange.get(p) ?? Number.NaN);
-		const angleByPolicy = policies.map((p) => policyToAngle.get(p) ?? Number.NaN);
 
 		const traces: any[] = [
 			{ x: policies, y: rmseByPolicy, type: "bar", name: "RMSE (m)", xaxis: "x", yaxis: "y" },
-			{
-				x: policies,
-				y: rangeByPolicy,
-				type: "bar",
-				name: "RangeResidual_MAE (m)",
-				xaxis: "x2",
-				yaxis: "y2",
-				showlegend: false,
-			},
-			{
-				x: policies,
-				y: angleByPolicy,
-				type: "bar",
-				name: "AngleResidual_MAE (rad)",
-				xaxis: "x3",
-				yaxis: "y3",
-				showlegend: false,
-			},
-			{ x: policies, y: txByPolicy, type: "bar", name: "TxTotal", xaxis: "x4", yaxis: "y4", showlegend: false },
+			{ x: policies, y: txByPolicy, type: "bar", name: "Tx total", xaxis: "x2", yaxis: "y2", showlegend: false },
 		];
 
 		const title = `Experiment E — ${scenario}`;
 		const layout: any = {
 			...baseLayout(title),
-			grid: { rows: 4, columns: 1, pattern: "independent" },
+			grid: { rows: 2, columns: 1, pattern: "independent" },
 			xaxis: { title: "Policy" },
 			yaxis: { title: "RMSE (m)", rangemode: "tozero" },
 			xaxis2: { title: "Policy" },
-			yaxis2: { title: "RangeResidual_MAE (m)", rangemode: "tozero" },
-			xaxis3: { title: "Policy" },
-			yaxis3: { title: "AngleResidual_MAE (rad)", rangemode: "tozero" },
-			xaxis4: { title: "Policy" },
-			yaxis4: { title: "TxTotal", rangemode: "tozero" },
+			yaxis2: { title: "Tx total", rangemode: "tozero" },
 		};
 
 		const outFile = `experimentE_${escapeJsFilename(scenario)}.html`;

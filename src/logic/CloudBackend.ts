@@ -1,16 +1,14 @@
 import { RelativePoseGraph } from "./localization/CooperativeLocalization.ts";
 
 export interface CloudBackendOptions {
-	robustFusion?: boolean;
 	rng?: () => number;
-	// Huber threshold in normalized residual units.
-	huberK?: number;
 	// Normalization scales for residuals.
 	distanceSigma?: number; // meters
 	angleSigma?: number; // radians
 	// Optimization budget.
 	warmupIterations?: number;
 	finalIterations?: number;
+	pruneAgeMs?: number;
 }
 
 /**
@@ -48,6 +46,15 @@ export interface FusedRecord {
 	neighbors: { id: number; range: number; aoa: number }[];
 }
 
+export interface CloudEvent {
+	id: string;
+	timestamp: number;
+	level: "INFO" | "WARN" | "ERROR";
+	kind: "PANIC" | "TOPOLOGY_CHANGE" | "NOTE" | "EVENT";
+	nodeId?: number;
+	message: string;
+}
+
 /**
  * Simulates a Cloud Backend Service.
  * Responsibilities:
@@ -62,6 +69,10 @@ export class CloudBackend {
 
 	// The "Database"
 	private db: FusedRecord[] = [];
+
+	// Event log (non-fusion telemetry)
+	private events: CloudEvent[] = [];
+	private eventCounter = 0;
 
 	// Topology Engine (Relative Pose Graph)
 	// We keep a persistent graph so the layout is continuous over time.
@@ -92,13 +103,64 @@ export class CloudBackend {
 	constructor(opts?: CloudBackendOptions) {
 		this.rng = opts?.rng ?? Math.random;
 		this.opts = {
-			robustFusion: opts?.robustFusion ?? false,
-			huberK: opts?.huberK ?? 2.5,
 			distanceSigma: opts?.distanceSigma ?? 0.15,
 			angleSigma: opts?.angleSigma ?? (20 * Math.PI) / 180,
 			warmupIterations: opts?.warmupIterations ?? 15,
 			finalIterations: opts?.finalIterations ?? 50,
+			pruneAgeMs: opts?.pruneAgeMs ?? 30_000,
 		};
+	}
+
+	private pruneStaleRecords(currentTime: number) {
+		const cutoff = currentTime - this.opts.pruneAgeMs;
+		// Prune the main DB
+		if (this.db.length > 0) {
+			this.db = this.db.filter((r) => r.timestamp >= cutoff);
+		}
+	}
+
+	public recordEvent(event: Omit<CloudEvent, "id">) {
+		const e: CloudEvent = {
+			id: `evt-${this.eventCounter++}`,
+			...event,
+		};
+		this.events.unshift(e);
+		if (this.events.length > 500) this.events = this.events.slice(0, 500);
+	}
+
+	public recordPanic(opts: { timestamp: number; nodeId: number; message?: string }) {
+		this.recordEvent({
+			timestamp: opts.timestamp,
+			level: "ERROR",
+			kind: "PANIC",
+			nodeId: opts.nodeId,
+			message: opts.message ?? "PANIC",
+		});
+
+		// Immediate topology update:
+		// If a node is panicking, it is likely isolated. We should reflect this in the topology
+		// immediately rather than waiting for the prune timeout.
+		// We inject a synthetic record with NO neighbors.
+		const prev = this.db.find((r) => r.nodeId === opts.nodeId);
+		const lastPos = prev?.position ?? { x: 0, y: 0 }; // We don't know where it is, just keep last pos
+		
+		const isolatedRecord: FusedRecord = {
+			id: `${opts.nodeId}-panic-${this.recordCounter++}`,
+			nodeId: opts.nodeId,
+			timestamp: opts.timestamp,
+			sampleCount: 1,
+			position: lastPos,
+			avgBattery: prev?.avgBattery ?? 0,
+			status: "UNCERTAIN",
+			neighbors: [], // Clears the edges
+		};
+		// Add to DB at the front
+		this.db.unshift(isolatedRecord);
+		if (this.db.length > 500) this.db = this.db.slice(0, 500);
+	}
+
+	public getEvents(): CloudEvent[] {
+		return this.events;
 	}
 
 	/**
@@ -119,6 +181,7 @@ export class CloudBackend {
 		if (currentTime - this.lastFusionTime > this.FUSION_WINDOW_MS) {
 			this.runFusion();
 			this.lastFusionTime = currentTime;
+			this.pruneStaleRecords(currentTime);
 			return true; // Indicates database updated
 		}
 		return false;
@@ -140,13 +203,6 @@ export class CloudBackend {
 		const activeNodeIds = new Set<number>();
 		const fixedNodeIds: number[] = [];
 		const supernodeIds = new Set<number>();
-
-		const wrapPi = (a: number) => {
-			let x = a;
-			while (x > Math.PI) x -= 2 * Math.PI;
-			while (x < -Math.PI) x += 2 * Math.PI;
-			return x;
-		};
 
 		// 0. Identify Supernodes (Anchors)
 		this.buffer.forEach((reports, nodeId) => {
@@ -308,44 +364,7 @@ export class CloudBackend {
 
 		// 3. Optimize Graph
 		applyConstraints();
-		graph.optimize(this.opts.warmupIterations, fixedNodeIds);
-
-		if (this.opts.robustFusion) {
-			const weights = new Map<string, number>();
-			for (const c of constraints) {
-				const uPose = graph.getNodePose(c.u);
-				const vPose = graph.getNodePose(c.v);
-				if (!uPose || !vPose) continue;
-				const dx = vPose.x - uPose.x;
-				const dy = vPose.y - uPose.y;
-				const currentDist = Math.sqrt(dx * dx + dy * dy);
-				const distErr = currentDist - c.dist;
-				let r2 = (distErr / this.opts.distanceSigma) ** 2;
-
-				if (c.aoaUV !== undefined) {
-					const target = uPose.theta + c.aoaUV;
-					const current = Math.atan2(dy, dx);
-					const angleErr = wrapPi(target - current);
-					r2 += (angleErr / this.opts.angleSigma) ** 2;
-				}
-				if (c.aoaVU !== undefined) {
-					const target = vPose.theta + c.aoaVU;
-					const current = Math.atan2(-dy, -dx);
-					const angleErr = wrapPi(target - current);
-					r2 += (angleErr / this.opts.angleSigma) ** 2;
-				}
-
-				const r = Math.sqrt(r2);
-				const k = this.opts.huberK;
-				const w = r <= k ? 1.0 : k / Math.max(r, 1e-9);
-				weights.set(c.key, w);
-			}
-
-			applyConstraints(weights);
-			graph.optimize(this.opts.finalIterations, fixedNodeIds);
-		} else {
-			graph.optimize(this.opts.finalIterations, fixedNodeIds);
-		}
+		graph.optimize(this.opts.finalIterations, fixedNodeIds);
 
 		// 4. Generate Fused Records from Graph State
 		this.buffer.forEach((reports, nodeId) => {
@@ -448,5 +467,7 @@ export class CloudBackend {
 		this.graph = null;
 		this.graphSeedId = null;
 		this.nodeStabilityCounter.clear();
+		this.events = [];
+		this.eventCounter = 0;
 	}
 }

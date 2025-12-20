@@ -171,6 +171,69 @@ describe("experiments metrics", () => {
 		expect(rmseAlignedRigid(nodes as any)).toBeCloseTo(0, 8);
 	});
 
+	it("aligned metrics do not penalize multiple disconnected clusters", () => {
+		// Two 2-node clusters with different rigid frames.
+		// Cluster A: nodes 1-2
+		// Cluster B: nodes 3-4
+		const nodes: RunnerNode[] = [
+			{
+				id: 1,
+				trueX: 0,
+				trueY: 0,
+				batteryV: 3.7,
+				txCount: 0,
+				firmware: {
+					estPosition: { x: 10, y: -5 },
+					neighbors: [{ id: 2, rangeMeters: 1, angleRad: 0, timestamp: 0 } as NeighborObservation],
+				} as FirmwareSnapshot,
+			},
+			{
+				id: 2,
+				trueX: 1,
+				trueY: 0,
+				batteryV: 3.7,
+				txCount: 0,
+				firmware: {
+					// Same cluster A frame
+					estPosition: { x: 10, y: -4 },
+					neighbors: [{ id: 1, rangeMeters: 1, angleRad: 0, timestamp: 0 } as NeighborObservation],
+				} as FirmwareSnapshot,
+			},
+			{
+				id: 3,
+				trueX: 10,
+				trueY: 0,
+				batteryV: 3.7,
+				txCount: 0,
+				firmware: {
+					// Cluster B uses a different frame
+					estPosition: { x: -20, y: 3 },
+					neighbors: [{ id: 4, rangeMeters: 1, angleRad: 0, timestamp: 0 } as NeighborObservation],
+				} as FirmwareSnapshot,
+			},
+			{
+				id: 4,
+				trueX: 11,
+				trueY: 0,
+				batteryV: 3.7,
+				txCount: 0,
+				firmware: {
+					// Same cluster B frame
+					estPosition: { x: -19, y: 3 },
+					neighbors: [{ id: 3, rangeMeters: 1, angleRad: 0, timestamp: 0 } as NeighborObservation],
+				} as FirmwareSnapshot,
+			},
+		];
+
+		// Raw errors are non-zero (frame mismatch).
+		expect(rmse(nodes as any)).toBeGreaterThan(0.1);
+		expect(ale(nodes as any)).toBeGreaterThan(0.1);
+
+		// Component-wise alignment should yield ~0.
+		expect(rmseAlignedRigid(nodes as any)).toBeCloseTo(0, 8);
+		expect(aleAlignedRigid(nodes as any)).toBeCloseTo(0, 8);
+	});
+
 	it("pairwiseDistanceMae is invariant to rigid transforms", () => {
 		const theta = Math.PI / 4;
 		const c = Math.cos(theta);

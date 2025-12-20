@@ -106,9 +106,12 @@ function bestFitRigid2DAllowReflection(truth: Pt2[], est: Pt2[]): Rigid2D | unde
 export function computeCloudStructureStatsMeters(opts: {
 	records: CloudPositionRecord[];
 	truthById: Map<number, Pt2>;
+	/** Optional connectivity edges (undirected). If omitted/empty, treats all nodes as one component. */
+	edges?: Array<[number, number]>;
 }): CloudStructureStats | null {
 	if (opts.records.length === 0 || opts.truthById.size === 0) return null;
 
+	const nodeIds: number[] = [];
 	const truth: Pt2[] = [];
 	const est: Pt2[] = [];
 	for (const r of opts.records) {
@@ -118,6 +121,7 @@ export function computeCloudStructureStatsMeters(opts: {
 		const ey = r.position.y;
 		if (!Number.isFinite(ex) || !Number.isFinite(ey)) continue;
 		if (!Number.isFinite(t.x) || !Number.isFinite(t.y)) continue;
+		nodeIds.push(r.nodeId);
 		truth.push(t);
 		est.push({ x: ex, y: ey });
 	}
@@ -136,22 +140,76 @@ export function computeCloudStructureStatsMeters(opts: {
 	}
 	const abs: CloudErrorStats = { mae: absSum / n, rmse: Math.sqrt(absSumSq / n), count: n };
 
-	const tf = bestFitRigid2DAllowReflection(truth, est);
+	// Cluster-aware aligned error: when clusters are disconnected, each cluster can have its
+	// own anchor-free rigid frame. If no edges are provided, preserve legacy behavior by
+	// treating all nodes as one connected component.
+	const idToIndex = new Map<number, number>();
+	for (let i = 0; i < n; i++) idToIndex.set(nodeIds[i], i);
+
+	const adjacency: number[][] = Array.from({ length: n }, () => []);
+	let edgeCount = 0;
+	for (const [aId, bId] of opts.edges ?? []) {
+		const ai = idToIndex.get(aId);
+		const bi = idToIndex.get(bId);
+		if (ai === undefined || bi === undefined) continue;
+		if (ai === bi) continue;
+		adjacency[ai].push(bi);
+		adjacency[bi].push(ai);
+		edgeCount++;
+	}
+
+	const components: number[][] = [];
+	if (edgeCount === 0) {
+		components.push(Array.from({ length: n }, (_, i) => i));
+	} else {
+		const visited = new Array<boolean>(n).fill(false);
+		for (let i = 0; i < n; i++) {
+			if (visited[i]) continue;
+			const comp: number[] = [];
+			const stack = [i];
+			visited[i] = true;
+			while (stack.length > 0) {
+				const cur = stack.pop()!;
+				comp.push(cur);
+				for (const nb of adjacency[cur]) {
+					if (visited[nb]) continue;
+					visited[nb] = true;
+					stack.push(nb);
+				}
+			}
+			components.push(comp);
+		}
+	}
+
 	let alignedSum = 0;
 	let alignedSumSq = 0;
-	if (tf) {
-		for (let i = 0; i < n; i++) {
-			const a = applyRigid2D(est[i], tf);
+	for (const comp of components) {
+		if (comp.length < 2) {
+			// No meaningful rigid alignment for singletons.
+			const i = comp[0];
+			if (i === undefined) continue;
+			const dx = est[i].x - truth[i].x;
+			const dy = est[i].y - truth[i].y;
+			const e = Math.hypot(dx, dy);
+			alignedSum += e;
+			alignedSumSq += e * e;
+			continue;
+		}
+
+		const truthC = comp.map((i) => truth[i]);
+		const estC = comp.map((i) => est[i]);
+		const tf = bestFitRigid2DAllowReflection(truthC, estC);
+		for (let k = 0; k < comp.length; k++) {
+			const i = comp[k];
+			const a = tf ? applyRigid2D(est[i], tf) : est[i];
 			const dx = a.x - truth[i].x;
 			const dy = a.y - truth[i].y;
 			const e = Math.hypot(dx, dy);
 			alignedSum += e;
 			alignedSumSq += e * e;
 		}
-	} else {
-		alignedSum = absSum;
-		alignedSumSq = absSumSq;
 	}
+
 	const aligned: CloudErrorStats = { mae: alignedSum / n, rmse: Math.sqrt(alignedSumSq / n), count: n };
 
 	let pairSum = 0;

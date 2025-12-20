@@ -28,8 +28,11 @@ export const EXPERIMENT_WORLD_BOUNDS_M = {
 	maxY: EXPERIMENT_AREA_SIZE_M.height,
 } as const;
 
-export const MOTION_START_MS = 120_000;
-export const MOTION_STOP_MS = 180_000;
+export const MOTION_START_MS = 60_000;
+export const MOTION_STOP_MS = 120_000;
+
+export const MOTION_2_START_MS = 240_000;
+export const MOTION_2_STOP_MS = 300_000;
 
 export type SeededNode = { id: number; x: number; y: number };
 

@@ -1,4 +1,8 @@
+// @ts-ignore
+declare module "react-plotly.js";
+
 import React, { useState, useEffect, useCallback, useRef } from "react";
+
 import {
 	Play,
 	Pause,
@@ -16,29 +20,57 @@ import {
 	TrendingDown,
 	BrickWall,
 } from "lucide-react";
-import { CloudBackend, type CloudBackendOptions, FusedRecord } from "./logic/CloudBackend";
-import { CloudPublishTracker } from "./logic/cloudPublishPolicy";
+import { AnalysisDashboard } from "./components/AnalysisDashboard";
+import { CloudBackend, type CloudBackendOptions, type CloudEvent, FusedRecord } from "./logic/CloudBackend";
 import { computeCloudStructureStatsMeters } from "./logic/metrics/CloudTopologyMetrics";
 import { DraggableWindow } from "./components/DraggableWindow";
-import { NodeConfig, LogEntry, NodeRole, NodeType, Packet, PacketType, VisualPacket, Wall } from "./types";
+import { NodeConfig, NodeRole, NodeType, Packet, PacketType, VisualPacket, Wall } from "./types";
 import { SimulationRunner } from "./engine/SimulationRunner";
 import type { FirmwareConfig } from "./firmware/types";
+import { createRollingMeanConvergenceTracker } from "./experiments/lib/convergence";
 
 const PIXELS_PER_METER = 20;
+
+// Convergence tracker instance (cloud backend)
+const cloudConvergenceTracker = createRollingMeanConvergenceTracker({
+	samplePeriodMs: 1000,
+	windowMs: 30_000,
+	stableDelta: 0.05,
+	stableHoldMs: 5_000,
+});
+
+function computeCloudConvergence(fusedRecords: import("./logic/CloudBackend").FusedRecord[], cloudStats: any) {
+	// Build RMSE history from fused records
+	const rmseHistory: Array<{ t: number; v: number }> = [];
+	for (const r of fusedRecords) {
+		if (typeof r.position?.x === "number" && typeof r.position?.y === "number") {
+			const t = r.timestamp;
+			const v = cloudStats?.aligned.rmse ?? NaN;
+			rmseHistory.push({ t, v });
+		}
+	}
+	// Feed the tracker with the latest N samples (simulate time progression)
+	for (const pt of rmseHistory.slice(-40)) cloudConvergenceTracker.update(pt.t, pt.v);
+	const state = cloudConvergenceTracker.getState();
+	return {
+		converged: state.convergenceStableMs !== undefined,
+		convergenceText: state.convergenceStableMs !== undefined ? "CONVERGED" : "NOT CONVERGED",
+		convergenceColor: state.convergenceStableMs !== undefined ? "#4ade80" : "#f87171",
+	};
+}
 const CANVAS_WIDTH = 1200;
 const CANVAS_HEIGHT = 800;
 
 // Keep UI arena consistent with experiment bounds (0..50m in both axes).
-const OFFSET_X_M = 20,
-	OFFSET_Y_M = 10;
-const OFFSET_X_PX = OFFSET_X_M;
-const OFFSET_Y_PX = OFFSET_Y_M;
-const WORLD_BOUNDS_M = { minX: 0, maxX: 48, minY: 0, maxY: 40 };
+const ARENAHEADER = "Arena (48m × 35m)";
+const OFFSET_X_PX = 60; // Increased to make room for axis labels
+const OFFSET_Y_PX = 60;
+const WORLD_BOUNDS_M = { minX: 0, maxX: 48, minY: 0, maxY: 35 };
 const WORLD_BOUNDS_PX = {
-	minX: WORLD_BOUNDS_M.minX * PIXELS_PER_METER + OFFSET_X_M,
-	maxX: WORLD_BOUNDS_M.maxX * PIXELS_PER_METER + OFFSET_X_M,
-	minY: WORLD_BOUNDS_M.minY * PIXELS_PER_METER + OFFSET_Y_M,
-	maxY: WORLD_BOUNDS_M.maxY * PIXELS_PER_METER + OFFSET_Y_M,
+	minX: WORLD_BOUNDS_M.minX * PIXELS_PER_METER + OFFSET_X_PX,
+	maxX: WORLD_BOUNDS_M.maxX * PIXELS_PER_METER + OFFSET_X_PX,
+	minY: WORLD_BOUNDS_M.minY * PIXELS_PER_METER + OFFSET_Y_PX,
+	maxY: WORLD_BOUNDS_M.maxY * PIXELS_PER_METER + OFFSET_Y_PX,
 };
 
 type Pose2D = { x: number; y: number; theta: number };
@@ -200,15 +232,18 @@ const doIntersect = (
 // For anchor-free topology, prefer the aligned and pairwise-distance metrics below.
 
 const App: React.FC = () => {
+    const [viewMode, setViewMode] = useState<"SIM" | "ANALYSIS">("SIM");
 	const [nodes, setNodes] = useState<UiNode[]>([]);
 	const [links, setLinks] = useState<Link[]>([]);
-	const [logs] = useState<LogEntry[]>([]);
+    // ... rest of state
+
 	const [packets, setPackets] = useState<Packet[]>([]);
 	const [visualPackets, setVisualPackets] = useState<VisualPacket[]>([]);
 	const [fusedRecordsBaseline, setFusedRecordsBaseline] = useState<FusedRecord[]>([]);
-	const [fusedRecordsRobust, setFusedRecordsRobust] = useState<FusedRecord[]>([]);
-	const [cloudAlgoMode, setCloudAlgoMode] = useState<"BASELINE" | "ROBUST">("BASELINE");
-	const fusedRecords = cloudAlgoMode === "ROBUST" ? fusedRecordsRobust : fusedRecordsBaseline;
+	const [cloudEventsBaseline, setCloudEventsBaseline] = useState<CloudEvent[]>([]);
+
+	const fusedRecords = fusedRecordsBaseline;
+	const cloudEvents = cloudEventsBaseline;
 
 	const [walls, setWalls] = useState<Wall[]>([]);
 	const [isDrawingWall, setIsDrawingWall] = useState(false);
@@ -262,22 +297,22 @@ const App: React.FC = () => {
 	const [config, setConfig] = useState<NodeConfig>({
 		uwbRange: 15,
 		isolationTimeout: 5,
-		movingSpeed: 0.8,
+		movingSpeed: 0.4,
 		showRange: false,
 		maxLeaders: 1,
 		minClusterSize: 5,
 	});
 
 	const [simTuning, setSimTuning] = useState({
-		uwbNoiseSigmaMeters: 0.01,
-		uwbAngleNoiseStdDeg: 3.0,
-		packetLoss: 0.1,
+		uwbNoiseSigmaMeters: 0.0,
+		uwbAngleNoiseStdDeg: 0.0,
+		packetLoss: 0.0,
 	});
 
 	const [firmwareTuning, setFirmwareTuning] = useState<FirmwareConfig>({
 		accelMoveThresholdG: 0.5,
-		isolationNoAckMs: 30_000,
-		neighborTimeoutMs: 20_000,
+		isolationNoAckMs: 10_000,
+		neighborTimeoutMs: 5_000,
 		eventDrivenSensing: true,
 		helloIntervalMovingMs: 1_000,
 		helloIntervalIdleMs: 15_000,
@@ -290,7 +325,6 @@ const App: React.FC = () => {
 	});
 
 	const [cloudTuning, setCloudTuning] = useState<CloudBackendOptions>({
-		huberK: 2.5,
 		distanceSigma: 0.15,
 		angleSigma: (20 * Math.PI) / 180,
 		warmupIterations: 15,
@@ -299,15 +333,22 @@ const App: React.FC = () => {
 
 	const nodesRef = useRef<UiNode[]>([]);
 	const runnerRef = useRef<SimulationRunner | null>(null);
-	const cloudBackendBaselineRef = useRef<CloudBackend>(new CloudBackend({ robustFusion: false, ...cloudTuning }));
-	const cloudBackendRobustRef = useRef<CloudBackend>(new CloudBackend({ robustFusion: true, ...cloudTuning }));
+	const cloudBackendBaselineRef = useRef<CloudBackend>(new CloudBackend({ ...cloudTuning }));
 	const visualPacketsRef = useRef<VisualPacket[]>([]);
 	const wallsRef = useRef<Wall[]>([]);
 	const animationRef = useRef<number | undefined>(undefined);
 	const lastTimeRef = useRef<number>(0);
 	const energyTimerRef = useRef<number>(0);
 	const lastCloudTickRef = useRef<number>(0);
-	const cloudPublishRef = useRef<CloudPublishTracker>(new CloudPublishTracker({ staleMs: 30_000 }));
+	const simNowMsRef = useRef<number>(0);
+
+	const [uplinkStats, setUplinkStats] = useState({
+		totalBatches: 0,
+		totalReports: 0,
+		lastSenderId: -1,
+		lastBatchSize: 0,
+		lastUplinkTimeMs: 0,
+	});
 
 	const [openWindows, setOpenWindows] = useState<number[]>([]);
 	const [windowOrder, setWindowOrder] = useState<number[]>([]);
@@ -372,10 +413,9 @@ const App: React.FC = () => {
 	);
 
 	const applyCloudTuning = useCallback(() => {
-		cloudBackendBaselineRef.current = new CloudBackend({ robustFusion: false, ...cloudTuning });
-		cloudBackendRobustRef.current = new CloudBackend({ robustFusion: true, ...cloudTuning });
+		cloudBackendBaselineRef.current = new CloudBackend({ ...cloudTuning });
 		setFusedRecordsBaseline([]);
-		setFusedRecordsRobust([]);
+		setCloudEventsBaseline([]);
 	}, [cloudTuning]);
 
 	useEffect(() => {
@@ -395,8 +435,92 @@ const App: React.FC = () => {
 		setPackets((prev) => [p, ...prev].slice(0, 50));
 	}, []);
 
+	const ingestUplinkToCloud = useCallback(
+		(opts: { packet: Packet; senderId: number; senderPos: { x: number; y: number }; nowMs: number }) => {
+			const { packet, senderId, senderPos, nowMs } = opts;
+			if (packet.type !== PacketType.UPLINK) return;
+			if (!packet.payload || typeof packet.payload !== "object") return;
+			if ((packet.payload as { type?: unknown }).type !== "UPLINK_BATCH") return;
+			const reports = (packet.payload as { reports?: unknown }).reports;
+			if (!Array.isArray(reports) || reports.length === 0) return;
+
+			setUplinkStats((prev) => ({
+				totalBatches: prev.totalBatches + 1,
+				totalReports: prev.totalReports + reports.length,
+				lastSenderId: senderId,
+				lastBatchSize: reports.length,
+				lastUplinkTimeMs: nowMs,
+			}));
+
+			const baselineCloud = cloudBackendBaselineRef.current;
+			let recordedBackendEvents = false;
+
+			const rawEvents = (packet.payload as { events?: unknown }).events;
+			if (Array.isArray(rawEvents)) {
+				for (const raw of rawEvents) {
+					if (!raw || typeof raw !== "object") continue;
+					const e = raw as any;
+					const timestamp = Number(e.timestamp);
+					if (!Number.isFinite(timestamp)) continue;
+					const kind = typeof e.kind === "string" ? e.kind : "EVENT";
+					const level = e.level === "WARN" || e.level === "ERROR" ? e.level : "INFO";
+					const nodeId = Number(e.nodeId);
+					baselineCloud.recordEvent({
+						timestamp,
+						level,
+						kind,
+						nodeId: Number.isFinite(nodeId) ? nodeId : undefined,
+						message: typeof e.message === "string" ? e.message : String(e.message ?? kind),
+					});
+					recordedBackendEvents = true;
+				}
+			}
+
+			for (const raw of reports) {
+				if (!raw || typeof raw !== "object") continue;
+				const r = raw as any;
+				const nodeId = Number(r.nodeId);
+				if (!Number.isFinite(nodeId)) continue;
+
+				const neighborsRaw = r.neighbors;
+				const neighbors = Array.isArray(neighborsRaw)
+					? neighborsRaw
+							.map((n: any) => ({
+								id: Number(n?.id),
+								range: Number(n?.range),
+								aoa: n?.aoa,
+							}))
+							.filter((n: any) => Number.isFinite(n.id) && Number.isFinite(n.range))
+					: [];
+
+				const report: any = {
+					nodeId,
+					timestamp: nowMs,
+					battery: Number(r.batteryV ?? 0),
+					status: r.status === "MOVING" ? "MOVING" : "STATIONARY",
+					neighbors,
+				};
+
+				// Anchor only when the uplink sender is also the origin and is LTE-capable.
+				// This is the "supernode" concept in the cloud solver.
+				if (Boolean(r.lteCapable) && nodeId === senderId) {
+					report.x = senderPos.x;
+					report.y = senderPos.y;
+				}
+
+				baselineCloud.ingest(report);
+			}
+
+			if (recordedBackendEvents) {
+				setCloudEventsBaseline([...baselineCloud.getEvents()]);
+			}
+		},
+		[]
+	);
+
 	const gameLoop = useCallback(
 		(timestamp: number) => {
+			if (!lastTimeRef.current) lastTimeRef.current = timestamp;
 			if (!lastTimeRef.current) lastTimeRef.current = timestamp;
 			const deltaTime = (timestamp - lastTimeRef.current) / 1000;
 			lastTimeRef.current = timestamp;
@@ -417,19 +541,36 @@ const App: React.FC = () => {
 
 					if (vp.style === "LINE") {
 						const targetNode = currentNodes.find((n) => n.id === vp.targetId);
-						let tx = vp.x;
+						const sourceNode = currentNodes.find((n) => n.id === vp.sourceId);
+
+						let sx = vp.startX;
+						let sy = vp.startY;
+						let tx = vp.x; // default to prev
 						let ty = vp.y;
-						if (targetNode) {
-							tx = vp.startX + (targetNode.x - vp.startX) * vp.progress;
-							ty = vp.startY + (targetNode.y - vp.startY) * vp.progress;
+
+						// If source exists, track its current position for sliding link effect
+						if (sourceNode) {
+							sx = sourceNode.x;
+							sy = sourceNode.y;
 						}
+						
+						if (targetNode) {
+							// Interpolate between current source and current target
+							tx = sx + (targetNode.x - sx) * vp.progress;
+							ty = sy + (targetNode.y - sy) * vp.progress;
+						} else {
+							// Fallback if target is gone
+							tx = sx + (vp.x - vp.startX) * vp.progress;
+						}
+						
 						vp.x = tx;
 						vp.y = ty;
 
+						// Check wall intersection
 						for (const w of currentWalls) {
 							if (
 								doIntersect(
-									{ x: vp.startX, y: vp.startY },
+									{ x: sx, y: sy },
 									{ x: vp.x, y: vp.y },
 									{ x: w.x1, y: w.y1 },
 									{ x: w.x2, y: w.y2 }
@@ -437,6 +578,12 @@ const App: React.FC = () => {
 							) {
 								return null;
 							}
+						}
+					} else if (vp.style === "RING") {
+						const sourceNode = currentNodes.find((n) => n.id === vp.sourceId);
+						if (sourceNode) {
+							vp.x = sourceNode.x;
+							vp.y = sourceNode.y;
 						}
 					}
 					return vp;
@@ -460,21 +607,28 @@ const App: React.FC = () => {
 			);
 
 			runner.setHooks({
-				onTx: ({ packet, senderPos }) => {
+				onTx: ({ timeMs, senderId, packet, senderPos }) => {
 					capturePacket(packet);
+					ingestUplinkToCloud({ packet, senderId, senderPos, nowMs: timeMs });
+					if (packet.type === PacketType.PANIC) {
+						const baselineCloud = cloudBackendBaselineRef.current;
+						baselineCloud.recordPanic({ timestamp: timeMs, nodeId: senderId });
+						setCloudEventsBaseline([...baselineCloud.getEvents()]);
+					}
 					if (packet.destId === -1) {
 						newVisuals.push({
 							id: Math.random().toString(),
 							packet,
-							x: senderPos.x * PIXELS_PER_METER,
-							y: senderPos.y * PIXELS_PER_METER,
-							startX: senderPos.x * PIXELS_PER_METER,
-							startY: senderPos.y * PIXELS_PER_METER,
+							x: senderPos.x * PIXELS_PER_METER + OFFSET_X_PX,
+							y: senderPos.y * PIXELS_PER_METER + OFFSET_Y_PX,
+							startX: senderPos.x * PIXELS_PER_METER + OFFSET_X_PX,
+							startY: senderPos.y * PIXELS_PER_METER + OFFSET_Y_PX,
 							targetId: -1,
 							progress: 0,
 							speed: packet.type === PacketType.DATA ? 2.5 : 2.0,
 							style: "RING",
 							maxRadius: rangePx,
+							sourceId: senderId,
 						});
 					}
 				},
@@ -483,14 +637,15 @@ const App: React.FC = () => {
 						newVisuals.push({
 							id: Math.random().toString(),
 							packet,
-							x: senderPos.x * PIXELS_PER_METER,
-							y: senderPos.y * PIXELS_PER_METER,
-							startX: senderPos.x * PIXELS_PER_METER,
-							startY: senderPos.y * PIXELS_PER_METER,
+							x: senderPos.x * PIXELS_PER_METER + OFFSET_X_PX,
+							y: senderPos.y * PIXELS_PER_METER + OFFSET_Y_PX,
+							startX: senderPos.x * PIXELS_PER_METER + OFFSET_X_PX,
+							startY: senderPos.y * PIXELS_PER_METER + OFFSET_Y_PX,
 							targetId: packet.destId,
 							progress: 0,
 							speed: 2.5,
 							style: "LINE",
+							sourceId: packet.srcId,
 						});
 					}
 				},
@@ -578,6 +733,7 @@ const App: React.FC = () => {
 
 			runner.step(deltaTime * 1000);
 			const snap = runner.snapshot();
+			simNowMsRef.current = snap.timeMs;
 			for (const sn of snap.nodes) {
 				const node = currentNodes.find((n) => n.id === sn.id);
 				if (!node) continue;
@@ -623,42 +779,12 @@ const App: React.FC = () => {
 			});
 			setLinks(newLinks);
 
-			// 4. CLOUD BACKEND (baseline + robust; fuse snapshots every ~1s)
-			const nowMs = Date.now();
+			// 4. CLOUD BACKEND (baseline + robust; ingest is driven by firmware uplink packets)
+			const nowMs = snap.timeMs;
 			if (nowMs - lastCloudTickRef.current > 250) {
 				lastCloudTickRef.current = nowMs;
 				const baselineCloud = cloudBackendBaselineRef.current;
-				const robustCloud = cloudBackendRobustRef.current;
-				for (const sn of snap.nodes) {
-					const node = currentNodes.find((n) => n.id === sn.id);
-					if (!node) continue;
-
-					const isGateway = node.type === "HARDWARE_GW";
-					const isMoving = node.firmwareState === "MOVING";
-					const isPanic = node.role === NodeRole.ISOLATED && node.isolationTimer > config.isolationTimeout;
-					const lteCapable = Boolean((sn.firmware as { lteCapable?: boolean }).lteCapable);
-					const shouldPublish = cloudPublishRef.current.shouldPublish({
-						nodeId: node.id,
-						nowMs,
-						isAnchor: isGateway,
-						isMoving,
-						neighborIds: sn.firmware.neighbors.map((nb) => nb.id),
-					});
-					if (!shouldPublish && !(isPanic && lteCapable)) continue;
-
-					const report = {
-						nodeId: node.id,
-						timestamp: nowMs,
-						battery: node.battery,
-						status: node.firmwareState === "ISOLATED" ? "STATIONARY" : node.firmwareState,
-						neighbors: sn.firmware.neighbors.map((nb) => ({ id: nb.id, range: nb.rangeMeters, aoa: nb.angleRad })),
-						...(isGateway || (isPanic && lteCapable) ? { x: sn.trueX, y: sn.trueY } : {}),
-					};
-					baselineCloud.ingest(report);
-					robustCloud.ingest(report);
-				}
 				if (baselineCloud.tick(nowMs)) setFusedRecordsBaseline([...baselineCloud.getRecords()]);
-				if (robustCloud.tick(nowMs)) setFusedRecordsRobust([...robustCloud.getRecords()]);
 			}
 
 			// 6. ENERGY
@@ -673,7 +799,7 @@ const App: React.FC = () => {
 			setNodes([...currentNodes]);
 			animationRef.current = requestAnimationFrame(gameLoop);
 		},
-		[isPlaying, config, simTuning, capturePacket, ensureRunner]
+		[isPlaying, config, simTuning, capturePacket, ensureRunner, ingestUplinkToCloud]
 	);
 
 	useEffect(() => {
@@ -814,11 +940,17 @@ const App: React.FC = () => {
 		setNodes([]);
 		nodesRef.current = [];
 		runnerRef.current = null;
-		cloudBackendBaselineRef.current = new CloudBackend({ robustFusion: false });
-		cloudBackendRobustRef.current = new CloudBackend({ robustFusion: true });
+		simNowMsRef.current = 0;
+		setUplinkStats({
+			totalBatches: 0,
+			totalReports: 0,
+			lastSenderId: -1,
+			lastBatchSize: 0,
+			lastUplinkTimeMs: 0,
+		});
+		cloudBackendBaselineRef.current = new CloudBackend();
 		setFusedRecordsBaseline([]);
-		setFusedRecordsRobust([]);
-		cloudPublishRef.current = new CloudPublishTracker({ staleMs: 30_000 });
+		setCloudEventsBaseline([]);
 		setOpenWindows([]);
 		setWalls([]);
 	};
@@ -844,6 +976,8 @@ const App: React.FC = () => {
 				return "#38bdf8";
 			case PacketType.DATA:
 				return "#4ade80";
+			case PacketType.UPLINK:
+				return "#ec4899";
 			case PacketType.ELECTION:
 				return "#a855f7";
 			case PacketType.PANIC:
@@ -936,6 +1070,27 @@ const App: React.FC = () => {
 		setContextMenu(null);
 	};
 
+    // --- RENDER ---
+    if (viewMode === "ANALYSIS") {
+        return (
+            <div style={{ width: "100vw", height: "100vh", backgroundColor: "white", overflow: "auto", position: "relative" }}>
+                 <button
+                    onClick={() => setViewMode("SIM")}
+                    style={{
+                        position: "fixed", top: "1rem", right: "1rem", zIndex: 50,
+                        display: "flex", alignItems: "center", gap: "0.5rem",
+                        padding: "0.5rem 1rem", backgroundColor: "#1f2937", color: "white",
+                        borderRadius: "0.25rem", border: "none", cursor: "pointer",
+                        boxShadow: "0 10px 15px -3px rgba(0, 0, 0, 0.1)"
+                    }}
+                >
+                    <Activity size={18} /> Back to Simulator
+                </button>
+                <AnalysisDashboard />
+            </div>
+        )
+    }
+
 	return (
 		<>
 			<style>{`body { margin: 0; padding: 0; overflow: hidden; box-sizing: border-box; }`}</style>
@@ -945,6 +1100,19 @@ const App: React.FC = () => {
 				onMouseMove={handleMouseMove}
 				onMouseDown={(e) => handleMouseDown(e, "bg")}
 			>
+                <div style={{ position: "absolute", top: 16, right: 16, zIndex: 9999 }}>
+                     <button
+                        onClick={() => setViewMode("ANALYSIS")}
+                        style={{
+                            display: "flex", alignItems: "center", gap: "8px",
+                            padding: "8px 16px", backgroundColor: "#4f46e5", color: "white",
+                            borderRadius: "6px", border: "none", cursor: "pointer",
+                            boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.1)"
+                        }}
+                    >
+                        <Database size={18} /> View Analysis
+                    </button>
+                </div>
 				<div style={styles.sidebar}>
 					<div>
 						<h1 style={{ margin: 0, color: "#38bdf8", fontSize: "22px", fontWeight: "900" }}>MESH SIM v21</h1>
@@ -1293,22 +1461,6 @@ const App: React.FC = () => {
 							</button>
 						</div>
 						<div style={{ fontSize: "9px", color: "#64748b" }}>Affects how the cloud optimizer weights residuals.</div>
-						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 6 }}>
-							Robustness (Huber K)
-						</div>
-						<input
-							type="range"
-							min="0.5"
-							max="10"
-							step="0.1"
-							value={cloudTuning.huberK ?? 2.5}
-							onChange={(e) => setCloudTuning({ ...cloudTuning, huberK: Number(e.target.value) })}
-							style={{ width: "100%" }}
-						/>
-						<div style={{ fontSize: "9px", color: "#cbd5e1", textAlign: "right" }}>
-							Huber K: {(cloudTuning.huberK ?? 2.5).toFixed(1)}
-						</div>
-						<div style={{ fontSize: "9px", color: "#64748b" }}>Lower = more aggressive outlier rejection.</div>
 						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 6 }}>Distance σ (Cloud)</div>
 						<input
 							type="range"
@@ -1379,7 +1531,7 @@ const App: React.FC = () => {
 					{showCloudLogs && (
 						<DraggableWindow
 							id="cloud"
-							title={`CLOUD DATABASE (${cloudViewMode} / ${cloudAlgoMode})`}
+							title={`CLOUD DATABASE (${cloudViewMode})`}
 							icon={Database}
 							initialX={800}
 							initialY={50}
@@ -1433,35 +1585,27 @@ const App: React.FC = () => {
 								>
 									TOPOLOGY
 								</button>
-								<div style={{ flex: 1 }} />
-								<button
-									onClick={() => setCloudAlgoMode("BASELINE")}
-									style={{
-										fontSize: "9px",
-										padding: "4px 8px",
-										borderRadius: "4px",
-										border: "none",
-										backgroundColor: cloudAlgoMode === "BASELINE" ? "#38bdf8" : "#1e293b",
-										color: cloudAlgoMode === "BASELINE" ? "#0f172a" : "#94a3b8",
-										cursor: "pointer",
-									}}
-								>
-									BASELINE
-								</button>
-								<button
-									onClick={() => setCloudAlgoMode("ROBUST")}
-									style={{
-										fontSize: "9px",
-										padding: "4px 8px",
-										borderRadius: "4px",
-										border: "none",
-										backgroundColor: cloudAlgoMode === "ROBUST" ? "#38bdf8" : "#1e293b",
-										color: cloudAlgoMode === "ROBUST" ? "#0f172a" : "#94a3b8",
-										cursor: "pointer",
-									}}
-								>
-									ROBUST
-								</button>
+
+							</div>
+							<div
+								style={{
+									padding: "6px 8px",
+									borderBottom: "1px solid #334155",
+									fontSize: "9px",
+									fontFamily: "monospace",
+									color: "#94a3b8",
+								}}
+							>
+								UPLINK: {uplinkStats.totalBatches} batches / {uplinkStats.totalReports} reports
+								{uplinkStats.lastSenderId >= 0 && (
+									<>
+										{" "}
+										| last sender: {uplinkStats.lastSenderId} ({uplinkStats.lastBatchSize}){" "}
+										{uplinkStats.lastUplinkTimeMs > 0
+											? `${(Math.max(0, simNowMsRef.current - uplinkStats.lastUplinkTimeMs) / 1000).toFixed(1)}s ago`
+											: ""}
+									</>
+								)}
 							</div>
 							{cloudViewMode === "FUSED" ? (
 								<div style={{ padding: "8px", overflowX: "auto" }}>
@@ -1499,7 +1643,7 @@ const App: React.FC = () => {
 														{r.status}
 													</td>
 													<td style={{ padding: "4px", opacity: 0.7 }}>
-														{((Date.now() - r.timestamp) / 1000).toFixed(1)}s ago
+														{(Math.max(0, simNowMsRef.current - r.timestamp) / 1000).toFixed(1)}s ago
 													</td>
 												</tr>
 											))}
@@ -1540,7 +1684,72 @@ const App: React.FC = () => {
 											if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
 											truthById.set(n.id, { x, y });
 										}
-										const cloudStats = computeCloudStructureStatsMeters({ records: uniqueRecords, truthById });
+										const edgeSet = new Set<string>();
+										const edges: Array<[number, number]> = [];
+										const idsPresent = new Set(uniqueRecords.map((r) => r.nodeId));
+										for (const r of uniqueRecords) {
+											for (const n of r.neighbors) {
+												if (!idsPresent.has(n.id)) continue;
+												const a = Math.min(r.nodeId, n.id);
+												const b = Math.max(r.nodeId, n.id);
+												const key = `${a}-${b}`;
+												if (edgeSet.has(key)) continue;
+												edgeSet.add(key);
+												edges.push([a, b]);
+											}
+										}
+										// Compute cloudStats and convergence status
+										const cloudStats = computeCloudStructureStatsMeters({ records: uniqueRecords, truthById, edges });
+										const { convergenceText, convergenceColor } = computeCloudConvergence(
+											uniqueRecords,
+											cloudStats
+										);
+										const lastPanicTsByNodeId = new Map<number, number>();
+										for (const e of cloudEvents) {
+											if (e.kind !== "PANIC") continue;
+											if (typeof e.nodeId !== "number") continue;
+											const prev = lastPanicTsByNodeId.get(e.nodeId);
+											if (!prev || e.timestamp >= prev) lastPanicTsByNodeId.set(e.nodeId, e.timestamp);
+										}
+
+										const componentSizeByNodeId = new Map<number, number>();
+										{
+											const idList = Array.from(idsPresent.values());
+											const idToIndex = new Map<number, number>();
+											for (let i = 0; i < idList.length; i++) idToIndex.set(idList[i], i);
+											const adjacency: number[][] = Array.from({ length: idList.length }, () => []);
+											for (const [a, b] of edges) {
+												const ai = idToIndex.get(a);
+												const bi = idToIndex.get(b);
+												if (ai === undefined || bi === undefined) continue;
+												adjacency[ai].push(bi);
+												adjacency[bi].push(ai);
+											}
+											const visited = new Array<boolean>(idList.length).fill(false);
+											for (let i = 0; i < idList.length; i++) {
+												if (visited[i]) continue;
+												const stack = [i];
+												visited[i] = true;
+												const comp: number[] = [];
+												while (stack.length > 0) {
+													const cur = stack.pop()!;
+													comp.push(cur);
+													for (const nb of adjacency[cur]) {
+														if (visited[nb]) continue;
+														visited[nb] = true;
+														stack.push(nb);
+													}
+												}
+												const size = comp.length;
+												for (const idx of comp) componentSizeByNodeId.set(idList[idx], size);
+											}
+										}
+										const isPanicActive = (nodeId: number) => {
+											// Panic persists while isolated, and clears automatically when the node
+											// rejoins any multi-node connected component.
+											if (!lastPanicTsByNodeId.has(nodeId)) return false;
+											return (componentSizeByNodeId.get(nodeId) ?? 1) <= 1;
+										};
 
 										if (uniqueRecords.length === 0)
 											return (
@@ -1574,6 +1783,25 @@ const App: React.FC = () => {
 
 										return (
 											<>
+												<div
+													style={{
+														position: "absolute",
+														top: 8,
+														right: 8,
+														padding: "6px 10px",
+														borderRadius: "6px",
+														border: `1px solid ${convergenceColor}`,
+														backgroundColor: "#0f172a",
+														color: convergenceColor,
+														fontFamily: "monospace",
+														fontSize: "12px",
+														fontWeight: "bold",
+														opacity: 0.95,
+														pointerEvents: "none",
+													}}
+												>
+													Cloud: {convergenceText}
+												</div>
 												<div
 													style={{
 														position: "absolute",
@@ -1651,9 +1879,15 @@ const App: React.FC = () => {
 													{/* Nodes */}
 													{uniqueRecords.map((r) => {
 														const pos = transform(r.position.x, r.position.y);
+														const panic = isPanicActive(r.nodeId);
 														return (
 															<g key={r.nodeId} transform={`translate(${pos.x}, ${pos.y})`}>
-																<circle r="6" fill={r.status === "STABLE" ? "#4ade80" : "#facc15"} />
+																<circle
+																	r="6"
+																	fill={r.status === "STABLE" ? "#4ade80" : "#facc15"}
+																	stroke={panic ? "#ef4444" : "#0f172a"}
+																	strokeWidth={panic ? 2.5 : 1}
+																/>
 																<text
 																	y="-10"
 																	textAnchor="middle"
@@ -1674,25 +1908,24 @@ const App: React.FC = () => {
 								</div>
 							) : (
 								<div style={{ display: "flex", flexDirection: "column", gap: "4px", padding: "8px" }}>
-									{logs
-										.filter((l) => l.category === "CLOUD")
-										.map((l) => (
-											<div
-												key={l.id}
-												style={{
-													padding: "4px",
-													borderBottom: "1px solid #1e293b",
-													fontFamily: "monospace",
-													fontSize: "10px",
-													color: l.type === "SUCCESS" ? "#4ade80" : "#f87171",
-												}}
-											>
-												<span style={{ opacity: 0.5 }}>[{l.time}]</span> {l.msg}
-											</div>
-										))}
-									{logs.filter((l) => l.category === "CLOUD").length === 0 && (
+									{cloudEvents.map((e) => (
+										<div
+											key={e.id}
+											style={{
+												padding: "4px",
+												borderBottom: "1px solid #1e293b",
+												fontFamily: "monospace",
+												fontSize: "10px",
+												color: e.level === "ERROR" ? "#f87171" : e.level === "WARN" ? "#facc15" : "#cbd5e1",
+											}}
+										>
+											<span style={{ opacity: 0.5 }}>[{(e.timestamp / 1000).toFixed(1)}s]</span> {e.kind}
+											{e.nodeId !== undefined ? ` node ${e.nodeId}` : ""}: {e.message}
+										</div>
+									))}
+									{cloudEvents.length === 0 && (
 										<div style={{ padding: "8px", textAlign: "center", color: "#64748b", fontSize: "10px" }}>
-											No logs yet.
+											No events yet.
 										</div>
 									)}
 								</div>
@@ -1953,8 +2186,52 @@ const App: React.FC = () => {
 								fontFamily="monospace"
 								opacity={0.8}
 							>
-								ARENA (48m × 40m)
+								{ARENAHEADER}
 							</text>
+
+                            {/* X-Axis Labels */}
+                            {Array.from({ length: 9 }).map((_, i) => {
+                                const m = i * 10; // 0, 10, 20...
+                                if (m > 50) return null;
+                                const px = WORLD_BOUNDS_PX.minX + m * PIXELS_PER_METER;
+                                return (
+                                    <g key={`x-axis-${m}`} transform={`translate(${px}, ${WORLD_BOUNDS_PX.minY - 5})`}>
+                                        <line y1="0" y2="5" stroke="#38bdf8" strokeWidth="1" opacity="0.5" />
+                                        <text
+                                            y="-4"
+                                            textAnchor="middle"
+                                            fill="#38bdf8"
+                                            fontSize="9"
+                                            fontFamily="monospace"
+                                            opacity="0.8"
+                                        >
+                                            {m}m
+                                        </text>
+                                    </g>
+                                );
+                            })}
+                            {/* Y-Axis Labels */}
+                            {Array.from({ length: 6 }).map((_, i) => {
+                                const m = i * 10;
+                                if (m > 40) return null;
+                                const py = WORLD_BOUNDS_PX.minY + m * PIXELS_PER_METER;
+                                return (
+                                    <g key={`y-axis-${m}`} transform={`translate(${WORLD_BOUNDS_PX.minX - 5}, ${py})`}>
+                                        <line x1="0" x2="5" stroke="#38bdf8" strokeWidth="1" opacity="0.5" />
+                                        <text
+                                            x="-4"
+                                            y="3"
+                                            textAnchor="end"
+                                            fill="#38bdf8"
+                                            fontSize="9"
+                                            fontFamily="monospace"
+                                            opacity="0.8"
+                                        >
+                                            {m}m
+                                        </text>
+                                    </g>
+                                );
+                            })}
 						</g>
 						{/* GHOST GRAPH VISUALIZATION (Cooperative Localization Belief) */}
 						{(() => {
