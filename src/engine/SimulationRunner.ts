@@ -1,396 +1,308 @@
-import { NodeFirmware } from "../firmware/NodeFirmware.ts";
-import { INodeHAL, ImuSample, FirmwareSnapshot } from "../firmware/types.ts";
-import type { FirmwareConfig } from "../firmware/types.ts";
-import { Packet, Wall } from "../types/index.ts";
-import UWBRanging from "../logic/UWBRanging.ts";
-import { createMulberry32, type RngFn } from "../logic/math/Random.ts";
+import { Packet, PacketType, Wall } from "../types";
+import { FirmwareConfig, FirmwareSnapshot, INodeHAL, NodePoseEstimate } from "../firmware/types";
+import { NodeFirmware } from "../firmware/NodeFirmware";
+import { UWBRanging } from "../logic/UWBRanging";
+import { createMulberry32, RngFn } from "../logic/math/Random";
 
-interface NodeWorldState {
-	id: number;
-	firmware: NodeFirmware;
-	x: number;
-	y: number;
-	vx: number;
-	vy: number;
-	batteryV: number;
-	hasLte: boolean;
-	incoming: Packet[];
-	txCount: number;
-}
-
-export interface RunnerSnapshot {
-	timeMs: number;
-	nodes: Array<{
-		id: number;
-		trueX: number;
-		trueY: number;
-		batteryV: number;
-		firmware: FirmwareSnapshot;
-		txCount: number;
-	}>;
+export interface SimulationHooks {
+        onDeliver?: (info: { senderId: number; recipientId: number; packet: Packet; range: number }) => void;
 }
 
 export interface SimulationOptions {
-	uwbRangeMeters?: number;
-	uwbNoiseSigma?: number;
-	uwbAngleNoiseStdRad?: number;
-	packetLoss?: number; // 0..1
-	firmwareConfig?: Partial<FirmwareConfig>;
-	seed?: number;
-	rng?: RngFn;
-	worldBounds?: { minX: number; maxX: number; minY: number; maxY: number };
+        seed?: number;
+        uwbRangeMeters?: number;
+        uwbNoiseSigma?: number;
+        uwbAngleNoiseStdRad?: number;
+        packetLoss?: number;
+        firmwareConfig?: Partial<FirmwareConfig>;
+        worldBounds?: { minX: number; maxX: number; minY: number; maxY: number };
 }
 
-export interface SimulationHooks {
-	onTx?: (evt: { timeMs: number; senderId: number; packet: Packet; senderPos: { x: number; y: number } }) => void;
-	onDeliver?: (evt: {
-		timeMs: number;
-		senderId: number;
-		recipientId: number;
-		packet: Packet;
-		senderPos: { x: number; y: number };
-		recipientPos: { x: number; y: number };
-		ranging?: {
-			trueDistanceMeters: number;
-			measuredDistanceMeters: number;
-			aoa?: number;
-			aod?: number;
-			los: boolean;
-		};
-	}) => void;
+interface NodeWorldState {
+        id: number;
+        firmware: NodeFirmware;
+        x: number;
+        y: number;
+        vx: number;
+        vy: number;
+        batteryCapacity: number; // 0.0 to 1.0 (Full)
+        incoming: Packet[];
 }
+
+// Energy Model Constants
+const ENERGY_COST_TX = 0.0005; // Cost per packet sent (approx 0.05% of battery)
+const ENERGY_COST_IDLE_PER_MS = 0.000001; // Base idle cost (approx 0.1% per 100s)
+const BATTERY_FULL = 1.0;
+const VOLTAGE_MAX = 4.2;
+const VOLTAGE_MIN = 3.0;
 
 export class SimulationRunner {
-	private nodes: NodeWorldState[] = [];
-	private timeMs = 0;
-	private walls: Wall[] = [];
-	private uwbRangeMeters: number;
-	private packetLoss: number;
-	private uwb: UWBRanging;
-	private readonly rng: RngFn;
-	private worldBounds: { minX: number; maxX: number; minY: number; maxY: number } | undefined;
-	private hooks: SimulationHooks | undefined;
-	private readonly firmwareConfig: Partial<FirmwareConfig> | undefined;
+        private nodes: NodeWorldState[] = [];
+        private timeMs = 0;
+        private walls: Wall[] = [];
+        private uwbRangeMeters: number;
+        private packetLoss: number;
+        private uwb: UWBRanging;
+        private readonly rng: RngFn;
+        private worldBounds: { minX: number; maxX: number; minY: number; maxY: number } | undefined;
+        private hooks: SimulationHooks = {};
+        private readonly firmwareConfig: Partial<FirmwareConfig> | undefined;
 
-	constructor(opts?: SimulationOptions) {
-		this.rng = opts?.rng ?? (opts?.seed !== undefined ? createMulberry32(opts.seed) : Math.random);
-		this.uwbRangeMeters = opts?.uwbRangeMeters ?? 15;
-		this.packetLoss = opts?.packetLoss ?? 0.1;
-		this.firmwareConfig = opts?.firmwareConfig;
-		this.worldBounds = opts?.worldBounds;
-		// Share the same stochastic UWB model as the UI.
-		// Engine units are meters, so treat them as "pixels" with pixelsPerMeter=1.
-		this.uwb = new UWBRanging(1, {
-			rng: this.rng,
-			noiseStdMeters: opts?.uwbNoiseSigma ?? 0.05,
-			angleNoiseStdRad: opts?.uwbAngleNoiseStdRad ?? 0.05,
-		});
-	}
+        constructor(opts?: SimulationOptions) {
+                this.rng = opts?.seed ? createMulberry32(opts.seed) : Math.random;
+                this.uwbRangeMeters = opts?.uwbRangeMeters ?? 15;
+                this.packetLoss = opts?.packetLoss ?? 0;
+                this.firmwareConfig = opts?.firmwareConfig;
+                this.worldBounds = opts?.worldBounds;
+                this.uwb = new UWBRanging(opts?.seed ?? 123, {
+                        noiseStdMeters: opts?.uwbNoiseSigma,
+                        angleNoiseStdRad: opts?.uwbAngleNoiseStdRad,
+                });
+        }
 
-	public setWorldBounds(bounds: { minX: number; maxX: number; minY: number; maxY: number } | undefined) {
-		this.worldBounds = bounds;
-	}
+        public setWalls(walls: Wall[]) {
+                this.walls = [...walls];
+        }
 
-	public setHooks(hooks: SimulationHooks | undefined) {
-		this.hooks = hooks;
-	}
+        public addWall(wall: Wall) {
+                this.walls.push(wall);
+        }
 
-	public setUwbRangeMeters(rangeMeters: number) {
-		this.uwbRangeMeters = rangeMeters;
-	}
+        public setHooks(hooks: SimulationHooks) {
+                this.hooks = hooks;
+        }
 
-	public setUwbNoiseSigma(noiseStdMeters: number) {
-		this.uwb.setNoiseStdMeters(noiseStdMeters);
-	}
+        public addNode(
+                id: number,
+                pos: { x: number; y: number },
+                velocity: { vx: number; vy: number } = { vx: 0, vy: 0 },
+                batteryV = 3.7,
+                hasLte = false,
+                initialRole: any = undefined
+        ) {
+                // Calculate initial capacity based on requested voltage
+                const initialPct = Math.max(0, Math.min(1, (batteryV - VOLTAGE_MIN) / (VOLTAGE_MAX - VOLTAGE_MIN)));
 
-	public setUwbAngleNoiseStdRad(stdRad: number) {
-		this.uwb.setAngleNoiseStdRad(stdRad);
-	}
+                const nodeState: NodeWorldState = {
+                        id,
+                        x: pos.x,
+                        y: pos.y,
+                        vx: velocity.vx,
+                        vy: velocity.vy,
+                        batteryCapacity: initialPct * BATTERY_FULL,
+                        incoming: [],
+                        firmware: null as any,
+                };
 
-	public setPacketLoss(packetLoss: number) {
-		this.packetLoss = packetLoss;
-	}
+                const hal: INodeHAL = {
+                        getIMU: () => this.syntheticImu(id),
+                        pollRadio: () => {
+                                const items = [...nodeState.incoming];
+                                nodeState.incoming.length = 0;
+                                return items;
+                        },
+                        getBatteryVoltage: () => {
+                                const pct = Math.max(0, nodeState.batteryCapacity / BATTERY_FULL);
+                                return VOLTAGE_MIN + pct * (VOLTAGE_MAX - VOLTAGE_MIN);
+                        },
+                        getTimeMs: () => this.timeMs,
+                        radioSend: (packet) => this.transmitPacket(id, packet),
+                        log: (_msg) => {},
+                        getGlobalPosition: () => null, // No GPS sim by default
+                };
 
-	public setWalls(walls: Wall[]) {
-		this.walls = [...walls];
-	}
+                // Correct constructor: (id, hal, config, options)
+                const fw = new NodeFirmware(id, hal, this.firmwareConfig, { lteCapable: hasLte });
+                
+                // Hack for initialRole if needed/supported by private/any casting
+                if (initialRole) {
+                     (fw as any).role = initialRole;
+                }
+                
+                nodeState.firmware = fw;
+                this.nodes.push(nodeState);
+        }
 
-	public addWall(wall: Wall) {
-		this.walls.push(wall);
-	}
+        public setNodePose(id: number, pos: { x: number; y: number }) {
+                const node = this.nodes.find((n) => n.id === id);
+                if (!node) return;
+                node.x = pos.x;
+                node.y = pos.y;
+        }
 
-	public addNode(
-		id: number,
-		pos: { x: number; y: number },
-		velocity: { vx: number; vy: number },
-		batteryV = 3.7,
-		hasLte = false
-	) {
-		const incoming: Packet[] = [];
-		let nodeState: NodeWorldState;
-		const hal: INodeHAL = {
-			getIMU: () => this.syntheticImu(id),
-			pollRadio: () => {
-				const items = [...incoming];
-				incoming.length = 0;
-				return items;
-			},
-			getBatteryVoltage: () => nodeState.batteryV,
-			getTimeMs: () => this.timeMs,
-			radioSend: (packet) => this.handleTx(id, packet),
-			log: (_msg) => {
-				// no-op in headless
-			},
-			getGlobalPosition: () => {
-				const n = nodeState;
-				// Simple flat-earth projection relative to Berlin
-				const ORIGIN_LAT = 52.52;
-				const ORIGIN_LNG = 13.405;
-				const metersPerDegLat = 111132.92;
-				const metersPerDegLng = 111412.84 * Math.cos((ORIGIN_LAT * Math.PI) / 180);
+        public setNodeVelocity(id: number, velocity: { vx: number; vy: number }) {
+                const node = this.nodes.find((n) => n.id === id);
+                if (!node) return;
+                node.vx = velocity.vx;
+                node.vy = velocity.vy;
+        }
 
-				return {
-					lat: ORIGIN_LAT + n.y / metersPerDegLat,
-					lng: ORIGIN_LNG + n.x / metersPerDegLng,
-					alt: 0,
-				};
-			},
-		};
+        public setNodeBatteryV(id: number, batteryV: number) {
+                const node = this.nodes.find((n) => n.id === id);
+                if (!node) return;
+                const pct = (batteryV - VOLTAGE_MIN) / (VOLTAGE_MAX - VOLTAGE_MIN);
+                node.batteryCapacity = Math.max(0, Math.min(BATTERY_FULL, pct * BATTERY_FULL));
+        }
 
-		const fw = new NodeFirmware(id, hal, this.firmwareConfig, { lteCapable: hasLte, gpsCapable: this.firmwareConfig?.gpsCapable });
-		nodeState = {
-			id,
-			firmware: fw,
-			x: pos.x,
-			y: pos.y,
-			vx: velocity.vx,
-			vy: velocity.vy,
-			batteryV,
-			hasLte,
-			incoming,
-			txCount: 0,
-		};
-		this.nodes.push(nodeState);
-	}
+        public getNodeIds(): number[] {
+                return this.nodes.map((n) => n.id);
+        }
 
-	public setNodeBatteryV(id: number, batteryV: number) {
-		const node = this.nodes.find((n) => n.id === id);
-		if (!node) return;
-		node.batteryV = batteryV;
-	}
+        public runFor(seconds: number) {
+                const stepMs = 100;
+                const steps = (seconds * 1000) / stepMs;
+                for (let i = 0; i < steps; i++) {
+                        this.step(stepMs);
+                }
+        }
 
-	public setNodePose(id: number, pos: { x: number; y: number }) {
-		const node = this.nodes.find((n) => n.id === id);
-		if (!node) return;
-		node.x = pos.x;
-		node.y = pos.y;
-	}
+        public step(dtMs: number) {
+                this.timeMs += dtMs;
+                
+                const indices = this.nodes.map((_, i) => i);
+                for (let i = indices.length - 1; i > 0; i--) {
+                        const j = Math.floor(this.rng() * (i + 1));
+                        [indices[i], indices[j]] = [indices[j], indices[i]];
+                }
 
-	public setNodeVelocity(id: number, velocity: { vx: number; vy: number }) {
-		const node = this.nodes.find((n) => n.id === id);
-		if (!node) return;
-		node.vx = velocity.vx;
-		node.vy = velocity.vy;
-	}
+                for (const i of indices) {
+                        const node = this.nodes[i];
+                        
+                        // Apply Idle Cost
+                        node.batteryCapacity -= ENERGY_COST_IDLE_PER_MS * dtMs;
+                        if (node.batteryCapacity < 0) node.batteryCapacity = 0;
 
-	public getNodeIds(): number[] {
-		return this.nodes.map((n) => n.id);
-	}
+                        if (node.batteryCapacity <= 0) {
+                                node.vx = 0;
+                                node.vy = 0;
+                                continue;
+                        }
 
-	public step(dtMs: number) {
-		this.timeMs += dtMs;
+                        // Physics
+                        const prevX = node.x;
+                        const prevY = node.y;
+                        const nextX = prevX + (node.vx * dtMs) / 1000;
+                        const nextY = prevY + (node.vy * dtMs) / 1000;
 
-		for (const node of this.nodes) {
-			const prevX = node.x;
-			const prevY = node.y;
-			const nextX = prevX + (node.vx * dtMs) / 1000;
-			const nextY = prevY + (node.vy * dtMs) / 1000;
+                        if (this.segmentHitsAnyWall(prevX, prevY, nextX, nextY)) {
+                                node.vx = 0;
+                                node.vy = 0;
+                        } else {
+                                node.x = nextX;
+                                node.y = nextY;
+                        }
+                        this.applyBounds(node);
+                        
+                        node.firmware.tick(dtMs);
+                }
+        }
 
-			if (this.segmentHitsAnyWall(prevX, prevY, nextX, nextY)) {
-				// Simple collision response: stop at the wall and zero velocity.
-				node.vx = 0;
-				node.vy = 0;
-				// Keep position unchanged.
-			} else {
-				node.x = nextX;
-				node.y = nextY;
-			}
-			this.applyBounds(node);
-		}
+        private transmitPacket(senderId: number, packet: Packet) {
+                const sender = this.nodes.find((n) => n.id === senderId);
+                // Dead check
+                if (!sender || sender.batteryCapacity <= 0) return;
 
-		for (const node of this.nodes) {
-			node.firmware.tick(dtMs);
-		}
-	}
+                // TX Cost
+                sender.batteryCapacity -= ENERGY_COST_TX;
+                if (sender.batteryCapacity <= 0) {
+                        sender.batteryCapacity = 0;
+                        return; // Died
+                }
 
-	private segmentHitsAnyWall(ax: number, ay: number, bx: number, by: number): boolean {
-		if (this.walls.length === 0) return false;
-		for (const w of this.walls) {
-			if (this.segmentsIntersect(ax, ay, bx, by, w.x1, w.y1, w.x2, w.y2)) return true;
-		}
-		return false;
-	}
+                if (this.packetLoss > 0 && this.rng() < this.packetLoss) return;
 
-	private segmentsIntersect(
-		ax: number,
-		ay: number,
-		bx: number,
-		by: number,
-		cx: number,
-		cy: number,
-		dx: number,
-		dy: number
-	): boolean {
-		const eps = 1e-12;
-		const orient = (px: number, py: number, qx: number, qy: number, rx: number, ry: number) =>
-			(qx - px) * (ry - py) - (qy - py) * (rx - px);
-		const onSegment = (px: number, py: number, qx: number, qy: number, rx: number, ry: number) =>
-			rx <= Math.max(px, qx) + eps &&
-			rx >= Math.min(px, qx) - eps &&
-			ry <= Math.max(py, qy) + eps &&
-			ry >= Math.min(py, qy) - eps;
+                for (const recipient of this.nodes) {
+                        if (recipient.id === senderId) continue;
+                        if (recipient.batteryCapacity <= 0) continue;
 
-		const o1 = orient(ax, ay, bx, by, cx, cy);
-		const o2 = orient(ax, ay, bx, by, dx, dy);
-		const o3 = orient(cx, cy, dx, dy, ax, ay);
-		const o4 = orient(cx, cy, dx, dy, bx, by);
+                        // Wall Occlusion
+                        if (this.segmentHitsAnyWall(sender.x, sender.y, recipient.x, recipient.y)) continue;
 
-		// General case
-		if ((o1 > eps && o2 < -eps) || (o1 < -eps && o2 > eps)) {
-			if ((o3 > eps && o4 < -eps) || (o3 < -eps && o4 > eps)) return true;
-		}
+                        const ranging = this.uwb.measure(
+                                { id: sender.id, x: sender.x, y: sender.y },
+                                { id: recipient.id, x: recipient.x, y: recipient.y },
+                                { pixelsPerMeter: 1, maxRangeMeters: this.uwbRangeMeters, walls: this.walls }
+                        );
 
-		// Colinear / touching cases
-		if (Math.abs(o1) <= eps && onSegment(ax, ay, bx, by, cx, cy)) return true;
-		if (Math.abs(o2) <= eps && onSegment(ax, ay, bx, by, dx, dy)) return true;
-		if (Math.abs(o3) <= eps && onSegment(cx, cy, dx, dy, ax, ay)) return true;
-		if (Math.abs(o4) <= eps && onSegment(cx, cy, dx, dy, bx, by)) return true;
-		return false;
-	}
+                        if (!ranging.success) continue;
 
-	private applyBounds(node: NodeWorldState) {
-		const b = this.worldBounds;
-		if (!b) return;
+                        const clone: Packet = JSON.parse(JSON.stringify(packet));
+                        if (clone.payload && typeof clone.payload === 'object') {
+                             (clone.payload as any).range = ranging.measuredDistanceMeters;
+                             (clone.payload as any).angle = ranging.aoa;
+                        }
 
-		if (node.x < b.minX) {
-			node.x = b.minX;
-			if (node.vx < 0) node.vx = 0;
-		} else if (node.x > b.maxX) {
-			node.x = b.maxX;
-			if (node.vx > 0) node.vx = 0;
-		}
+                        recipient.incoming.push(clone);
 
-		if (node.y < b.minY) {
-			node.y = b.minY;
-			if (node.vy < 0) node.vy = 0;
-		} else if (node.y > b.maxY) {
-			node.y = b.maxY;
-			if (node.vy > 0) node.vy = 0;
-		}
-	}
+                        if (this.hooks.onDeliver) {
+                                this.hooks.onDeliver({
+                                        senderId,
+                                        recipientId: recipient.id,
+                                        packet: clone,
+                                        range: ranging.measuredDistanceMeters,
+                                });
+                        }
+                }
+        }
 
-	private syntheticImu(id: number): ImuSample {
-		const node = this.nodes.find((n) => n.id === id);
-		if (!node) {
-			return { accel: { x: 0, y: 0, z: 9.81 }, gyro: { x: 0, y: 0, z: 0 } };
-		}
-		// Provide a synthetic *linear* acceleration cue for motion detection.
-		// Firmware subtracts gravity internally, so we embed gravity in z and add a bump in x when moving.
-		const speed = Math.sqrt(node.vx * node.vx + node.vy * node.vy);
-		const linAx = speed > 0.05 ? 6.0 : 0.0; // m/s^2 (~0.61g) when moving
-		return {
-			accel: { x: linAx, y: 0, z: 9.81 },
-			gyro: { x: 0, y: 0, z: 0 },
-		};
-	}
+        private syntheticImu(nodeId: number) {
+                const node = this.nodes.find((n) => n.id === nodeId);
+                if (!node) return { accel: { x: 0, y: 0, z: 9.81 }, gyro: { x: 0, y: 0, z: 0 }, mag: { x: 0, y: 0, z: 0 } };
 
-	private handleTx(senderId: number, packet: Packet) {
-		const sender = this.nodes.find((n) => n.id === senderId);
-		if (!sender) return;
-		sender.txCount += 1;
+                const isMoving = Math.abs(node.vx) > 0.01 || Math.abs(node.vy) > 0.01;
+                const ax = isMoving ? (this.rng() - 0.5) * 2.0 : (this.rng() - 0.5) * 0.05;
+                const ay = isMoving ? (this.rng() - 0.5) * 2.0 : (this.rng() - 0.5) * 0.05;
+                const az = 9.81 + (isMoving ? (this.rng() - 0.5) * 3.0 : (this.rng() - 0.5) * 0.05);
 
-		this.hooks?.onTx?.({
-			timeMs: this.timeMs,
-			senderId,
-			packet,
-			senderPos: { x: sender.x, y: sender.y },
-		});
+                return {
+                        accel: { x: ax, y: ay, z: az },
+                        gyro: { x: 0, y: 0, z: 0 },
+                        mag: { x: 0, y: 0, z: 0 },
+                };
+        }
 
-		for (const recipient of this.nodes) {
-			if (recipient.id === senderId) continue;
-			if (packet.destId !== -1 && packet.destId !== recipient.id) continue;
-			if (this.rng() < this.packetLoss) continue;
+        private segmentsIntersect(x1: number, y1: number, x2: number, y2: number, x3: number, y3: number, x4: number, y4: number) {
+                const det = (x2 - x1) * (y4 - y3) - (y2 - y1) * (x4 - x3);
+                if (det === 0) return false;
+                const lambda = ((y4 - y3) * (x4 - x1) + (x3 - x4) * (y4 - y1)) / det;
+                const gamma = ((y1 - y2) * (x4 - x1) + (x2 - x1) * (y4 - y1)) / det;
+                return lambda > 0 && lambda < 1 && gamma > 0 && gamma < 1;
+        }
+        
+        private segmentHitsAnyWall(ax: number, ay: number, bx: number, by: number): boolean {
+                if (this.walls.length === 0) return false;
+                for (const w of this.walls) {
+                        if (this.segmentsIntersect(ax, ay, bx, by, w.x1, w.y1, w.x2, w.y2)) return true;
+                }
+                return false;
+        }
 
-			const ranging = this.uwb.measure(
-				{ id: sender.id, x: sender.x, y: sender.y },
-				{ id: recipient.id, x: recipient.x, y: recipient.y },
-				{ pixelsPerMeter: 1, maxRangeMeters: this.uwbRangeMeters, walls: this.walls }
-			);
-			if (!ranging.success) continue;
+        private applyBounds(node: NodeWorldState) {
+                if (!this.worldBounds) return;
+                if (node.x < this.worldBounds.minX) {
+                        node.x = this.worldBounds.minX;
+                        node.vx = Math.abs(node.vx);
+                }
+                if (node.x > this.worldBounds.maxX) {
+                        node.x = this.worldBounds.maxX;
+                        node.vx = -Math.abs(node.vx);
+                }
+                if (node.y < this.worldBounds.minY) {
+                        node.y = this.worldBounds.minY;
+                        node.vy = Math.abs(node.vy);
+                }
+                if (node.y > this.worldBounds.maxY) {
+                        node.y = this.worldBounds.maxY;
+                        node.vy = -Math.abs(node.vy);
+                }
+        }
 
-			// IMPORTANT: clone payload per-recipient so UWB range/angle injection doesn't
-			// overwrite other recipients' measurements for broadcast packets.
-			const cloned: Packet = {
-				...packet,
-				srcId: senderId,
-				payload: packet.payload && typeof packet.payload === "object" ? { ...packet.payload } : packet.payload,
-			};
-			if (
-				cloned.payload?.type === "RANGING_POLL" ||
-				cloned.payload?.type === "RANGING_RESP" ||
-				cloned.payload?.type === "HELLO"
-			) {
-				const normalizeAngleRad = (a: number) => {
-					let x = a;
-					while (x > Math.PI) x -= 2 * Math.PI;
-					while (x < -Math.PI) x += 2 * Math.PI;
-					return x;
-				};
-				// UWBRanging returns bearing from sender -> receiver.
-				// Firmware expects bearing from *self(receiver)* -> neighbor(sender), so flip by π.
-				const angleSelfToNeighbor = normalizeAngleRad((ranging.aoa ?? 0) + Math.PI);
-				cloned.payload.range = ranging.measuredDistanceMeters;
-				cloned.payload.angle = angleSelfToNeighbor;
-			}
-
-			recipient.incoming.push(cloned);
-			this.hooks?.onDeliver?.({
-				timeMs: this.timeMs,
-				senderId,
-				recipientId: recipient.id,
-				packet: cloned,
-				senderPos: { x: sender.x, y: sender.y },
-				recipientPos: { x: recipient.x, y: recipient.y },
-				ranging: {
-					trueDistanceMeters: ranging.trueDistanceMeters,
-					measuredDistanceMeters: ranging.measuredDistanceMeters,
-					aoa: ranging.aoa,
-					aod: ranging.aod,
-					los: ranging.los,
-				},
-			});
-		}
-	}
-
-	public snapshot(): RunnerSnapshot {
-		return {
-			timeMs: this.timeMs,
-			nodes: this.nodes.map((node) => ({
-				id: node.id,
-				trueX: node.x,
-				trueY: node.y,
-				batteryV: node.batteryV,
-				firmware: node.firmware.getSnapshot(),
-				txCount: node.txCount,
-			})),
-		};
-	}
-
-	public runFor(simSeconds: number, dtMs = 50) {
-		const steps = Math.ceil((simSeconds * 1000) / dtMs);
-		for (let stepIndex = 0; stepIndex < steps; stepIndex++) {
-			this.step(dtMs);
-		}
-		return this.snapshot();
-	}
+        public snapshot(): { id: number; x: number; y: number; firmware: FirmwareSnapshot }[] {
+                return this.nodes.map((n) => ({
+                        id: n.id,
+                        x: n.x,
+                        y: n.y,
+                        firmware: n.firmware.getSnapshot(),
+                }));
+        }
 }
