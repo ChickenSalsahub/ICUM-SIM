@@ -15,7 +15,7 @@ Figures \ref{fig:A_RSME} and \ref{fig:A_Tx} below illustrate the RSME at the dif
 \includegraphics[width= 1\linewidth]{images'nshi/exp_a/a_50_moving_01_noise_msg_total.png}
 \caption{Graph depicting the amount of messages ($y$-$axis$) over time ($x$-$axis$). The blue dotted line is the baseline, while the green line is with event-driven communication \label{fig:A_Tx}}
 \end{figure}
-\noindent While the RMSE is largely the same for both cases, the message rate for the latter sees a significant reduction. At 600 seconds, the number of messages sent is $34,536$ and $5,148$ respectively, which is an $85.07\%$ decrease in the number of messages sent for the event-driven case. We argue that the difference in RMSE is insignificant when compared to the staggering decrease in messages sent, which undoubtedly positively impacts the system's battery performance and expected lifetime. To measure this, we would need to know exactly how much power the nodes spend on messaging. With only a novel system, actual testing of hardware becomes difficult. We will instead illustrate power saving as bounded estimates.
+\noindent While the RMSE is largely the same for both cases, the message rate for the latter sees a significant reduction. At 600 seconds, the number of messages sent is $34,390$ and $8,195$ respectively, which is an $76.17\%$ decrease in the number of messages sent for the event-driven case. We argue that the difference in RMSE is insignificant when compared to the staggering decrease in messages sent, which undoubtedly positively impacts the system's battery performance and expected lifetime. To measure this, we would need to know exactly how much power the nodes spend on messaging. With only a novel system, actual testing of hardware becomes difficult. We will instead illustrate power saving as bounded estimates.
 \noindent If we assume that BLE power consumption scales linearly, we can derive the battery life as follows, where $L$ is the total battery life, $B$ is the total battery capacity, and $P$ is the power spent
 \begin{equation}
     L = \frac{B}{P}
@@ -28,12 +28,12 @@ The power spent on BLE messaging can be defined as
 \begin{equation}
     P_{BLE} = E\times P_{total}
 \end{equation}
-where $E$ is the energy percentage that BLE uses, and if we take the reduced messaging rate of $85.07\%$, we get a new BLE power consumption
+where $E$ is the energy percentage that BLE uses, and if we take the reduced messaging rate of $76.17\%$, we get a new BLE power consumption
 \begin{equation}
-    P_{BLE, New} = (1-0.8507)\times P_{BLE}
+    P_{BLE, New} = (1-0.7617)\times P_{BLE}
 \end{equation}
 \begin{equation}
-    P_{BLE, New} = (1-0.8507) \times E \times P_{total}
+    P_{BLE, New} = (1-0.7617) \times E \times P_{total}
 \end{equation}
 The power that the system additionally uses can be redefined as
 \begin{equation}
@@ -50,21 +50,21 @@ From this, we can derive the formula for the new power consumption
     P_{total, new} = P_{other,new}+ P_{BLE, new}
 \end{equation}
 \begin{equation}
-    P_{total, new} = (1-E)\times P_{total}+ (1-0.8507) \times E \times P_{total}
+    P_{total, new} = (1-E)\times P_{total}+ (1-0.7617) \times E \times P_{total}
 \end{equation}
 \begin{equation}
-    P_{total, new} = P_{total}[(1-E)+ (1-0.8507) \times E]
+    P_{total, new} = P_{total}[(1-E)+ (1-0.7617) \times E]
 \end{equation}
 \begin{equation}
-    P_{total, new} = P_{total}(1-0.8507E)
+    P_{total, new} = P_{total}(1-0.7617E)
 \end{equation}
 Subsequently, the formula for computing the new battery life becomes
 \begin{equation}
-    L_{new} = \frac{B}{P_{total, new}} = \frac{B}{ P_{total}(1-0.8507E)}
+    L_{new} = \frac{B}{P_{total, new}} = \frac{B}{ P_{total}(1-0.7617E)}
 \end{equation}
 Assuming ideal conditions, where battery capacity $B$ is $1$, while the starting battery percentage $P_{total, new}$ is also $1$, the final formula that we will use to compute the bounds becomes
 \begin{equation}
-  \frac{1}{(1-0.8507E)}
+  \frac{1}{(1-0.7617E)}
 \end{equation}
 Again, we cannot verify what percentage of battery life is used for BLE messaging, but we can compute upper and lower bounds on the battery-life improvement. Figure \ref{fig:battery} shows, after 10 minutes, the percentage improvement in battery life ($y$-$axis$) as a function of $E$, the total battery percentage devoted to BLE messaging at $5\%$ intervals($x$-$axis$).
 \begin{figure}[H] %float with two figures
