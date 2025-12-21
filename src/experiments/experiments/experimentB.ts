@@ -20,8 +20,8 @@ export interface ExperimentBRowRaw extends ExperimentBRow {
 
 type EstNode = {
 	id: number;
-	trueX: number;
-	trueY: number;
+	x: number;
+	y: number;
 	firmware: { estPosition: { x: number; y: number }; neighbors: any[] };
 	txCount: number;
 };
@@ -30,15 +30,15 @@ function buildEstimatedNodesFromPoseGraph(
 	snapshot: ReturnType<SimulationRunner["snapshot"]>,
 	graph: RelativePoseGraph
 ): EstNode[] {
-	return snapshot.nodes.map((n) => {
+	return snapshot.map((n) => {
 		const pose = graph.getNodePose(n.id);
-		const x = pose?.x ?? 0;
-		const y = pose?.y ?? 0;
+		const estX = pose?.x ?? 0;
+		const estY = pose?.y ?? 0;
 		return {
 			id: n.id,
-			trueX: n.trueX,
-			trueY: n.trueY,
-			firmware: { ...n.firmware, estPosition: { x, y } },
+			x: n.x,
+			y: n.y,
+			firmware: { ...n.firmware, estPosition: { x: estX, y: estY } },
 			txCount: n.txCount,
 		};
 	});

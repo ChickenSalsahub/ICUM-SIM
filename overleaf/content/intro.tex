@@ -1,5 +1,12 @@
 
-\section*{1. INTRODUCTION}
+\section{INTRODUCTION}
+
+\begin{figure*}[t!]
+    \centering
+    \includegraphics[width=0.9\textwidth]{images'nshi/comm.png}
+    \caption{\textbf{System Overview.} The I.C.U.M. ecosystem integrates a realistic discrete-event simulator (ICUM-SIM) with a novel distributed firmware architecture. Nodes leverage event-triggered messaging (ETM) driven by inertial dynamics to maintain a rigid formation without static infrastructure, balancing localization accuracy with long-term energy efficiency.}
+    \label{fig:system_overview}
+\end{figure*}
 %Purpose: Show how your work fits into the existing research landscape.
 %Should include:
 %Summaries of similar studies or technologies
@@ -15,6 +22,15 @@
 
 %Cooperative localization refers to the process in which multiple agents (e.g., robots, vehicles, or sensors) estimate their positions by sharing observations and relative measurements. 
 \noindent The primary advantage of cooperative localization is improved accuracy. By combining independent sensor data, agents reduce individual uncertainty and mitigate drift inherent to inertial and dead-reckoning methods \cite{CooperativeLocalizationApproachforMulti-RobotSystemsBasedonStateEstimationErrorCompensation}. Cooperative localization also enhances robustness in environments where GPS or local sensing is unreliable, since agents can provide corrective information to one another \cite{CooperativeLocalizationUsingDistanceMeasurementsforMobileNodes}. Furthermore, the approach increases fault tolerance—individual sensor failures have less impact—and supports scalability in multi-agent systems by distributing sensing responsibilities across the network \cite{Fault-TolerantMulti-ModalLocalizationofMulti-RobotsonMatrixLieGroups}. Battery performance is also a vital aspect of distributed networks if the nodes are deployed without a constant source of power. One aspect of distributed cooperative localization systems that can largely affect battery performance is the communication between nodes. Nodes that attempt to update location information despite no significant real-world change will waste a significant amount of energy \cite{EnergyEfficiencyOptimizationofCooperativeCommunicationinWirelessSensorNetworks}, while not updating location information often enough will impair the systems performance \cite{Space-TimeHierarchicalGraphBasedCooperativeLocalizationinWirelessSensorNetworks}. These two factors highlight the balance between sufficient and efficient communication needed for cooperative localization systems, which is what our research aims to achieve. Our system combines inertial movement readings to effectively detect when a location update is required. By only initiating location updating when needed, the nodes will not send superfluous location updates, and only initiate communication when needed.
+
+\subsection*{Contributions}
+\noindent This paper makes the following contributions to the field of infrastructure-free cooperative localization:
+\begin{enumerate}
+    \item \textbf{Event-Triggered Architecture:} We propose an IMU-gated communication protocol that reduces network overhead by over 75\% while maintaining sub-meter relative accuracy, effectively balancing energy efficiency with formation integrity.
+    \item \textbf{Anchor-Free Formation Rigidity:} We demonstrate that a decentralized "spring-mass" optimization can converge to a rigid geometric formation (RMSE $< 0.1m$) solely from peer-to-peer UWB ranging, eliminating the need for expensive static infrastructure or GPS availability.
+    \item \textbf{Battery-Aware Topology Control:} We introduce a hierarchical leader election algorithm that dynamically rotates cluster leadership based on energy reserves and connectivity.  Simulation results confirm this mechanism prevents the "death spiral" of critical nodes and extends the functional lifetime of the network.
+    \item \textbf{Open Source Simulation Framework:} We provide ICUM-SIM, a verified component-based simulator for prototyping distributed localization algorithms with realistic physics, hardware emulation, and energy depletion models.
+\end{enumerate}
 
 
 

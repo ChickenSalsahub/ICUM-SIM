@@ -1,30 +1,48 @@
 
-\section*{6. Results}
+\section{Results}
 
-\noindent The empirical validation conducted through the ICUM-SIM environment demonstrates that the proposed decentralized localization framework effectively balances communication overhead with positioning precision [1, 2]. 
+\noindent The empirical validation conducted through the ICUM-SIM environment demonstrates that the proposed decentralized localization framework effectively balances communication overhead with positioning precision.
 
-\noindent Analysis of the Event-Triggered Messaging (ETM) protocol reveals a significant reduction in network load; specifically, the system achieved an 85.07\% decrease in total messages sent compared to the periodic baseline, reducing packet counts from 34,536 to 5,148 over a 600-second interval [3]. Despite this reduction in transmission frequency, the aligned Root Mean Square Error (RMSE) remained largely consistent with the baseline, indicating that the IMU-controlled logic successfully filters redundant updates without compromising real-time tracking accuracy [3, 4]. 
+\subsection*{6.1 Efficiency & Message Reduction (Experiment A)}
+\noindent Analysis of the Event-Triggered Messaging (ETM) protocol (Experiment A) reveals a significant reduction in network load. As illustrated in Figure \ref{fig:A_Tx}, the system achieved a 76.17\% decrease in total messages sent compared to the periodic baseline, reducing packet counts from 34,390 to 8,195 over a 600-second interval. It is crucial to note that both the Baseline and ETM configurations utilize the identical distributed spring-relaxation algorithm for coordinate resolution. The performance variance is solely attributable to the \textit{timing} of the ranging inputs (Periodic vs. Reactive), ensuring that the comparison isolates the efficiency of the communication protocol rather than the positioning mathematics.
 
-\noindent Scalability experiments further highlight that localization precision is positively correlated with node density, with high-density configurations ($N=100$) achieving a final RMSE of approximately 0.09m [5]. While smaller clusters ($N \le 10$) converge rapidly, larger networks require a prolonged stabilization period of up to 600 seconds as position corrections propagate step-by-step across the network diameter [5, 6]. Furthermore, the results indicate that node motion in dense scenarios ($N \ge 50$) acts as a catalyst for convergence, utilizing "virtual anchors" and optimization "unstucking" to resolve geometric uncertainties and avoid local minima [7, 8].
+\noindent Despite this reduction in transmission frequency, the aligned Root Mean Square Error (RMSE) remained largely consistent with the baseline (see Figure \ref{fig:A_RSME}), indicating that the IMU-controlled logic successfully filters redundant updates without compromising real-time tracking accuracy. Furthermore, this reduction in radio traffic translates directly to energy conservation. Figure \ref{fig:battery} highlights that as the proportion of energy budget dedicated to communication increases, the operational lifetime extension provided by ETM scales exponentially, potentially doubling system longevity in high-traffic scenarios.
 
-\subsection*{Limitations}
+\subsection*{6.2 Robustness to Measurement Noise (Experiment B)}
+\noindent The system's resilience to sensor inaccuracy was evaluated by subjecting the ranging engine to increasing Gaussian noise levels. Results shown in Figure \ref{fig:B_MAE} indicate that the distributed spring-relaxation algorithm acts as an effective low-pass filter against transient errors. The formation maintained functional relative localization (RMSE $<$ 0.5m) even when UWB ranging variance was increased to $3\sigma$ levels ($\approx 30$cm noise), verifying the stability of the cooperative optimization approach under degraded hardware conditions.
 
-\noindent Despite the robust performance observed in simulation, several architectural and environmental limitations are inherent to the I.C.U.M. system [9]. 
+\subsection*{6.3 Scalability & Rigidity (Experiment C)}
+\noindent Scalability experiments highlight a positive correlation between node density and localization precision. High-density configurations ($N=100$) achieved the highest accuracy with a final RMSE of approximately 0.09m, benefiting from the redundancy of measurements (Figure \ref{fig:C_convergence_static}). In contrast, intermediate cluster sizes ($N=20-35$) exhibited a "Rigidity Transition," where the network graph remained computationally "floppy" and susceptible to geometric distortion during motion.
+\noindent Furthermore, node motion in dense scenarios ($N \ge 50$) was observed to act as a catalyst for convergence (Figure \ref{fig:C_convergence_moving}). This motion-assisted convergence phenomenon allows the network to utilize movement to resolve local minima and "unstuck" distorted geometries, suggesting that mobile swarms are inherently more self-correcting than static ones.
 
-\noindent The most critical scalability constraint is the quadratic explosion ($O(N^2)$) of traffic within the Measurement Plane; while the Control Plane scales linearly, each ranging poll triggers unicast responses from all reachable neighbors, which may eventually saturate the wireless channel capacity as density increases [10, 11]. Furthermore, the system exhibits a "Rigidity Transition" peak in instability for intermediate node counts between 20 and 35, where the graph remains "floppy" and susceptible to severe geometric distortion during motion [12]. Lastly, the system’s operational reliability is dependent on mesh connectivity, as isolated nodes must fall back to GPS, which is frequently unreliable or unavailable in the target GPS-denied environments [13, 14].
+\section*{7. Limitations}
 
-\subsection*{Simulator Uncertainties}
+\noindent Despite robust simulation performance, several architectural limitations must be acknowledged.
 
-\noindent The fidelity of the ICUM-SIM environment is subject to several simplifications that introduce uncertainties regarding real-world hardware performance [1, 15]. 
+\noindent \textbf{Traffic Scalability:} The most critical constraint is the quadratic explosion ($O(N^2)$) of traffic during ranging. While the background coordination traffic scales linearly, each ranging poll triggers unicast responses from all reachable neighbors. In simulations with $N > 75$, this saturation began to induce packet loss, suggesting that the current all-to-all ranging protocol requires spatial partitioning or sub-clustering to scale to thousands of nodes.
 
-\noindent Firstly, the stochastic UWB ranging model utilizes a Gaussian distribution to simulate sensor noise, whereas real-world deployments are often subject to non-Gaussian biases, hardware-specific clock drift, and complex multipath effects [15-17]. Secondly, the occlusion model relies on a binary ray-casting algorithm that drops packets entirely upon intersection with obstacles, neglecting physical phenomena such as signal diffraction and penetration which might occur in physical settings [18]. 
+\noindent \textbf{Simulator Validity:} The ICUM-SIM environment employs two key simplifications: a Gaussian noise model for UWB (ignoring multi-path biases) and a binary ray-casting model for occlusion (ignoring diffraction). Additionally, the battery model is linear, whereas real Lithium-Polymer cells exhibit non-linear voltage drop-offs that could trigger the "death spiral" behavior more abruptly in physical deployments.
 
-\noindent Additionally, the simulator employs a linear energy depletion model for battery evaluation, which does not account for the non-linear discharge curves or environmental sensitivities characteristic of physical battery cells [2, 3]. Finally, although the simulator models asynchronous execution through independent timers, it may not fully replicate the systematic synchronization challenges and interference patterns inherent in a physical BLE/UWB mesh deployment [10, 19].
+\section*{8. Potential Applications}
 
+\noindent The findings of this research have direct utility in scenarios where GPS is denied and static infrastructure is impractical.
 
+\noindent \textbf{Search and Rescue (SAR):} In collapsed buildings or dense forests, rapid deployment is critical. The I.C.U.M. system's "anchor-free" capability allows first responders to simply walk into a site and immediately establish a relative tracking mesh, monitoring the position of team members relative to the squad leader without wasting time setting up beacons.
 
-%Something about leader election and what smart things we can say about it
+\noindent \textbf{Subterranean & Mining Operations:} Underground tunnels completely block GNSS signals. By utilizing the proposed relative localization framework, mining personnel and machinery can maintain collision-safe formations. The study's "Rigidity Transition" finding suggests that maintaining a minimum density ($N \ge 50$) is crucial for safety in these linear environments.
 
-%\subsection{Limitations}
-%Hvilke usikkeder er der ved vores simulator?
+\noindent \textbf{Autonomous Drone Swarms:} For UAV swarms operating in jamming environments, the "aligned RMSE" metric demonstrates that the swarm can maintain its geometric shape (formation integrity) using only peer-to-peer UWB, ensuring that drones do not collide even if they cannot determine their global latitude.
 
+\noindent \textbf{Construction Equipment Localization:} Construction sites are typically packed with all kinds of machinery and equipment. Since tools and assets are frequently misplaced in such environments, the proposed relative localization framework can be effectively used to localize and track this equipment.
+
+\section*{9. Future Works}
+
+\noindent To bridge the gap between simulation and real-world deployment, several avenues for future research are identified:
+
+\noindent \textbf{Hardware Validation:} The immediate next step is the porting of the TypeScript-based firmware logic to C++ for deployment on ESP32-UWB hardware. Validating the "Death Spiral" and leader election dynamics on physical testbeds will confirm if the energy savings observed in simulation translate to real-world battery life extension.
+
+\noindent \textbf{3D Volumetric Localization:} The current 2D implementation should be extended to 3D to support drone swarms or multi-floor operations. This requires upgrading the spring-relaxation optimization to operate in $(x, y, z)$ space and integrating barometric pressure sensors to constrain the Z-axis drift.
+
+\noindent \textbf{Hybrid Anchor/Anchor-free Architectures:} While this work focused on anchor-free operation, future iterations could incorporate "opportunistic anchors"—nodes that detect GPS lock (e.g., near a cave entrance) and inject absolute position constraints into the mesh, allowing the relative coordinate frame to anchor itself globally without dedicated infrastructure.
+
+\noindent \textbf{Scalable Routing Primitives:} To address the $O(N^2)$ traffic limitation, future work should explore "k-hop" ranging limits or probabilistic neighbor selection, ensuring that bandwidth usage plateaus rather than explodes as density increases.

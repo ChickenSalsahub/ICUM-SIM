@@ -1,8 +1,9 @@
-\subsection*{5.3 EXPERIMENT A: Quantification of Communication Efficiency}
+\subsection{Experiment A: Quantification of Communication Efficiency}
+\label{sec:exp_a}
 \noindent The main idea behind the I.C.U.M system is the optimization of the balance between efficient and effective communication, which is what the first experiment would quantify.
 
 
-\subsubsection*{Methodology}
+\subsubsection{Methodology}
 \noindent Performance accuracy was evaluated using \textbf{On-Device RMSE}. It is important to clarify that this metric validates the \textit{internal belief} of the distributed swarm, operating purely on local neighbor distances. The simulator acts as an "Oracle" for evaluation: at each timestep, it accesses the memory of every connected node to retrieve its locally estimated coordinate $(x,y)$, and compares this entire set against the ground truth positions after rigid alignment. This approach isolates the effectiveness of the distributed positioning algorithm, ensuring that the metric reflects the system's real-time self-awareness.
 
 \noindent The simulated environment was set up in two different states, where the Root Mean Square Error (RMSE) and total number of messages sent across the entire system were compared for 10 minutes. The first case, which we call the $baseline$, acts as a basis for regular system operation, while the second case includes the IMU-controlled messaging, which we refer to here as $event$-$driven$ communication. By having a baseline comparison, we would be able to directly measure the impact of event-driven communication on the error in location data, to see if efficient communication would have a negative effect on the overall location accuracy. \\

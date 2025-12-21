@@ -53,6 +53,7 @@ export function runExperimentE(): ExperimentETimeRow[] {
 							neighborTimeoutMs: 5_000,
 					  }
 					: { eventDrivenSensing: true },
+			worldBounds: EXPERIMENT_WORLD_BOUNDS_M,
 		});
 
 	const scenarios: MotionScenarioName[] = ["none_moving", "few_moving", "many_moving"];
@@ -62,7 +63,7 @@ export function runExperimentE(): ExperimentETimeRow[] {
 		for (const policy of ["baseline", "icum"] as const) {
 			const seed = baseSeed + 700 + scenario.length * 31 + (policy === "baseline" ? 1 : 2);
 			const runner = makeRunner(policy, seed);
-			runner.setWorldBounds(EXPERIMENT_WORLD_BOUNDS_M);
+			// runner.setWorldBounds(EXPERIMENT_WORLD_BOUNDS_M); // Set in makeRunner
 			seedNodes(runner, layout);
  
 			let nextLog = 0;
@@ -75,10 +76,10 @@ export function runExperimentE(): ExperimentETimeRow[] {
 						policy,
 						seed,
 						timeSeconds: tMs / 1000,
-						txTotal: sumTx(snap.nodes),
-						rmse: rmseAlignedRigid(snap.nodes),
-						rangeResidualMae: measurementRangeResidualMae(snap.nodes),
-						angleResidualMae: measurementAngleResidualMae(snap.nodes),
+						txTotal: sumTx(snap),
+						rmse: rmseAlignedRigid(snap),
+						rangeResidualMae: measurementRangeResidualMae(snap),
+						angleResidualMae: measurementAngleResidualMae(snap),
 					});
 					nextLog += logEveryMs;
 				}

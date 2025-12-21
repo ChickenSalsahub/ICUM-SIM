@@ -127,8 +127,8 @@ export function runExperimentDScenarios(): ExperimentDScenarioTimeRow[] {
 			// Ground truth for error computation.
 			const truth = new Map<number, { x: number; y: number }>();
 
-			for (const sn of snap.nodes) {
-				truth.set(sn.id, { x: sn.trueX, y: sn.trueY });
+			for (const sn of snap) {
+				truth.set(sn.id, { x: sn.x, y: sn.y });
 			}
 
 			cloud.tick(nowMs);

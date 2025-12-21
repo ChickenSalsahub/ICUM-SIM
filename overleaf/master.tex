@@ -2,8 +2,24 @@
 \documentclass{aes2e}
 \usepackage{amsmath}
 \usepackage{float}
+\usepackage{microtype} % Better typography
+\usepackage{xcolor}    % Color support
 \DeclareMathOperator*{\argmax}{arg\,max}
 
+\renewcommand{\printbiography}{}
+
+%FIX SIDENUMBBER START
+\makeatletter
+\def\ps@plain{%
+  \let\@mkboth\@gobbletwo
+  \def\@oddhead{}%
+  \def\@evenhead{}%
+  \def\@oddfoot{\hfil\thepage\hfil}%
+  \def\@evenfoot{\hfil\thepage\hfil}%
+}
+\makeatother
+\pagestyle{plain}
+%FIX SIDENUMBBER SLUT
 
 % Metadata Information
 \jyear{2025}
@@ -13,26 +29,29 @@
 \begin{document}
 
 % Page heads
-%\markboth{TEST}{I.C.U.M}
+\markboth{Villadsen et al.}{I.C.U.M: IMU-Controlled UltraWideband Mesh}
 
 % Title portion
-\title{I.C.U.M - IMU Controlled Ultra-wideband Measurements}
+% Added some color and a rule
+\title{I.C.U.M - IMU Controlled Ultra-wideband Mesh System \\[\baselineskip] \color{black!80}\hrule height 0.5pt}
 
 %Author Info.
 \authorgroup{
-\author{Benjamin M. Villadsen}
-\author{Benjamin S. Larsen}
-\author{Muad Ghanim}
-\author{Thor C. Koustrup-Müller}
-\author{Daniel Brenet}
-\role{Authors}
-\email{bmvi21@student.aau.dk, bsla21@student.aau.dk, muad@student.aau.dk, tkoust21@student.aau.dk, dbrene21@student.aau.dk}
+\vspace{5pt}
+\textsc{Authors} \\
+\vspace{5pt}
+\author{Benjamin M. Villadsen, \quad Benjamin S. Larsen, \quad Muad Ghanim,} \\
+\author{Thor C. Koustrup-Müller, \quad Daniel Brenet}
+\email{bmvi21, bsla21, muad, tkoust21, dbrene21 @student.aau.dk}
+\vspace{15pt}
+\textsc{Supervisor} \\
+\vspace{5pt}
 \author{
-Tung Kieu
+Tung "Gamer" Kieu
 }
-\role{Supervisor}
 \email{tungkvt@cs.aau.dk}
 \affil{Aalborg University, Copenhagen S, Denmark}
+\affil{21. December 2025}
 }
 
 %Abstract
@@ -44,21 +63,22 @@ Tung Kieu
 %Methods: Brief overview of techniques or datasets used
 %Results: Main findings or performance metrics
 %Conclusion: Key takeaway or implications
-\abstract{This paper is about combining BLE, IMU and GPS data to cooperatively determine the locations of nodes in a mesh network accurately. This paper is about combining BLE, IMU and GPS data to cooperatively determine the locations of nodes in a mesh network accurately. This paper is about combining BLE, IMU and GPS data to cooperatively determine the locations of nodes in a mesh network accurately. This paper is about combining BLE, IMU and GPS data to cooperatively determine the locations of nodes in a mesh network accurately.}
+\abstract{
+\noindent \textbf{Abstract} --- This paper presents the IMU-Controlled UltraWideband Mesh (I.C.U.M), a decentralized localization framework designed to enable autonomous swarm compliance in GPS-denied environments without reliance on static anchors. By fusing peer-to-peer Ultra-Wideband (UWB) ranging with low-cost Inertial Measurement Units (IMUs), we propose a distributed spring-relaxation algorithm that allows mobile agents to maintain a rigid relative coordinate frame solely through local interactions. To address the critical energy constraints of battery-powered swarms, we introduce an Event-Triggered Messaging (ETM) protocol that gates radio transmissions based on inertial motion detection. Empirical validation through the open-source I.C.U.M-SIM environment demonstrates that this architecture reduces network communication overhead by 76.17\% compared to periodic baselines while maintaining sub-meter formation accuracy (RMSE $\approx$ 0.1m). Furthermore, we identify a "Rigidity Transition" in network scalability, showing that node density acts as a catalyst for geometric convergence. The proposed system offers a robust, energy-efficient foundation for rapid-deployment search-and-rescue teams and subterranean robotics.}
+
+
+\vspace{10pt}
+\noindent\textbf{Keywords:} Cooperative Localization, Ultra-Wideband (UWB), Inertial Measurement Unit (IMU), Event-Triggered Messaging, Wireless Sensor Networks.}
 
 
 \maketitle
 
 %Head 1
 %\section{INTRODUCTION}
-%Purpose: Introduce the topic, explain its importance, and state your research goal.
-%Should include:
-%Background and context of the problem
-%A brief review of previous or related work (what’s been done so far)
-%The research gap (what’s missing or not solved yet)
-%The objective and contribution of your paper
-%A short overview of the paper’s structure (optional)
-%Tip: End with a clear thesis statement or research question
-%This paper focuses on developing a cooperative localization approach that combines data from Bluetooth Low Energy (BLE), Inertial Measurement Units (IMUs), and Global Positioning System (GPS) sensors to accurately determine the positions of nodes within a mesh network. The integration of these three technologies allows the system to leverage the strengths of each: BLE provides short-range distance estimates between nodes, IMUs track motion and orientation changes over time, and GPS offers absolute position references when available. By fusing these complementary data sources, the proposed method aims to enhance positioning accuracy, reduce cumulative errors from individual sensors, and maintain reliable localization even in challenging environments where GPS signals are weak or unavailable.
+%Head 1
+%\section{INTRODUCTION}
+
+
+\thispagestyle{plain}
 \input{content/main}
 \end{document}

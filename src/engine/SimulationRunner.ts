@@ -1,11 +1,12 @@
-import { Packet, PacketType, Wall } from "../types";
-import { FirmwareConfig, FirmwareSnapshot, INodeHAL, NodePoseEstimate } from "../firmware/types";
+import { Packet, Wall } from "../types";
+import { FirmwareConfig, FirmwareSnapshot, INodeHAL } from "../firmware/types";
 import { NodeFirmware } from "../firmware/NodeFirmware";
 import { UWBRanging } from "../logic/UWBRanging";
 import { createMulberry32, RngFn } from "../logic/math/Random";
 
 export interface SimulationHooks {
         onDeliver?: (info: { senderId: number; recipientId: number; packet: Packet; range: number }) => void;
+        onTx?: (info: { timeMs: number; senderId: number; packet: Packet; senderPos: { x: number; y: number } }) => void;
 }
 
 export interface SimulationOptions {
@@ -27,6 +28,7 @@ interface NodeWorldState {
         vy: number;
         batteryCapacity: number; // 0.0 to 1.0 (Full)
         incoming: Packet[];
+        txCount: number;
 }
 
 // Energy Model Constants
@@ -92,6 +94,7 @@ export class SimulationRunner {
                         batteryCapacity: initialPct * BATTERY_FULL,
                         incoming: [],
                         firmware: null as any,
+                        txCount: 0,
                 };
 
                 const hal: INodeHAL = {
@@ -204,9 +207,19 @@ export class SimulationRunner {
 
                 // TX Cost
                 sender.batteryCapacity -= ENERGY_COST_TX;
+                sender.txCount++;
                 if (sender.batteryCapacity <= 0) {
                         sender.batteryCapacity = 0;
                         return; // Died
+                }
+
+                if (this.hooks.onTx) {
+                        this.hooks.onTx({
+                                timeMs: this.timeMs,
+                                senderId: sender.id,
+                                packet: JSON.parse(JSON.stringify(packet)), // Copy to avoid mutation
+                                senderPos: { x: sender.x, y: sender.y },
+                        });
                 }
 
                 if (this.packetLoss > 0 && this.rng() < this.packetLoss) return;
@@ -297,11 +310,12 @@ export class SimulationRunner {
                 }
         }
 
-        public snapshot(): { id: number; x: number; y: number; firmware: FirmwareSnapshot }[] {
+        public snapshot(): { id: number; x: number; y: number; txCount: number; firmware: FirmwareSnapshot }[] {
                 return this.nodes.map((n) => ({
                         id: n.id,
                         x: n.x,
                         y: n.y,
+                        txCount: n.txCount,
                         firmware: n.firmware.getSnapshot(),
                 }));
         }

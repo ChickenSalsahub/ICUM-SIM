@@ -1,7 +1,7 @@
-\section*{5. Experiments}
+\section{Experiments}
 \noindent To validate the performance of the system, a series of simulation experiments was conducted using the I.C.U.M simulator environment. All scenarios utilized a fixed $50 \times 50$ meter world boundary and a standardized UWB communication range of $15$ meters. The experiments focus on three key performance indicators: communication efficiency, robustness to ranging noise, and the impact of network density on localization accuracy. We will be using the following metrics to determine the quality of the different aspects of the system during the various experiments:
 
-\subsection*{5.1 Performance Metrics}
+\subsection{Performance Metrics}
 \noindent Because the proposed system is \textbf{anchor-free}, the coordinate system established by the network is arbitrary. The entire graph may be rotated or translated relative to the ground truth without affecting the \textit{internal} correctness of the localization. Comparing raw estimated coordinates $(x, y)$ directly to ground truth coordinates $(x_{true}, y_{true})$ would penalize correct shapes that simply happen to be rotated 90 degrees. To address this, we utilize rigid-invariant metrics:
 
 \begin{itemize}
@@ -15,7 +15,7 @@
     This effectively measures the \textbf{shape accuracy} of the network, decoupling it from the global coordinate frame ambiguity.
 \end{itemize}
 
-\subsection*{5.2 Motion Patterns}
+\subsection{Motion Patterns}
 
 \noindent For experiments involving mobile nodes (Experiments 5.1 and 5.3), a realistic motion model was implemented to evaluate the system's tracking capability under dynamic conditions. Nodes follow a \textbf{Constrained Circular Model} designed to simulate walking behavior within a confined area.
 \\\\

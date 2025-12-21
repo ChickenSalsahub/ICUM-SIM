@@ -1,7 +1,8 @@
-\subsection*{5.5 EXPERIMENT C: Scalability \& Stabilization}
+\subsection{Experiment C: Scalability \& Stabilization}
+\label{sec:exp_c}
 \noindent The objective of the third experiment was to evaluate the scalability and stability of the I.C.U.M cooperative localization system as the network size increases. We aimed to determine how node density impacts the convergence speed and tracking accuracy, specifically testing whether larger clusters can maintain a stable coordinate frame in dynamic environments where a significant portion of the agents are moving.
 
-\subsubsection*{Methodology}
+\subsubsection{Methodology}
 \noindent Scalability was assessed using the same \textbf{On-Device RMSE} methodology described in Experiment A (Section 5.3), verifying the convergence behavior of the distributed spring-relaxation algorithm. By measuring the error of the firmware's internal state via the simulator's Oracle view, we directly evaluate the ability of large-scale meshes to self-organize through purely local interactions.\\
 
 \noindent We conducted the experiment with varying node counts $[5, 10, 20, 35, 50, 75, 100]$. Two scenarios were executed for each configuration:

@@ -1,14 +1,14 @@
-\section*{3. Algorithms \& System Model}
+\section{Algorithms \& System Model}
 \noindent Unlike traditional centralized localization systems that rely on raw trilateration, this project's proposed solution, namely "ICUM" system, implements a distributed state machine where node roles are dynamic and position estimation is performed via a cooperative graph optimization algorithm.
 
-\subsection*{3.1 Dynamic Role Management}
+\subsection{Dynamic Role Management}
 \noindent The network operates as a Destination-Oriented Directed Acyclic Graph (DODAG) for sending messages. Nodes autonomously switch between roles based on their connectivity state and sensor readings. Let $R_i(t)$ denote the role of the node $i$ at time $t$. The state space is defined as: 
 \begin{equation}
     R \in \{ROOT, LEADER, RELAY, IDLE, ISOLATED\}
 \end{equation}
 A node in the state $IDLE$ must send its messages "up" to either $RELAY$s or $LEADER$s, hence why the messaging strategy is based on DODAG. Transitions are governed by the tuple ($H_{gw}, N{neighbors},T_{iso}$), where $H_{gw}$ is the hop count to a gateway, $N_{neighbors} = 0$ for a duration $t > T_{iso}$. A node promotes itself to $R = LEADER$ if it wins the local election process defined in section 3.4.
 
-\subsection*{3.2 Hardware}
+\subsection{Hardware}
 \noindent Since every node needs the capabilities to fill whatever role the system requires at any given state, the hardware stack must be homogeneous. Below is a tentative hardware specification that fulfils all the requirements of the system:
 \begin{itemize}
     \item \textbf{Computation}: MCU (e.g., Nordic nRF52/53 or STM32)
@@ -19,7 +19,7 @@ A node in the state $IDLE$ must send its messages "up" to either $RELAY$s or $LE
 \end{itemize}
 MCUs are ideal for distributed systems \cite{MicrocontrollerUnit-BasedWirelessSensorNetworkNodes:AReview}, given their low latency, ultra-low power consumption, and durability in systems that never shut down. As for the inertial movement detector, any low-power accelerometer can be used, but IMU sensors have been chosen for their accuracy and potential for self-optimization based on inertial movement. The communication strategy will revolve around many instances of one-to-one communication, making BLE an effective option for sending and receiving messages. Note that over large distances, BLE can experience significantly reduced effectiveness, so this choice may need reconsidering depending on the application domain. As mentioned before, UWB will be used for ranging, and if a node is unable to detect any $LEADERS$ or $RELAYS$, it will use LTE-M, which is effective in low-power areas, to detect its own location with GPS as well as possible. Naturally, this goes against the design philosophy and intended application of the system, but it is only used as a backup option for when no other location detection or computation is available.
 
-\subsection*{3.4 States and Communication}
+\subsection{States and Communication}
 \noindent The states related to the movement of the wireless sensor nodes are depicted below in figure \ref{fig:states}. When a node joins the network, the initial internal state is $STATIONARY$, even if the node itself is physically moving. When its inertial sensor is turned on, it will start to monitor its movement, and if it exceeds $0.5G$, it will transition to the $MOVING$ state. While moving, it will turn off its relay properties, preventing it from forwarding messages from neighbouring nodes to $LEADERS$. Moving nodes are naturally volatile, making their relay capabilities more unreliable and unstable, which is the basis for this design choice. While moving, nodes will repeatedly perform UWB blinking to receive location information from the neighbouring nodes. A neighbouring node that responds to UWB ranging must send an acknowledgment to ensure that the UWB blinking was noticed by at least one neighbouring node. If a $MOVING$ node has not received acknowledgements for 30 seconds, or a $STATIONARY$ node has not detected UWB blinking for 30 seconds, it will transition to the $ISOLATED$ state. In this state, the node will continuously scan for nearby mesh networks in an attempt to join a cluster, and without the possibility for cooperative localization, it will fall back to GPS despite potentially being in a GPS-denied environment. The location will be transmitted to the cloud regardless of accuracy, and if a mesh network is found, depending on the movement of the node, it will either transition back to $STATIONARY$ or $MOVING$.\\
 
 \noindent Illustrated in figure \ref{fig:sequence} is a sequence diagram modelling the communication between the different nodes and cloud service. The $Moving\  Tracker$ object will initiate communication by sending a message to any $Neighbouring\ Nodes$ to which they will respond by measure the AoA and euclidean distance from themselves to the messaging node. They will follow up with an acknowledgment and the location information that the $Moving\ Tracker$ will use to update its internal location. This will then be sent to the nearest $Leader$ node, and forwarded to the $Cloud$. if the $Moving\ Tracker$ is in the $ISOLATED$ state, it will send its own GPS location directly to the $Cloud$, however inaccurate it may be. 
@@ -46,7 +46,7 @@ MCUs are ideal for distributed systems \cite{MicrocontrollerUnit-BasedWirelessSe
 %\end{figure*}
 
 
-\subsection*{3.4 Battery-Aware Consensus Protocol}
+\subsection{Battery-Aware Consensus Protocol}
 \noindent To ensure network longevity, cluster $LEADERS$ are not chosen randomly but through a deterministic, battery-aware variation of the Bully Algorithm. The system implements a multi-criteria decision function $f(n)$ to rank candidate nodes. For a set of candidates nodes $C$ (local neighbours $\cup \space self$), the optimal leader $L$ is selected as: 
 \begin{equation}
     L = argmax_{n \in C} (P_{hw}(n), N_{deg}(n), B(n), ID(n))
@@ -63,7 +63,7 @@ This modification prevents the same election spiral that is common in standard b
 
 %maybe COMPARE WITH EXISINTG LEADER ELECTION ALGOS, ANALYZE HOW GOOD IT IS, HOW MANY OPERATIONS WILL IT TAKE WITH 'n' nodes to find a leader?
 
-\subsection*{3.5 Distributed Graph Optimization}
+\subsection{Distributed Graph Optimization}
 \noindent The core localization engine utilizes a force-directed graph approach known as spring relaxation rather than algebraic trilateration. This allows the system to be resilient to noise and recover from temporary non-line-of-sight (NLOS) conditions. The network is modelled as a graph $G = (V, E)$, where $V$ represents nodes and $E$ represents UWB ranging constraints. The state of node $i$ is its position vector \textbf{$P_i = [x_i, y_1]^T$} and orientation \textbf{$\theta_i$}. The objective is to minimize the global cost function \textbf{J}:
 \begin{equation}
     J = \sum_{(i,j) \in E} (\lambda_d * e_{dist}(i,j)^2 + \lambda_\theta * e_{angle}(i,j)^2)

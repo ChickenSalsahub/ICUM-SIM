@@ -5,18 +5,19 @@ import type { RunnerSnapshot } from "./types.ts";
  *
  * This is the main "energy proxy" used in the paper-style plots.
  */
-export function sumTx(nodes: RunnerSnapshot["nodes"]) {
+export function sumTx(nodes: RunnerSnapshot) {
 	return nodes.reduce((sum, node) => sum + node.txCount, 0);
 }
 
 /**
  * Root-mean-squared position error over all nodes.
  */
-export function rmse(nodes: RunnerSnapshot["nodes"]) {
+export function rmse(nodes: RunnerSnapshot) {
 	let sum = 0;
+	if (nodes.length === 0) return 0;
 	for (const node of nodes) {
 		const est = node.firmware.estPosition;
-		const err = Math.sqrt((est.x - node.trueX) ** 2 + (est.y - node.trueY) ** 2);
+		const err = Math.sqrt((est.x - node.x) ** 2 + (est.y - node.y) ** 2);
 		sum += err * err;
 	}
 	return Math.sqrt(sum / nodes.length);
@@ -25,11 +26,12 @@ export function rmse(nodes: RunnerSnapshot["nodes"]) {
 /**
  * Mean absolute position error over all nodes.
  */
-export function mae(nodes: RunnerSnapshot["nodes"]) {
+export function mae(nodes: RunnerSnapshot) {
 	let sum = 0;
+	if (nodes.length === 0) return 0;
 	for (const node of nodes) {
 		const est = node.firmware.estPosition;
-		const err = Math.sqrt((est.x - node.trueX) ** 2 + (est.y - node.trueY) ** 2);
+		const err = Math.sqrt((est.x - node.x) ** 2 + (est.y - node.y) ** 2);
 		sum += err;
 	}
 	return sum / nodes.length;
@@ -41,7 +43,7 @@ export function mae(nodes: RunnerSnapshot["nodes"]) {
  * In this simulator this is identical to MAE, but we keep the name to match
  * the experiment definitions and CSV headers.
  */
-export function ale(nodes: RunnerSnapshot["nodes"]) {
+export function ale(nodes: RunnerSnapshot) {
 	return mae(nodes);
 }
 
@@ -146,7 +148,7 @@ export function applyRigid2D(p: Pt, tf: Rigid2D): Pt {
 /**
  * Anchor-free ALE: aligns estimated positions to truth before scoring.
  */
-export function aleAlignedRigid(nodes: RunnerSnapshot["nodes"]) {
+export function aleAlignedRigid(nodes: RunnerSnapshot) {
 	const nodeIds: number[] = [];
 	const truth: Pt[] = [];
 	const est: Pt[] = [];
@@ -154,7 +156,7 @@ export function aleAlignedRigid(nodes: RunnerSnapshot["nodes"]) {
 		const p = node.firmware.estPosition;
 		if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) return Number.NaN;
 		nodeIds.push(node.id);
-		truth.push({ x: node.trueX, y: node.trueY });
+		truth.push({ x: node.x, y: node.y });
 		est.push({ x: p.x, y: p.y });
 	}
 
@@ -230,7 +232,7 @@ export function aleAlignedRigid(nodes: RunnerSnapshot["nodes"]) {
 /**
  * Anchor-free RMSE: rigidly aligns estimated positions to truth before scoring.
  */
-export function rmseAlignedRigid(nodes: RunnerSnapshot["nodes"]) {
+export function rmseAlignedRigid(nodes: RunnerSnapshot) {
 	const nodeIds: number[] = [];
 	const truth: Pt[] = [];
 	const est: Pt[] = [];
@@ -238,7 +240,7 @@ export function rmseAlignedRigid(nodes: RunnerSnapshot["nodes"]) {
 		const p = node.firmware.estPosition;
 		if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) return Number.NaN;
 		nodeIds.push(node.id);
-		truth.push({ x: node.trueX, y: node.trueY });
+		truth.push({ x: node.x, y: node.y });
 		est.push({ x: p.x, y: p.y });
 	}
 
@@ -315,13 +317,13 @@ export function rmseAlignedRigid(nodes: RunnerSnapshot["nodes"]) {
  *
  * This is rigid-transform invariant, so it remains meaningful without anchors.
  */
-export function pairwiseDistanceMae(nodes: RunnerSnapshot["nodes"]) {
+export function pairwiseDistanceMae(nodes: RunnerSnapshot) {
 	const truth: Pt[] = [];
 	const est: Pt[] = [];
 	for (const node of nodes) {
 		const p = node.firmware.estPosition;
 		if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) return Number.NaN;
-		truth.push({ x: node.trueX, y: node.trueY });
+		truth.push({ x: node.x, y: node.y });
 		est.push({ x: p.x, y: p.y });
 	}
 	const n = truth.length;
@@ -356,7 +358,7 @@ function wrapAngleRad(angleRad: number): number {
  *
  * Returns NaN if no valid edges exist.
  */
-export function measurementRangeResidualMae(nodes: RunnerSnapshot["nodes"]) {
+export function measurementRangeResidualMae(nodes: RunnerSnapshot) {
 	const estById = new Map<number, Pt>();
 	for (const node of nodes) {
 		const p = node.firmware.estPosition;
@@ -398,7 +400,7 @@ export function measurementRangeResidualMae(nodes: RunnerSnapshot["nodes"]) {
  *
  * Returns NaN if no valid angles exist.
  */
-export function measurementAngleResidualMae(nodes: RunnerSnapshot["nodes"]) {
+export function measurementAngleResidualMae(nodes: RunnerSnapshot) {
 	const estById = new Map<number, Pt>();
 	for (const node of nodes) {
 		const p = node.firmware.estPosition;
