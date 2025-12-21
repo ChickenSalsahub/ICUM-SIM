@@ -1,0 +1,64 @@
+% Sample file for AES paper
+\documentclass{aes2e}
+\usepackage{amsmath}
+\usepackage{float}
+\DeclareMathOperator*{\argmax}{arg\,max}
+
+
+% Metadata Information
+\jyear{2025}
+\jmonth{December}
+
+
+\begin{document}
+
+% Page heads
+%\markboth{TEST}{I.C.U.M}
+
+% Title portion
+\title{I.C.U.M - IMU Controlled Ultra-wideband Measurements}
+
+%Author Info.
+\authorgroup{
+\author{Benjamin M. Villadsen}
+\author{Benjamin S. Larsen}
+\author{Muad Ghanim}
+\author{Thor C. Koustrup-Müller}
+\author{Daniel Brenet}
+\role{Authors}
+\email{bmvi21@student.aau.dk, bsla21@student.aau.dk, muad@student.aau.dk, tkoust21@student.aau.dk, dbrene21@student.aau.dk}
+\author{
+Tung Kieu
+}
+\role{Supervisor}
+\email{tungkvt@cs.aau.dk}
+\affil{Aalborg University, Copenhagen S, Denmark}
+}
+
+%Abstract
+%Purpose: A short summary of the entire study—what you did, how, and why it matters.
+%Typical length: 150–250 words
+%Should include:
+%Background/problem: Why the study was needed
+%Objective: What the paper aims to achieve
+%Methods: Brief overview of techniques or datasets used
+%Results: Main findings or performance metrics
+%Conclusion: Key takeaway or implications
+\abstract{This paper is about combining BLE, IMU and GPS data to cooperatively determine the locations of nodes in a mesh network accurately. This paper is about combining BLE, IMU and GPS data to cooperatively determine the locations of nodes in a mesh network accurately. This paper is about combining BLE, IMU and GPS data to cooperatively determine the locations of nodes in a mesh network accurately. This paper is about combining BLE, IMU and GPS data to cooperatively determine the locations of nodes in a mesh network accurately.}
+
+
+\maketitle
+
+%Head 1
+%\section{INTRODUCTION}
+%Purpose: Introduce the topic, explain its importance, and state your research goal.
+%Should include:
+%Background and context of the problem
+%A brief review of previous or related work (what’s been done so far)
+%The research gap (what’s missing or not solved yet)
+%The objective and contribution of your paper
+%A short overview of the paper’s structure (optional)
+%Tip: End with a clear thesis statement or research question
+%This paper focuses on developing a cooperative localization approach that combines data from Bluetooth Low Energy (BLE), Inertial Measurement Units (IMUs), and Global Positioning System (GPS) sensors to accurately determine the positions of nodes within a mesh network. The integration of these three technologies allows the system to leverage the strengths of each: BLE provides short-range distance estimates between nodes, IMUs track motion and orientation changes over time, and GPS offers absolute position references when available. By fusing these complementary data sources, the proposed method aims to enhance positioning accuracy, reduce cumulative errors from individual sensors, and maintain reliable localization even in challenging environments where GPS signals are weak or unavailable.
+\input{content/main}
+\end{document}

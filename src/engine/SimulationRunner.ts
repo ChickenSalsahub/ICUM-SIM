@@ -141,9 +141,23 @@ export class SimulationRunner {
 			log: (_msg) => {
 				// no-op in headless
 			},
+			getGlobalPosition: () => {
+				const n = nodeState;
+				// Simple flat-earth projection relative to Berlin
+				const ORIGIN_LAT = 52.52;
+				const ORIGIN_LNG = 13.405;
+				const metersPerDegLat = 111132.92;
+				const metersPerDegLng = 111412.84 * Math.cos((ORIGIN_LAT * Math.PI) / 180);
+
+				return {
+					lat: ORIGIN_LAT + n.y / metersPerDegLat,
+					lng: ORIGIN_LNG + n.x / metersPerDegLng,
+					alt: 0,
+				};
+			},
 		};
 
-		const fw = new NodeFirmware(id, hal, this.firmwareConfig, { lteCapable: hasLte });
+		const fw = new NodeFirmware(id, hal, this.firmwareConfig, { lteCapable: hasLte, gpsCapable: this.firmwareConfig?.gpsCapable });
 		nodeState = {
 			id,
 			firmware: fw,

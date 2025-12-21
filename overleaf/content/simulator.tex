@@ -1,0 +1,33 @@
+\section*{4. Simulation Environment}
+\noindent To simulate the proposed algorithms, we developed a custom discrete-event simulator, ICUM-SIM (IMU Controlled Ultra-Wideband Measurements), designed to emulate the physical and architectural constraints of various hardware configurations. ICUM-SIM enforces a strict hardware-layer isolation between agents.
+
+\subsection*{4.1 ICUM Architecture}
+\noindent The simulator is constructed using a component-based architecture where every node is instantiated as an independent \textbf{NodeFirmware} class. Crucially, these instances do not share global state.
+\begin{itemize}
+    \item \textbf{Memory Isolation:} Each node maintains its own local \textbf{NeighborTable} and \textbf{RelativePoseGraph}. A node has zero knowledge of the global coordinates $(x_{global},y_{global})$ of other nodes unless explicitly communicated via a simulated packet.\\
+    \item \textbf{Asynchronous Execution:} While the simulator tick rate is fixed (60Hz), individual node logic is driven by independent, randomized timers (helloTimer, dataTimer). This accurately models the eventual clock drift and lack of synchronization inherent in low-power distributed systems.
+\end{itemize}
+
+\subsection*{4.2 Physical Layer Emulation}
+\noindent The simulation includes a physics engine (UWBRanging.ts) to generate realistic sensor inputs rather than ideal geometric data.
+
+\subsubsection*{4.2.1 Stochastic UWB Ranging}
+\noindent Range measurements are not taken from the ground truth Euclidean distance. Instead, they are derived via a stochastic proess to model sensor noise:
+\begin{equation}
+    d_{measured} = d_{true} + \mathcal{N}(0, \sigma^2)
+\end{equation}
+The noise component $\mathcal{N}$ is generated using the Box-Muller transform to create a Gaussian distribution with a standard deviation $\sigma = 0.05m$, replicating the noise characteristics of common modules such as the Decawave DW3000 module which provides UWB transceiver capability in modern consumer and industrial IoT sectors.
+
+\subsubsection*{4.2.2 Occlusion \& Multipath}
+\noindent The environment supports the definition of \textbf{Wall} structures (line segments). Before any packet transmission or ranging attempt, a ray-casting algorithm (doIntersect) determines Line-of-Sight (LOS).
+\begin{itemize}
+    \item \textbf{Packet Loss:} If the LOS is obstructed, high-frequency UWB packets are dropped entirely, simulating signal attenuation.
+    \item \textbf{Geometry Constraints:} Ranging requests fail if the ray intersects a wall, forcing the localization algorithm to rely on indirect paths or history, testing the robustness of the graph optimization described in section 3.5.
+\end{itemize}
+
+\subsection*{4.3 Energy Consumption Model}
+\noindent A linear energy depletion model is integrated into the \textbf{NodeFirmware} to evaluate the efficiency of the consensus protocols. Battery state $B(t)$ is decremented based on activity:
+\begin{equation}
+    B(t) = B(t-1) - (C_{tx} * N_{packets} + C_{cpu} * T_{active} + C_{move} * \Delta d)
+\end{equation}
+Where $C_{tx}$ represents the high energy cost of RF transmission. This allows the simulation to demonstrate the "death spiral" phenomena where excessive leadership elections drain critical nodes. 

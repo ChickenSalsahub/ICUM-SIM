@@ -229,9 +229,24 @@ export function AnalysisDashboard() {
                 const nodeCounts = Array.from(new Set(data.map((d:any) => d.node_count))).sort((a:any,b:any) => a-b);
                 const traces = nodeCounts.map((nc: any) => {
                     const subset = data.filter((d:any) => d.node_count === nc && d.scenario === filterScenarioC);
+                    
+                    // Aggregate by time (compute mean RMSE across seeds)
+                    const timeMap = new Map<number, { sum: number, count: number }>();
+                    subset.forEach((d: any) => {
+                        const t = d.time_s;
+                        if (!timeMap.has(t)) timeMap.set(t, { sum: 0, count: 0 });
+                        const entry = timeMap.get(t)!;
+                        entry.sum += d.rmse_aligned_m;
+                        entry.count++;
+                    });
+
+                    // Sort by time
+                    const sortedTimes = Array.from(timeMap.keys()).sort((a, b) => a - b);
+                    const meanRmse = sortedTimes.map(t => timeMap.get(t)!.sum / timeMap.get(t)!.count);
+
                     return {
-                        x: subset.map((d:any) => d.time_s),
-                        y: subset.map((d:any) => d.rmse_aligned_m),
+                        x: sortedTimes,
+                        y: meanRmse,
                         type: "scatter",
                         mode: "lines",
                         name: `N=${nc}`

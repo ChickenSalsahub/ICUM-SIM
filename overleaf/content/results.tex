@@ -1,0 +1,30 @@
+
+\section*{6. Results}
+
+\noindent The empirical validation conducted through the ICUM-SIM environment demonstrates that the proposed decentralized localization framework effectively balances communication overhead with positioning precision [1, 2]. 
+
+\noindent Analysis of the Event-Triggered Messaging (ETM) protocol reveals a significant reduction in network load; specifically, the system achieved an 85.07\% decrease in total messages sent compared to the periodic baseline, reducing packet counts from 34,536 to 5,148 over a 600-second interval [3]. Despite this reduction in transmission frequency, the aligned Root Mean Square Error (RMSE) remained largely consistent with the baseline, indicating that the IMU-controlled logic successfully filters redundant updates without compromising real-time tracking accuracy [3, 4]. 
+
+\noindent Scalability experiments further highlight that localization precision is positively correlated with node density, with high-density configurations ($N=100$) achieving a final RMSE of approximately 0.09m [5]. While smaller clusters ($N \le 10$) converge rapidly, larger networks require a prolonged stabilization period of up to 600 seconds as position corrections propagate step-by-step across the network diameter [5, 6]. Furthermore, the results indicate that node motion in dense scenarios ($N \ge 50$) acts as a catalyst for convergence, utilizing "virtual anchors" and optimization "unstucking" to resolve geometric uncertainties and avoid local minima [7, 8].
+
+\subsection*{Limitations}
+
+\noindent Despite the robust performance observed in simulation, several architectural and environmental limitations are inherent to the I.C.U.M. system [9]. 
+
+\noindent The most critical scalability constraint is the quadratic explosion ($O(N^2)$) of traffic within the Measurement Plane; while the Control Plane scales linearly, each ranging poll triggers unicast responses from all reachable neighbors, which may eventually saturate the wireless channel capacity as density increases [10, 11]. Furthermore, the system exhibits a "Rigidity Transition" peak in instability for intermediate node counts between 20 and 35, where the graph remains "floppy" and susceptible to severe geometric distortion during motion [12]. Lastly, the system’s operational reliability is dependent on mesh connectivity, as isolated nodes must fall back to GPS, which is frequently unreliable or unavailable in the target GPS-denied environments [13, 14].
+
+\subsection*{Simulator Uncertainties}
+
+\noindent The fidelity of the ICUM-SIM environment is subject to several simplifications that introduce uncertainties regarding real-world hardware performance [1, 15]. 
+
+\noindent Firstly, the stochastic UWB ranging model utilizes a Gaussian distribution to simulate sensor noise, whereas real-world deployments are often subject to non-Gaussian biases, hardware-specific clock drift, and complex multipath effects [15-17]. Secondly, the occlusion model relies on a binary ray-casting algorithm that drops packets entirely upon intersection with obstacles, neglecting physical phenomena such as signal diffraction and penetration which might occur in physical settings [18]. 
+
+\noindent Additionally, the simulator employs a linear energy depletion model for battery evaluation, which does not account for the non-linear discharge curves or environmental sensitivities characteristic of physical battery cells [2, 3]. Finally, although the simulator models asynchronous execution through independent timers, it may not fully replicate the systematic synchronization challenges and interference patterns inherent in a physical BLE/UWB mesh deployment [10, 19].
+
+
+
+%Something about leader election and what smart things we can say about it
+
+%\subsection{Limitations}
+%Hvilke usikkeder er der ved vores simulator?
+

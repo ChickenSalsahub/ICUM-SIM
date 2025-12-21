@@ -1,0 +1,19 @@
+\section*{2. Related Work}
+%https://www.researchgate.net/publication/378119265_Ad_Hoc_Mesh_Network_Localization_Using_Ultra-Wideband_for_Mobile_Robotics
+\noindent Localization in GPS-denied environments commonly leverages UWB sensing due to its robustness to multipath and centimeter-level accuracy. Prior systems typically rely on static anchors or assume robots remain stationary during initialization. As summarized by Juston et al.
+\cite{AdHocMeshNetworkLocalizationUsinUltra-WidebandForMobileRobotics}, most UWB localization methods either (1) use regression-based multilateration followed by Kalman filtering or (2) apply Monte Carlo-style sampling approaches. Although improved non-linear least-squares techniques and multi-tag configurations increase robustness, these frameworks still constrain network topology by requiring fixed reference nodes or stable visibility conditions.\\
+
+\noindent Filtering methods such as the Extended or Unfiltered Kalman Filter are widely used to refine UWB-based estimates, yet they remain sensitive to NLOS noise and often depend on supplemental sensors. Approaches incorporating mobile beacons exist, but they generally assume the beacons themselves remain globally localized or static relative to the agent.\\
+
+\noindent The work of Juston et al. \cite{AdHocMeshNetworkLocalizationUsinUltra-WidebandForMobileRobotics} advance the field by allowing all nodes, including anchors, to be mobile, enabling a decentralized ad-hoc mesh in which localization propagates dynamically. This shift away from reliance on static infrastructure aligns with our research goal of developing resilient localization methods suitable for highly dynamic multi-robot environments.\\
+%hej daniel
+%bridge de her to afsnit mayb?
+
+\noindent Han et al. \cite{ANovelCooperativeLocalizationMethodBasedonIMUandUWB} 
+Prior work on cooperative localization largely relies on wireless ranging technologies such as Bluetooth, Wi-Fi, ZigBee, and UWB, typically requiring at least three auxiliary nodes to triangulate position using AOA, TOA, or TDOA methods. These approaches depend solely on anchor measurements and overlook motion information from the target node, leading to limited robustness and high infrastructure cost in dynamic environments 
+To address these limitations, hybrid sensor-fusion methods combining inertial sensing with wireless ranging have been explored, demonstrating improved accuracy and drift compensation in GPS-denied or cluttered environments. Han et al. propose an IMU/UWB cooperative localization method that reduces the required auxiliary nodes to one by integrating DR and UWB measurements via an Adaptive Ant Colony Optimization Particle Filter (AACOPF), enabling accurate estimation of both position and azimuth even without prior initialization.\\ 
+
+
+%How do we propose a use for IMU, short and informal
+\noindent Building on these related works, our research draws directly from the demonstrated strengths of UWB-based cooperative localization systems, particularly their robustness in GPS-denied environments and their ability to fuse heterogeneous sensor inputs for improved accuracy. Prior studies highlight both the promise and limitations of multilateration, regression-based estimation, and Kalman-filter refinements \cite{AdHocMeshNetworkLocalizationUsinUltra-WidebandForMobileRobotics}, as well as the benefits of integrating inertial sensing to compensate for drift and reduce reliance on dense anchor deployments \cite{ANovelCooperativeLocalizationMethodBasedonIMUandUWB}.Ultimately, the reviewed literature provides the methodological foundation and justification for developing a resilient, decentralized localization framework suited for the dynamic environments our system targets. 
+

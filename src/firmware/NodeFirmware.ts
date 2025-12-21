@@ -27,6 +27,7 @@ type UplinkNodeReport = {
 	batteryV: number;
 	status: "MOVING" | "STATIONARY";
 	lteCapable: boolean;
+	gpsReport?: { lat: number; lng: number }; // [NEW] GPS Fallback
 	neighbors: UplinkNeighbor[];
 	topologyVersion?: number;
 	degree?: number;
@@ -61,6 +62,7 @@ export class NodeFirmware {
 	private topologyVersion = 0;
 	private lastUplinkTopologyVersionByNode: Map<number, number> = new Map();
 	private lteCapable: boolean;
+	private gpsCapable: boolean; // [NEW]
 	private leaderId: number | null = null;
 	private leaderNextHop: number | null = null;
 	private lastPanicMs = -1;
@@ -76,7 +78,7 @@ export class NodeFirmware {
 		}
 	}
 
-	constructor(id: number, hal: INodeHAL, cfg?: Partial<FirmwareConfig>, opts?: { lteCapable?: boolean }) {
+	constructor(id: number, hal: INodeHAL, cfg?: Partial<FirmwareConfig>, opts?: { lteCapable?: boolean; gpsCapable?: boolean }) {
 		this.id = id;
 		this.hal = hal;
 		this.cfg = {
@@ -95,6 +97,7 @@ export class NodeFirmware {
 			...cfg,
 		};
 		this.lteCapable = opts?.lteCapable ?? false;
+		this.gpsCapable = opts?.gpsCapable ?? false;
 	}
 
 	public tick(dtMs: number) {
@@ -136,12 +139,22 @@ export class NodeFirmware {
 				aoa: n.angleRad,
 			}));
 
+		// [NEW] GPS Fallback: If isolated and capable, try to get global pos.
+		let gpsReport: { lat: number; lng: number } | undefined;
+		if (this.state === "ISOLATED" && this.gpsCapable) {
+			const g = this.hal.getGlobalPosition();
+			if (g) {
+				gpsReport = { lat: g.lat, lng: g.lng };
+			}
+		}
+
 		return {
 			nodeId: this.id,
 			timestamp: now,
 			batteryV: this.hal.getBatteryVoltage(),
 			status: this.statusForCloud(),
 			lteCapable: this.lteCapable,
+			gpsReport,
 			neighbors,
 			// Optional observability/debug fields
 			topologyVersion: this.topologyVersion,

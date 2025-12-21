@@ -1,0 +1,34 @@
+\section*{5. Experiments}
+\noindent To validate the performance of the system, a series of simulation experiments was conducted using the I.C.U.M simulator environment. All scenarios utilized a fixed $50 \times 50$ meter world boundary and a standardized UWB communication range of $15$ meters. The experiments focus on three key performance indicators: communication efficiency, robustness to ranging noise, and the impact of network density on localization accuracy. We will be using the following metrics to determine the quality of the different aspects of the system during the various experiments:
+
+\subsection*{5.1 Performance Metrics}
+\noindent Because the proposed system is \textbf{anchor-free}, the coordinate system established by the network is arbitrary. The entire graph may be rotated or translated relative to the ground truth without affecting the \textit{internal} correctness of the localization. Comparing raw estimated coordinates $(x, y)$ directly to ground truth coordinates $(x_{true}, y_{true})$ would penalize correct shapes that simply happen to be rotated 90 degrees. To address this, we utilize rigid-invariant metrics:
+
+\begin{itemize}
+    \item \textbf{Aligned RMSE (Root Mean Square Error):} 
+    This is the primary accuracy metric, selected because it penalizes large outliers which correspond to critical localization failures. Before calculating the error, we first align the estimated node positions to the ground truth positions using the \textbf{Kabsch algorithm}. This algorithm computes the optimal translation $\mathbf{t}$ and rotation matrix $\mathbf{R}$ that minimizes the squared distance between the estimated cloud $\mathbf{p}$ and the ground truth cloud $\mathbf{p}_{true}$.
+    
+    \begin{equation}
+        RMSE_{align} = \min_{R, t} \sqrt{\frac{1}{N} \sum_{i=1}^{N} \| (R p_i + t) - p_{i,true} \|^2}
+    \end{equation}
+    
+    This effectively measures the \textbf{shape accuracy} of the network, decoupling it from the global coordinate frame ambiguity.
+\end{itemize}
+
+\subsection*{5.2 Motion Patterns}
+
+\noindent For experiments involving mobile nodes (Experiments 5.1 and 5.3), a realistic motion model was implemented to evaluate the system's tracking capability under dynamic conditions. Nodes follow a \textbf{Constrained Circular Model} designed to simulate walking behavior within a confined area.
+\\\\
+\noindent Nodes move at a constant speed of $1.2$ m/s along circular trajectories with radii varying between $1$m and $3$m. Trajectories are randomized in phase and direction to ensure independent movement and prevent lockstep. This ensures that the relative distances between nodes are constantly changing, providing a robust test for the system's ability to update positions based on dynamic ranging data. To assess both dynamic tracking accuracy and system re-convergence, motion is applied intermittently in two distinct intervals: $t \in [60, 120]$s and $t \in [240, 300]$s. Outside these windows, nodes remain stationary.
+
+
+\input{content/exp_a}
+\input{content/exp_b}
+\input{content/exp_c}
+
+
+%EXPERIEMNTS STRUCTUREUREURU
+%1. OBJECTIVE(no title): What is the objective of the experiment? What are we trying to test?
+%2. METHODOLOGY: How will we test this? What will be the baseline for comparison, and how will the ICUM be set up? What are the metrics being measured?
+%3. GRAPHS(no title): Insert graphs here
+%4. INTERPRETATION(no title): What do these results mean? 

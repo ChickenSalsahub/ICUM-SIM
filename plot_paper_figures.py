@@ -78,23 +78,52 @@ def plot_experiment_c():
     """Scalability"""
     try:
         df = pd.read_csv("experiments_C_all.csv")
-        # Filter scenario if needed
-        df = df[df["scenario"] == "none_moving"]
         
-        plt.figure()
+        # Plot 2 subplots: Static vs Dynamic
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharey=True)
+        
+        scenarios = [("none_moving", "Static (No Motion)"), ("many_moving", "Dynamic (Mobility)")]
         node_counts = sorted(df["node_count"].unique())
-        colors = sns.color_palette("viridis", n_colors=len(node_counts))
         
-        for i, n in enumerate(node_counts):
-            subset = df[df["node_count"] == n]
-            plt.plot(subset["time_s"], subset["rmse_m"], label=f"N={n}", color=colors[i])
+        for ax, (scen_key, title) in zip(axes, scenarios):
+            subset_scen = df[df["scenario"] == scen_key]
+            if subset_scen.empty:
+                print(f"Warning: No data for {scen_key}")
+                continue
+                
+            # Use sns.lineplot for automatic aggregation (mean + 95% CI)
+            sns.lineplot(
+                data=subset_scen, 
+                x="time_s", 
+                y="rmse_m", 
+                hue="node_count", 
+                palette="viridis", 
+                ax=ax,
+                errorbar='ci', # default is 95% CI
+                legend=(ax == axes[0]) # Only show legend once (or fix location later)
+            )
             
-        plt.xlabel("Time (s)")
-        plt.ylabel("RMSE (m)")
-        plt.title("Scalability Limit: Drift by Network Size")
-        plt.legend(title="Nodes")
-        plt.yscale("log") # Log scale to show the massive drift difference
+            ax.set_xlabel("Time (s)")
+            ax.set_title(title)
+            ax.set_yscale("log")
+            ax.grid(True, which="both", ls="--", alpha=0.5)
+
+        axes[0].set_ylabel("Aligned RMSE (m)")
+        # Clean up legend
+        if axes[0].get_legend():
+            axes[0].get_legend().remove()
+        
+        # Add common legend to the right
+        handles, labels = axes[0].get_legend_handles_labels()
+        # Filter duplicates if any
+        by_label = dict(zip(labels, handles))
+        fig.legend(by_label.values(), by_label.keys(), title="Nodes", loc='center right', bbox_to_anchor=(0.98, 0.5))
+        plt.subplots_adjust(right=0.85)
+        
+        plt.suptitle("Scalability Limit: Impact of Mobility on Convergence (Mean $\pm$ 95\% CI)")
+        # plt.tight_layout() # Conflict with subplot_adjust
         save_plot("ExpC_Scalability")
+
     except FileNotFoundError:
         print("Skipping Exp C: File not found")
 

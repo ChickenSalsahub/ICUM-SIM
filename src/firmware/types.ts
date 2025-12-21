@@ -1,3 +1,4 @@
+import { IGlobalPosition } from "../logic/localization/types";
 import { Packet } from "../types";
 
 export interface Vector3 {
@@ -29,6 +30,7 @@ export interface INodeHAL {
 	pollRadio(): Packet[]; // returns packets currently in the RX buffer
 	getBatteryVoltage(): number; // volts
 	getTimeMs(): number;
+	getGlobalPosition(): IGlobalPosition | null; // Simulated GPS
 
 	// Outputs (from firmware -> world)
 	radioSend(packet: Packet): void;
@@ -39,6 +41,7 @@ export interface FirmwareConfig {
 	accelMoveThresholdG: number;
 	isolationNoAckMs: number;
 	neighborTimeoutMs: number;
+	gpsCapable?: boolean; // Can this node use GPS when isolated?
 	// ICUM sensing policy: when enabled, stationary+stable nodes avoid periodic ranging
 	// and only range on IMU/topology events (with an optional maintenance interval).
 	eventDrivenSensing?: boolean;
