@@ -44,14 +44,14 @@ export function runExperimentCScenarios(): ExperimentCScenarioTimeRow[] {
 				const perfectChannel = uwbNoiseSigma === 0;
 				const scenarioOffset = scenario === "none_moving" ? 0 : scenario === "few_moving" ? 10_000 : 20_000;
 				// Ensure distinct seeds for each iteration
-				const seedVal = baseSeed + 300 + nodeCount + scenarioOffset + (seedIdx * 1000);
+				const seedVal = baseSeed + 300 + nodeCount + scenarioOffset + seedIdx * 1000;
 				const layout = makeSeed(nodeCount, seededRng(seedVal));
-				
+
 				const runner = new SimulationRunner({
 					uwbNoiseSigma,
 					uwbAngleNoiseStdRad: perfectChannel ? 0 : 0.05,
 					packetLoss: perfectChannel ? 0 : 0.1,
-					
+
 					worldBounds: EXPERIMENT_WORLD_BOUNDS_M,
 					seed: seedVal + 1, // distinct form layout seed
 				});
@@ -64,7 +64,7 @@ export function runExperimentCScenarios(): ExperimentCScenarioTimeRow[] {
 				for (let t = 0; t <= simSeconds * 1000; t += logEveryMs) {
 					applyMotionScenario(runner, scenario, t);
 					const snap = runner.snapshot();
-					const currentTotalTx = sumTx(snap);
+					const currentTotalTx = sumTx(snap.nodes);
 					const currentRmse = rmseAlignedRigid(snap);
 
 					// Instantaneous rate: (delta_tx / nodes) / (delta_time_min)

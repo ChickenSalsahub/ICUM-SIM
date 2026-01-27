@@ -28,9 +28,9 @@ type EstNode = {
 
 function buildEstimatedNodesFromPoseGraph(
 	snapshot: ReturnType<SimulationRunner["snapshot"]>,
-	graph: RelativePoseGraph
+	graph: RelativePoseGraph,
 ): EstNode[] {
-	return snapshot.map((n) => {
+	return snapshot.nodes.map((n) => {
 		const pose = graph.getNodePose(n.id);
 		const estX = pose?.x ?? 0;
 		const estY = pose?.y ?? 0;
@@ -300,7 +300,12 @@ export function runExperimentBRaw(): ExperimentBRowRaw[] {
 			const seed = baseSeed + 210 + k * 10_000 + nodeCount;
 			for (const sigma of noiseSigmas) {
 				try {
-					const { estNodes } = solvePoseGraphFromRanging({ seed, nodeLayout: layout, simSeconds, uwbNoiseSigma: sigma });
+					const { estNodes } = solvePoseGraphFromRanging({
+						seed,
+						nodeLayout: layout,
+						simSeconds,
+						uwbNoiseSigma: sigma,
+					});
 					rows.push({
 						seed,
 						nodeCount,

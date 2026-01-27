@@ -12,6 +12,8 @@ import {
 	rmseAlignedRigid,
 } from "../lib/metrics.ts";
 
+// Tests metric correctness/invariants for RMSE/MAE/ALE and rigid alignment cases.
+
 type RunnerNode = RunnerSnapshot["nodes"][number];
 
 type PartialFirmware = Pick<FirmwareSnapshot, "estPosition" | "neighbors">;
@@ -104,7 +106,7 @@ describe("experiments metrics", () => {
 		const tx = 10;
 		const ty = -5;
 		const nodes: RunnerNode[] = truth.map((p, idx) =>
-			makeNode({ id: idx + 1, trueX: p.x, trueY: p.y, estX: p.x + tx, estY: -p.y + ty })
+			makeNode({ id: idx + 1, trueX: p.x, trueY: p.y, estX: p.x + tx, estY: -p.y + ty }),
 		);
 		expect(ale(nodes)).toBeGreaterThan(0.1);
 		expect(aleAlignedRigid(nodes)).toBeCloseTo(0, 8);

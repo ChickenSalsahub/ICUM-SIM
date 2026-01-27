@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { SimulationRunner } from "../SimulationRunner";
 
+// Tests LOS wall collision handling for node movement.
+
 describe("SimulationRunner wall collisions", () => {
 	it("stops movement when crossing a wall segment", () => {
 		const runner = new SimulationRunner({

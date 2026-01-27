@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 import { CoopLocEngine } from "../CooperativeLocalization";
 import { VectorUtils } from "../../math/VectorUtils";
 
+// Tests cooperative localization pose updates, range constraints, and global anchor transforms.
+
 describe("CooperativeLocalization", () => {
 	it("should initialize with self at origin", () => {
 		const engine = new CoopLocEngine(1);

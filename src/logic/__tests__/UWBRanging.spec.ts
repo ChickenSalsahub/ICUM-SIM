@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { UWBRanging } from "../UWBRanging";
 
+// Tests UWB ranging LOS success and wall-blocked failure cases.
+
 describe("UWBRanging", () => {
 	it("measures true distance with LOS", () => {
 		// deterministic rng for test

@@ -3,6 +3,8 @@ import { NodeFirmware } from "../NodeFirmware";
 import { INodeHAL, ImuSample } from "../types";
 import { Packet, PacketType } from "../../types";
 
+// Tests firmware FSM transitions, leader election, uplink/gossip behavior, and sensing cadence.
+
 const makeHal = (opts: { linearAccelG?: number; batteryV?: number; now?: number }) => {
 	let radioOut: Packet[] = [];
 	const imu: ImuSample = {
@@ -15,6 +17,7 @@ const makeHal = (opts: { linearAccelG?: number; batteryV?: number; now?: number 
 		pollRadio: () => [],
 		getBatteryVoltage: () => opts.batteryV ?? 3.7,
 		getTimeMs: () => opts.now ?? 0,
+		getGlobalPosition: () => null,
 		radioSend: (p) => radioOut.push(p),
 		log: () => {},
 	};
@@ -60,7 +63,7 @@ describe("NodeFirmware FSM", () => {
 					type: PacketType.DATA,
 					srcId: 2,
 					destId: -1,
-					payload: { type: "HELLO", batteryV: 4.0, degree: 1 },
+					payload: { type: "HELLO", batteryV: 4.0, degree: 1, hasBackhaul: false },
 					timestamp: now,
 				},
 			];
@@ -138,7 +141,7 @@ describe("NodeFirmware FSM", () => {
 		expect(ack).toBeTruthy();
 	});
 
-	it("forwards UPLINK_GOSSIP to its leader when acting as a relay", () => {
+	it("forwards BLE_MESH_REPORT to its leader when acting as a relay", () => {
 		let now = 0;
 		let inbound: Packet[] = [];
 		let radioOut: Packet[] = [];
@@ -167,7 +170,7 @@ describe("NodeFirmware FSM", () => {
 				type: PacketType.DATA,
 				srcId: 2,
 				destId: -1,
-				payload: { type: "HELLO", batteryV: 4.2, degree: 5, lteCapable: true },
+				payload: { type: "HELLO", batteryV: 4.2, degree: 5, hasBackhaul: true },
 				timestamp: now,
 			},
 		];
@@ -175,7 +178,7 @@ describe("NodeFirmware FSM", () => {
 		expect(fw.getSnapshot().leaderId).toBe(2);
 		expect(fw.getSnapshot().role).toBe("RELAY");
 
-		// Step 2: deliver an uplink gossip from node 3 directly to node 1.
+		// Step 2: deliver a mesh report from node 3 directly to node 1.
 		radioOut = [];
 		now = 1_000;
 		inbound = [
@@ -185,7 +188,7 @@ describe("NodeFirmware FSM", () => {
 				srcId: 3,
 				destId: 1,
 				payload: {
-					type: "UPLINK_GOSSIP",
+					type: "BLE_MESH_REPORT",
 					targetLeaderId: 2,
 					ttl: 2,
 					report: {
@@ -204,15 +207,15 @@ describe("NodeFirmware FSM", () => {
 
 		const forwarded = radioOut.find(
 			(p) =>
-				p.payload?.type === "UPLINK_GOSSIP" &&
+				p.payload?.type === "BLE_MESH_REPORT" &&
 				p.destId === 2 &&
 				(p.payload as any)?.targetLeaderId === 2 &&
-				(p.payload as any)?.ttl === 1
+				(p.payload as any)?.ttl === 1,
 		);
 		expect(forwarded).toBeTruthy();
 	});
 
-	it("leader includes forwarded multi-hop UPLINK_GOSSIP report in its next uplink batch", () => {
+	it("leader includes forwarded BLE_MESH_REPORT in its next uplink batch", () => {
 		let now = 0;
 		let inbound: Packet[] = [];
 		let radioOut: Packet[] = [];
@@ -243,16 +246,22 @@ describe("NodeFirmware FSM", () => {
 				type: PacketType.DATA,
 				srcId: 1,
 				destId: -1,
-				payload: { type: "HELLO", batteryV: 3.6, degree: 1, lteCapable: false },
+				payload: { type: "HELLO", batteryV: 3.6, degree: 1, hasBackhaul: false },
 				timestamp: now,
 			},
+		];
+		fwLeader.tick(100);
+
+		// Deliver a mesh report after leader election has resolved.
+		now = 1_000;
+		inbound = [
 			{
-				id: "gossip-3",
+				id: "mesh-3",
 				type: PacketType.DATA,
 				srcId: 3,
 				destId: -1,
 				payload: {
-					type: "UPLINK_GOSSIP",
+					type: "BLE_MESH_REPORT",
 					targetLeaderId: 2,
 					ttl: 2,
 					report: {
@@ -269,7 +278,6 @@ describe("NodeFirmware FSM", () => {
 		];
 
 		radioOut = [];
-		now = 1_000;
 		fwLeader.tick(100);
 
 		const uplink = radioOut.find((p) => p.type === PacketType.UPLINK);
@@ -309,11 +317,36 @@ describe("NodeFirmware FSM", () => {
 				type: PacketType.DATA,
 				srcId: 2,
 				destId: -1,
-				payload: { type: "HELLO", batteryV: 3.6, degree: 1, lteCapable: false },
+				payload: { type: "HELLO", batteryV: 3.6, degree: 1, hasBackhaul: false },
 				timestamp: now,
 			},
 		];
 		radioOut = [];
+		fw.tick(100);
+		// Trigger uplink via a mesh report.
+		inbound = [
+			{
+				id: "mesh-2",
+				type: PacketType.DATA,
+				srcId: 2,
+				destId: 1,
+				payload: {
+					type: "BLE_MESH_REPORT",
+					targetLeaderId: 1,
+					ttl: 2,
+					report: {
+						nodeId: 2,
+						timestamp: now,
+						batteryV: 3.6,
+						status: "STATIONARY",
+						neighbors: [],
+						degree: 1,
+						topologyVersion: 1,
+					},
+				},
+				timestamp: now,
+			},
+		];
 		fw.tick(100);
 		const firstUplink = radioOut.find((p) => p.type === PacketType.UPLINK);
 		expect(firstUplink).toBeTruthy();
@@ -329,11 +362,35 @@ describe("NodeFirmware FSM", () => {
 				type: PacketType.DATA,
 				srcId: 3,
 				destId: -1,
-				payload: { type: "HELLO", batteryV: 3.6, degree: 1, lteCapable: false },
+				payload: { type: "HELLO", batteryV: 3.6, degree: 1, hasBackhaul: false },
 				timestamp: now,
 			},
 		];
 		radioOut = [];
+		fw.tick(100);
+		inbound = [
+			{
+				id: "mesh-3",
+				type: PacketType.DATA,
+				srcId: 3,
+				destId: 1,
+				payload: {
+					type: "BLE_MESH_REPORT",
+					targetLeaderId: 1,
+					ttl: 2,
+					report: {
+						nodeId: 3,
+						timestamp: now,
+						batteryV: 3.6,
+						status: "STATIONARY",
+						neighbors: [],
+						degree: 1,
+						topologyVersion: 1,
+					},
+				},
+				timestamp: now,
+			},
+		];
 		fw.tick(100);
 		const secondUplink = radioOut.find((p) => p.type === PacketType.UPLINK);
 		expect(secondUplink).toBeTruthy();
@@ -373,16 +430,21 @@ describe("NodeFirmware FSM", () => {
 				type: PacketType.DATA,
 				srcId: 1,
 				destId: -1,
-				payload: { type: "HELLO", batteryV: 3.6, degree: 1, lteCapable: false },
+				payload: { type: "HELLO", batteryV: 3.6, degree: 1, hasBackhaul: false },
 				timestamp: now,
 			},
+		];
+		fwLeader.tick(100);
+
+		// Deliver initial mesh report after leader election.
+		inbound = [
 			{
-				id: "gossip-3-v1",
+				id: "mesh-3-v1",
 				type: PacketType.DATA,
 				srcId: 3,
 				destId: 2,
 				payload: {
-					type: "UPLINK_GOSSIP",
+					type: "BLE_MESH_REPORT",
 					targetLeaderId: 2,
 					ttl: 2,
 					report: {
@@ -411,12 +473,12 @@ describe("NodeFirmware FSM", () => {
 		// Send another report from node 3 with higher topologyVersion.
 		inbound = [
 			{
-				id: "gossip-3-v2",
+				id: "mesh-3-v2",
 				type: PacketType.DATA,
 				srcId: 3,
 				destId: 2,
 				payload: {
-					type: "UPLINK_GOSSIP",
+					type: "BLE_MESH_REPORT",
 					targetLeaderId: 2,
 					ttl: 2,
 					report: {
@@ -454,9 +516,68 @@ describe("Leader Election", () => {
 		expect(snap.role).toBe("IDLE");
 	});
 
-	it("prefers higher battery when connectivity equal", () => {
+	it("converges to a single leader in a static cluster", () => {
+		let now = 0;
+		const makeNode = (id: number, batteryV: number) => {
+			let inbound: Packet[] = [];
+			const { hal } = makeHal({ linearAccelG: 0.0, batteryV, now });
+			(hal.getTimeMs as unknown as () => number) = () => now;
+			(hal.pollRadio as unknown as () => Packet[]) = () => {
+				const items = inbound;
+				inbound = [];
+				return items;
+			};
+			const fw = new NodeFirmware(id, hal, { isolationNoAckMs: 100_000, neighborTimeoutMs: 100_000 });
+			return { fw, enqueue: (p: Packet) => inbound.push(p) };
+		};
+
+		const n1 = makeNode(1, 3.6);
+		const n2 = makeNode(2, 3.8);
+		const n3 = makeNode(3, 3.5);
+
+		const makeHello = (srcId: number, batteryV: number): Packet => ({
+			id: `hello-${srcId}-${now}`,
+			type: PacketType.DATA,
+			srcId,
+			destId: -1,
+			payload: {
+				type: "HELLO",
+				batteryV,
+				degree: 2,
+				hasBackhaul: false,
+				leaderId: srcId,
+				leaderVector: { hasBackhaul: false, degree: 2, batteryV, id: srcId, moving: false },
+				status: "STATIONARY",
+			},
+			timestamp: now,
+		});
+
+		// Fully connect the cluster.
+		const p1 = makeHello(1, 3.6);
+		const p2 = makeHello(2, 3.8);
+		const p3 = makeHello(3, 3.5);
+		n1.enqueue(p2);
+		n1.enqueue(p3);
+		n2.enqueue(p1);
+		n2.enqueue(p3);
+		n3.enqueue(p1);
+		n3.enqueue(p2);
+
+		n1.fw.tick(100);
+		n2.fw.tick(100);
+		n3.fw.tick(100);
+
+		expect(n1.fw.getSnapshot().leaderId).toBe(2);
+		expect(n2.fw.getSnapshot().leaderId).toBe(2);
+		expect(n3.fw.getSnapshot().leaderId).toBe(2);
+		expect(n2.fw.getSnapshot().role).toBe("LEADER");
+		expect(n1.fw.getSnapshot().role).toBe("RELAY");
+		expect(n3.fw.getSnapshot().role).toBe("RELAY");
+	});
+
+	it("prefers LTE-capable neighbor even with lower battery", () => {
 		const now = 0;
-		const { hal } = makeHal({ linearAccelG: 0.1, batteryV: 3.7, now });
+		const { hal } = makeHal({ linearAccelG: 0.1, batteryV: 4.2, now });
 		const fw = new NodeFirmware(1, hal);
 		// inject neighbor via fake radio packet
 		(hal.pollRadio as unknown as () => Packet[]) = () => [
@@ -465,7 +586,26 @@ describe("Leader Election", () => {
 				type: PacketType.DATA,
 				srcId: 2,
 				destId: -1,
-				payload: { type: "HELLO", batteryV: 4.0, degree: 1 },
+				payload: { type: "HELLO", batteryV: 3.4, degree: 1, hasBackhaul: true },
+				timestamp: now,
+			},
+		];
+		fw.tick(100);
+		const snap = fw.getSnapshot();
+		expect(snap.leaderId).toBe(2);
+	});
+
+	it("prefers higher battery when LTE status equal", () => {
+		const now = 0;
+		const { hal } = makeHal({ linearAccelG: 0.1, batteryV: 3.7, now });
+		const fw = new NodeFirmware(1, hal);
+		(hal.pollRadio as unknown as () => Packet[]) = () => [
+			{
+				id: "hello-2",
+				type: PacketType.DATA,
+				srcId: 2,
+				destId: -1,
+				payload: { type: "HELLO", batteryV: 4.0, degree: 1, hasBackhaul: false },
 				timestamp: now,
 			},
 		];
@@ -489,7 +629,7 @@ describe("Leader Election", () => {
 					type: PacketType.DATA,
 					srcId: 2,
 					destId: -1,
-					payload: { type: "HELLO", batteryV: 4.0, degree: 1 },
+					payload: { type: "HELLO", batteryV: 4.0, degree: 1, hasBackhaul: false },
 					timestamp: now,
 				},
 			];
@@ -505,15 +645,13 @@ describe("Leader Election", () => {
 		expect(fw.getSnapshot().leaderId).toBe(null);
 		expect(fw.getSnapshot().role).toBe("IDLE");
 	});
-});
 
-describe("Adaptive sensing cadence", () => {
-	it("slows ranging when stationary+stable, resumes on topology change", () => {
+	it("does not forward mesh reports while MOVING", () => {
 		let now = 0;
-		let radioOut: Packet[] = [];
 		let inbound: Packet[] = [];
+		let radioOut: Packet[] = [];
 		const hal: INodeHAL = {
-			getIMU: () => ({ accel: { x: 0, y: 0, z: 9.81 }, gyro: { x: 0, y: 0, z: 0 } }),
+			getIMU: () => ({ accel: { x: 0.6 * 9.81, y: 0, z: 9.81 }, gyro: { x: 0, y: 0, z: 0 } }),
 			pollRadio: () => {
 				const items = inbound;
 				inbound = [];
@@ -521,62 +659,50 @@ describe("Adaptive sensing cadence", () => {
 			},
 			getBatteryVoltage: () => 3.7,
 			getTimeMs: () => now,
+			getGlobalPosition: () => null,
 			radioSend: (p) => radioOut.push(p),
 			log: () => {},
 		};
 
-		const fw = new NodeFirmware(1, hal, { neighborTimeoutMs: 100_000, isolationNoAckMs: 100_000 });
-
-		// Introduce neighbor 2 at t=0 (topology change window begins).
+		const fw = new NodeFirmware(1, hal, { isolationNoAckMs: 100_000, neighborTimeoutMs: 100_000 });
+		fw.tick(100); // enter MOVING
 		inbound = [
 			{
-				id: "hello-2",
+				id: "mesh-2",
 				type: PacketType.DATA,
 				srcId: 2,
-				destId: -1,
-				payload: { type: "HELLO", batteryV: 4.0, degree: 1 },
+				destId: 1,
+				payload: {
+					type: "BLE_MESH_REPORT",
+					targetLeaderId: 3,
+					ttl: 2,
+					report: {
+						nodeId: 2,
+						timestamp: now,
+						batteryV: 3.9,
+						status: "STATIONARY",
+						lteCapable: false,
+						neighbors: [],
+					},
+				},
 				timestamp: now,
 			},
 		];
-		fw.tick(100);
-
-		// At t=1000ms we should be in fast mode: send both HELLO and RANGING_POLL.
+		radioOut = [];
 		now = 1_000;
-		radioOut = [];
 		fw.tick(100);
-		expect(radioOut.some((p) => p.payload?.type === "RANGING_POLL")).toBe(true);
-		expect(radioOut.some((p) => p.payload?.type === "HELLO")).toBe(true);
-
-		// After topology recency window passes, ranging should be slowed (10s interval).
-		// At t=6001ms (only ~5s since last ranging poll), we should NOT see another ranging poll.
-		now = 6_001;
-		radioOut = [];
-		fw.tick(100);
-		expect(radioOut.some((p) => p.payload?.type === "RANGING_POLL")).toBe(false);
-
-		// Topology change (neighbor 3 appears) should immediately re-enable fast ranging.
-		now = 7_000;
-		inbound = [
-			{
-				id: "hello-3",
-				type: PacketType.DATA,
-				srcId: 3,
-				destId: -1,
-				payload: { type: "HELLO", batteryV: 4.0, degree: 1 },
-				timestamp: now,
-			},
-		];
-		radioOut = [];
-		fw.tick(100);
-		expect(radioOut.some((p) => p.payload?.type === "RANGING_POLL")).toBe(true);
+		const forwarded = radioOut.find((p) => p.payload?.type === "BLE_MESH_REPORT");
+		expect(forwarded).toBeFalsy();
 	});
+});
 
-	it("suppresses periodic ranging when stationary+stable and measurements are known (event-driven)", () => {
+describe("DODAG uplink behavior", () => {
+	it("non-leader sends mesh report toward leader while MOVING", () => {
 		let now = 0;
-		let radioOut: Packet[] = [];
 		let inbound: Packet[] = [];
+		let radioOut: Packet[] = [];
 		const hal: INodeHAL = {
-			getIMU: () => ({ accel: { x: 0, y: 0, z: 9.81 }, gyro: { x: 0, y: 0, z: 0 } }),
+			getIMU: () => ({ accel: { x: 0.6 * 9.81, y: 0, z: 9.81 }, gyro: { x: 0, y: 0, z: 0 } }),
 			pollRadio: () => {
 				const items = inbound;
 				inbound = [];
@@ -584,53 +710,252 @@ describe("Adaptive sensing cadence", () => {
 			},
 			getBatteryVoltage: () => 3.7,
 			getTimeMs: () => now,
+			getGlobalPosition: () => null,
 			radioSend: (p) => radioOut.push(p),
 			log: () => {},
 		};
 
 		const fw = new NodeFirmware(1, hal, {
+			eventDrivenSensing: false,
+			helloIntervalMovingMs: 0,
+			helloIntervalIdleMs: 0,
+			rangingIntervalMovingMs: 1_000_000,
+			rangingIntervalIdleMs: 1_000_000,
 			neighborTimeoutMs: 100_000,
 			isolationNoAckMs: 100_000,
-			eventDrivenSensing: true,
-			// Make it easy for the test to fail if periodic ranging leaks through.
-			rangingIntervalIdleMs: 1_000,
-			rangingIntervalMovingMs: 1_000,
-			rangingMaintenanceMs: 0,
-			// Avoid HELLO noise in assertions.
-			helloIntervalIdleMs: 100_000,
 		});
 
-		// Seed neighbor + a real measurement (range+angle) so "needsLearning" becomes false.
+		// Introduce an LTE-capable leader neighbor.
 		inbound = [
 			{
 				id: "hello-2",
-				type: PacketType.HELLO,
-				srcId: 2,
-				destId: -1,
-				payload: { type: "HELLO", batteryV: 4.0, degree: 1 },
-				timestamp: now,
-			},
-			{
-				id: "resp-2",
 				type: PacketType.DATA,
 				srcId: 2,
-				destId: 1,
-				payload: { type: "RANGING_RESP", range: 5, angle: 0.25, batteryV: 4.0, degree: 1 },
+				destId: -1,
+				payload: {
+					type: "HELLO",
+					batteryV: 3.4,
+					degree: 2,
+					hasBackhaul: true,
+					leaderId: 2,
+					leaderVector: { hasBackhaul: true, degree: 2, batteryV: 3.4, id: 2, moving: false },
+				},
 				timestamp: now,
 			},
 		];
 		fw.tick(100);
 
-		// After topology recency window passes (5s), stationary+stable should not poll periodically.
-		now = 7_000;
+		// MOVING node should forward its report toward leader via next hop after BLE_ACK.
 		radioOut = [];
+		now = 1_000;
+		inbound = [
+			{
+				id: "ack-2",
+				type: PacketType.BLE_ACK,
+				srcId: 2,
+				destId: 1,
+				payload: { type: "BLE_ACK" },
+				timestamp: now,
+			},
+		];
 		fw.tick(100);
-		expect(radioOut.some((p) => p.payload?.type === "RANGING_POLL")).toBe(false);
+		const report = radioOut.find(
+			(p) => p.payload?.type === "BLE_MESH_REPORT" && p.destId === 2 && (p.payload as any)?.targetLeaderId === 2,
+		);
+		expect(report).toBeTruthy();
+	});
 
-		// Even much later, still no periodic ranging (maintenance disabled).
-		now = 25_000;
+	it("leader emits UPLINK_BATCH when active and has neighbors", () => {
+		let now = 0;
+		let inbound: Packet[] = [];
+		let radioOut: Packet[] = [];
+		const { hal } = makeHal({ linearAccelG: 0.0, batteryV: 4.2, now });
+		(hal.getTimeMs as unknown as () => number) = () => now;
+		(hal.pollRadio as unknown as () => Packet[]) = () => {
+			const items = inbound;
+			inbound = [];
+			return items;
+		};
+		(hal.radioSend as unknown as (p: Packet) => void) = (p) => radioOut.push(p);
+
+		const fwLeader = new NodeFirmware(1, hal, {
+			eventDrivenSensing: false,
+			helloIntervalMovingMs: 0,
+			helloIntervalIdleMs: 0,
+			rangingIntervalMovingMs: 1_000_000,
+			rangingIntervalIdleMs: 1_000_000,
+			neighborTimeoutMs: 100_000,
+			isolationNoAckMs: 100_000,
+		});
+
+		// Neighbor has lower score; node 1 should self-elect as leader.
+		inbound = [
+			{
+				id: "hello-2",
+				type: PacketType.DATA,
+				srcId: 2,
+				destId: -1,
+				payload: { type: "HELLO", batteryV: 3.4, degree: 1, hasBackhaul: false },
+				timestamp: now,
+			},
+		];
 		radioOut = [];
+		fwLeader.tick(100);
+
+		// Trigger the leader to emit an uplink via BLE_ACK.
+		now = 1_000;
+		inbound = [
+			{
+				id: "ack-2",
+				type: PacketType.BLE_ACK,
+				srcId: 2,
+				destId: 1,
+				payload: { type: "BLE_ACK" },
+				timestamp: now,
+			},
+		];
+		radioOut = [];
+		fwLeader.tick(100);
+
+		const uplink = radioOut.find((p) => p.type === PacketType.UPLINK);
+		expect(uplink).toBeTruthy();
+		const reports = (uplink as any)?.payload?.reports;
+		expect(Array.isArray(reports)).toBe(true);
+		expect((reports as any[]).some((r) => r?.nodeId === 1)).toBe(true);
+	});
+});
+
+describe("Adaptive sensing cadence", () => {
+	it("does not emit UWB_BLINK when stationary", () => {
+		const prevRandom = Math.random;
+		Math.random = () => 0;
+		try {
+			let now = 0;
+			let radioOut: Packet[] = [];
+			const hal: INodeHAL = {
+				getIMU: () => ({ accel: { x: 0, y: 0, z: 9.81 }, gyro: { x: 0, y: 0, z: 0 } }),
+				pollRadio: () => [],
+				getBatteryVoltage: () => 3.7,
+				getTimeMs: () => now,
+				getGlobalPosition: () => null,
+				radioSend: (p) => radioOut.push(p),
+				log: () => {},
+			};
+
+			const fw = new NodeFirmware(1, hal, { isolationNoAckMs: 100_000 });
+			fw.tick(100);
+			expect(radioOut.some((p) => p.type === PacketType.UWB_BLINK)).toBe(false);
+
+			now = 10_000;
+			radioOut = [];
+			fw.tick(9_900);
+			expect(radioOut.some((p) => p.type === PacketType.UWB_BLINK)).toBe(false);
+		} finally {
+			Math.random = prevRandom;
+		}
+	});
+
+	it("emits UWB_BLINK at 1Hz when moving", () => {
+		const prevRandom = Math.random;
+		Math.random = () => 0;
+		try {
+			let now = 0;
+			let radioOut: Packet[] = [];
+			const hal: INodeHAL = {
+				getIMU: () => ({ accel: { x: 0.6 * 9.81, y: 0, z: 9.81 }, gyro: { x: 0, y: 0, z: 0 } }),
+				pollRadio: () => [],
+				getBatteryVoltage: () => 3.7,
+				getTimeMs: () => now,
+				getGlobalPosition: () => null,
+				radioSend: (p) => radioOut.push(p),
+				log: () => {},
+			};
+
+			const fw = new NodeFirmware(1, hal, { isolationNoAckMs: 100_000 });
+			fw.tick(100);
+			expect(radioOut.some((p) => p.type === PacketType.UWB_BLINK)).toBe(false);
+
+			now = 1_000;
+			radioOut = [];
+			fw.tick(1_000);
+			expect(radioOut.some((p) => p.type === PacketType.UWB_BLINK)).toBe(true);
+		} finally {
+			Math.random = prevRandom;
+		}
+	});
+
+	it("responds with BLE_ACK to UWB_BLINK and emits BLE_MESH_REPORT when moving", () => {
+		let now = 0;
+		let inbound: Packet[] = [];
+		let radioOut: Packet[] = [];
+		const hal: INodeHAL = {
+			getIMU: () => ({ accel: { x: 0.6 * 9.81, y: 0, z: 9.81 }, gyro: { x: 0, y: 0, z: 0 } }),
+			pollRadio: () => {
+				const items = inbound;
+				inbound = [];
+				return items;
+			},
+			getBatteryVoltage: () => 3.7,
+			getTimeMs: () => now,
+			getGlobalPosition: () => null,
+			radioSend: (p) => radioOut.push(p),
+			log: () => {},
+		};
+
+		const fw = new NodeFirmware(1, hal, { isolationNoAckMs: 100_000, neighborTimeoutMs: 100_000 });
+
+		// Provide a leader neighbor to establish next hop.
+		inbound = [
+			{
+				id: "hello-2",
+				type: PacketType.DATA,
+				srcId: 2,
+				destId: -1,
+				payload: {
+					type: "HELLO",
+					batteryV: 4.0,
+					degree: 2,
+					hasBackhaul: true,
+					leaderId: 2,
+					leaderVector: { hasBackhaul: true, degree: 2, batteryV: 4.0, id: 2, moving: false },
+				},
+				timestamp: now,
+			},
+		];
 		fw.tick(100);
-		expect(radioOut.some((p) => p.payload?.type === "RANGING_POLL")).toBe(false);
+
+		// Receive UWB_BLINK -> should reply BLE_ACK.
+		radioOut = [];
+		now = 1_000;
+		inbound = [
+			{
+				id: "blink-2",
+				type: PacketType.UWB_BLINK,
+				srcId: 2,
+				destId: -1,
+				payload: { type: "UWB_BLINK", range: 5, angle: 0.1 },
+				timestamp: now,
+			},
+		];
+		fw.tick(100);
+		const ack = radioOut.find((p) => p.type === PacketType.BLE_ACK);
+		expect(ack).toBeTruthy();
+
+		// Receive BLE_ACK while moving -> should emit BLE_MESH_REPORT.
+		radioOut = [];
+		now = 2_000;
+		inbound = [
+			{
+				id: "ack-2",
+				type: PacketType.BLE_ACK,
+				srcId: 2,
+				destId: 1,
+				payload: { type: "BLE_ACK", range: 5, angle: 0.1 },
+				timestamp: now,
+			},
+		];
+		fw.tick(100);
+		const meshReport = radioOut.find((p) => p.payload?.type === "BLE_MESH_REPORT");
+		expect(meshReport).toBeTruthy();
 	});
 });

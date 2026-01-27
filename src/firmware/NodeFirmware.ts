@@ -6,17 +6,20 @@ interface NeighborState extends NeighborObservation {
 	batteryV?: number;
 	degree?: number;
 	lteCapable?: boolean;
+	hasBackhaul?: boolean;
+	status?: "MOVING" | "STATIONARY" | "ISOLATED";
 	leaderId?: number;
-	leaderScore?: number;
+	leaderVector?: PriorityVector;
 	estX?: number;
 	estY?: number;
 }
 
-interface LeaderScoreInput {
-	lteCapable: boolean;
+interface PriorityVector {
+	hasBackhaul: boolean;
 	degree: number;
 	batteryV: number;
 	id: number;
+	moving?: boolean;
 }
 
 type UplinkNeighbor = { id: number; range: number; aoa?: number };
@@ -53,11 +56,18 @@ export class NodeFirmware {
 	private est: NodePoseEstimate = { x: 0, y: 0 };
 	private neighbors: Map<number, NeighborState> = new Map();
 	private lastAckMs = 0;
-	private lastRangePollMs = 0;
-	private lastHelloMs = 0;
+	private helloTimerMs: number;
+	private rangingTimerMs: number;
+	private blinkTimerMs: number;
+	private uplinkTimerMs: number;
+	private movingStopStartMs: number | null = null;
+	private readonly helloOffsetMs: number;
+	private readonly rangingOffsetMs: number;
+	private readonly uplinkOffsetMs: number;
+	private readonly neighborTimeoutOverride: boolean;
 	private lastNeighborSignature: string = "";
 	private lastNeighborCount = 0;
-	private lastTopologyChangeMs = 0;
+	private lastMeshTrafficMs = 0;
 	private pendingTopologyEvent: { timestamp: number; prevCount: number; nextCount: number } | null = null;
 	private topologyVersion = 0;
 	private lastUplinkTopologyVersionByNode: Map<number, number> = new Map();
@@ -66,7 +76,6 @@ export class NodeFirmware {
 	private leaderId: number | null = null;
 	private leaderNextHop: number | null = null;
 	private lastPanicMs = -1;
-	private lastUplinkMs = 0;
 	private forwardedUplinkByNode: Map<number, { report: UplinkNodeReport; lastSeenMs: number }> = new Map();
 	private seenUplinkGossip: Map<string, number> = new Map();
 
@@ -78,7 +87,12 @@ export class NodeFirmware {
 		}
 	}
 
-	constructor(id: number, hal: INodeHAL, cfg?: Partial<FirmwareConfig>, opts?: { lteCapable?: boolean; gpsCapable?: boolean }) {
+	constructor(
+		id: number,
+		hal: INodeHAL,
+		cfg?: Partial<FirmwareConfig>,
+		opts?: { lteCapable?: boolean; gpsCapable?: boolean },
+	) {
 		this.id = id;
 		this.hal = hal;
 		this.cfg = {
@@ -87,7 +101,7 @@ export class NodeFirmware {
 			neighborTimeoutMs: 20_000,
 			eventDrivenSensing: true,
 			helloIntervalMovingMs: 1_000,
-			helloIntervalIdleMs: 15_000,
+			helloIntervalIdleMs: 10_000,
 			rangingIntervalMovingMs: 1_000,
 			rangingIntervalIdleMs: 10_000,
 			rangingMaintenanceMs: 0,
@@ -98,10 +112,29 @@ export class NodeFirmware {
 		};
 		this.lteCapable = opts?.lteCapable ?? false;
 		this.gpsCapable = opts?.gpsCapable ?? false;
+		this.neighborTimeoutOverride = cfg?.neighborTimeoutMs !== undefined;
+
+		// Randomized async offsets to avoid synchronized timers across nodes.
+		const helloInterval = this.cfg.helloIntervalIdleMs ?? 15_000;
+		const rangingInterval = this.cfg.rangingIntervalIdleMs ?? 10_000;
+		const uplinkInterval = this.cfg.helloIntervalIdleMs ?? 15_000;
+		const blinkInterval = 10_000;
+		this.helloOffsetMs = Math.random() * helloInterval;
+		this.rangingOffsetMs = Math.random() * rangingInterval;
+		this.uplinkOffsetMs = Math.random() * uplinkInterval;
+		this.helloTimerMs = this.helloOffsetMs;
+		this.rangingTimerMs = this.rangingOffsetMs;
+		this.blinkTimerMs = Math.random() * blinkInterval;
+		this.uplinkTimerMs = this.uplinkOffsetMs;
+		this.lastMeshTrafficMs = this.hal.getTimeMs();
 	}
 
 	public tick(dtMs: number) {
 		const now = this.hal.getTimeMs();
+		this.helloTimerMs += dtMs;
+		this.rangingTimerMs += dtMs;
+		this.blinkTimerMs += dtMs;
+		this.uplinkTimerMs += dtMs;
 		const prevState = this.state;
 		this.consumeRadio(now);
 		this.pruneStaleNeighbors(now);
@@ -120,9 +153,9 @@ export class NodeFirmware {
 		}
 
 		this.runLeaderElection(now);
-		this.maybeSendUplink(now, prevState, stateChanged);
-		this.maybeSendRangingPoll(now, prevState, stateChanged);
 		this.maybeSendHello(now);
+		this.maybeSendBlink(now);
+		this.maybeSendUplink(now, prevState, stateChanged);
 		this.runGraphOptimization(dtMs);
 	}
 
@@ -164,54 +197,91 @@ export class NodeFirmware {
 		};
 	}
 
-	private maybeSendUplink(now: number, prevState: NodeFirmware["state"], stateChanged: boolean) {
-		// Uplink policy:
-		// - Non-leaders never send to the backend directly. They gossip their report to the current leader.
-		// - Leaders/root send a batched uplink (self + forwarded reports).
-		//
-		// Cadence mirrors HELLO/ranging gating: fast when moving/topology changing, slow when stable.
-		const FAST_MS = this.cfg.helloIntervalMovingMs ?? 1_000;
-		const SLOW_MS = this.cfg.helloIntervalIdleMs ?? 15_000;
-		const TOPOLOGY_RECENT_MS = 5_000;
-		const topologyRecentlyChanged = now - this.lastTopologyChangeMs <= TOPOLOGY_RECENT_MS;
-		const isMoving = this.state === "MOVING";
-		const intervalMs =
-			this.cfg.eventDrivenSensing === false
-				? FAST_MS
-				: isMoving || topologyRecentlyChanged || stateChanged || (prevState === "ISOLATED" && this.state !== "ISOLATED")
-				? FAST_MS
-				: SLOW_MS;
-
-		if (now - this.lastUplinkMs < intervalMs) return;
-		this.lastUplinkMs = now;
-
-		const local = this.buildLocalUplinkReport(now);
-
-		const isUplinkNode = this.role === NodeRole.LEADER || this.lteCapable;
-		if (!isUplinkNode) {
-			// Send report toward leader via TTL-limited gossip flood.
-			// Prefer unicast routing via leaderNextHop (tree), with TTL as a safety net.
-			if (this.leaderId !== null && this.leaderId !== this.id && this.leaderNextHop !== null) {
-				const INITIAL_TTL = 4;
-				const pkt: Packet = {
-					id: `${this.id}-uplink-gossip-${now}`,
-					type: PacketType.DATA,
-					srcId: this.id,
-					destId: this.leaderNextHop,
-					payload: {
-						type: "UPLINK_GOSSIP",
-						targetLeaderId: this.leaderId,
-						ttl: INITIAL_TTL,
-						report: local,
-					},
-					timestamp: now,
-				};
-				this.hal.radioSend(pkt);
-			}
+	private sendMeshReport(now: number) {
+		const report = this.buildLocalUplinkReport(now);
+		const targetLeaderId = this.leaderId ?? undefined;
+		if (targetLeaderId === this.id) {
+			this.forwardedUplinkByNode.set(this.id, { report, lastSeenMs: now });
+			this.sendUplinkBatch(now);
 			return;
 		}
+		const nextHop =
+			this.leaderNextHop ?? (targetLeaderId !== undefined && targetLeaderId !== this.id ? targetLeaderId : null);
+		if (nextHop === null) return;
+		const pkt: Packet = {
+			id: `${this.id}-mesh-report-${now}`,
+			type: PacketType.DATA,
+			srcId: this.id,
+			destId: nextHop,
+			payload: {
+				type: "BLE_MESH_REPORT",
+				targetLeaderId,
+				ttl: 4,
+				report,
+			},
+			timestamp: now,
+		};
+		this.hal.radioSend(pkt);
+	}
 
-		// Leader/root: send self report + any forwarded reports.
+	///Send a HELLO heartbeat if policy allows
+	private maybeSendHello(now: number) {
+		if (this.state !== "STATIONARY") return;
+		const intervalMs = this.cfg.helloIntervalIdleMs ?? 10_000;
+		if (this.helloTimerMs < intervalMs) return;
+		this.helloTimerMs = 0;
+		const degree = this.neighbors.size;
+		const leaderVector = makePriorityVector({
+			hasBackhaul: this.lteCapable,
+			degree,
+			batteryV: this.hal.getBatteryVoltage(),
+			id: this.id,
+			moving: false,
+		});
+		const hello: Packet = {
+			id: `${this.id}-hello-${now}`,
+			type: PacketType.DATA,
+			srcId: this.id,
+			destId: -1,
+			payload: {
+				type: "HELLO",
+				batteryV: this.hal.getBatteryVoltage(),
+				degree,
+				hasBackhaul: this.lteCapable,
+				leaderId: this.leaderId ?? this.id,
+				leaderVector,
+				status: this.state,
+			},
+			timestamp: now,
+		};
+		this.hal.radioSend(hello);
+	}
+
+	private maybeSendUplink(now: number, prevState: NodeFirmware["state"], stateChanged: boolean) {
+		// Uplink is event-driven; only isolated nodes upload periodically via LTE/GPS.
+		if (this.state !== "ISOLATED") return;
+		if (!(this.lteCapable || this.gpsCapable)) return;
+		const intervalMs = 10_000;
+		if (this.uplinkTimerMs < intervalMs && !(prevState !== "ISOLATED" || stateChanged)) return;
+		this.uplinkTimerMs = 0;
+		const local = this.buildLocalUplinkReport(now);
+		const uplink: Packet = {
+			id: `${this.id}-uplink-${now}`,
+			type: PacketType.UPLINK,
+			srcId: this.id,
+			destId: -1,
+			payload: {
+				type: "UPLINK_BATCH",
+				reports: [local],
+			},
+			timestamp: now,
+		};
+		this.hal.radioSend(uplink);
+	}
+
+	private sendUplinkBatch(now: number) {
+		if (this.role !== NodeRole.LEADER) return;
+		const local = this.buildLocalUplinkReport(now);
 		const reports: UplinkNodeReport[] = [local];
 		for (const { report } of this.forwardedUplinkByNode.values()) {
 			reports.push(report);
@@ -219,7 +289,7 @@ export class NodeFirmware {
 		this.forwardedUplinkByNode.clear();
 
 		const events: UplinkEvent[] = [];
-		if (this.role === NodeRole.LEADER && this.pendingTopologyEvent) {
+		if (this.pendingTopologyEvent) {
 			const { timestamp, prevCount, nextCount } = this.pendingTopologyEvent;
 			events.push({
 				kind: "TOPOLOGY_CHANGE",
@@ -231,24 +301,21 @@ export class NodeFirmware {
 			this.pendingTopologyEvent = null;
 		}
 
-		// Also surface topology changes observed from leaf/relay nodes (via their reports).
-		if (this.role === NodeRole.LEADER) {
-			for (const r of reports) {
-				if (!r || typeof r !== "object") continue;
-				if (r.nodeId === this.id) continue;
-				const v = Number(r.topologyVersion);
-				if (!Number.isFinite(v) || v <= 0) continue;
-				const prev = this.lastUplinkTopologyVersionByNode.get(r.nodeId) ?? 0;
-				if (v <= prev) continue;
-				this.lastUplinkTopologyVersionByNode.set(r.nodeId, v);
-				events.push({
-					kind: "TOPOLOGY_CHANGE",
-					level: "INFO",
-					timestamp: r.timestamp,
-					nodeId: r.nodeId,
-					message: `node ${r.nodeId} topology changed (v${prev} -> v${v}, degree=${r.degree ?? "?"})`,
-				});
-			}
+		for (const r of reports) {
+			if (!r || typeof r !== "object") continue;
+			if (r.nodeId === this.id) continue;
+			const v = Number(r.topologyVersion);
+			if (!Number.isFinite(v) || v <= 0) continue;
+			const prev = this.lastUplinkTopologyVersionByNode.get(r.nodeId) ?? 0;
+			if (v <= prev) continue;
+			this.lastUplinkTopologyVersionByNode.set(r.nodeId, v);
+			events.push({
+				kind: "TOPOLOGY_CHANGE",
+				level: "INFO",
+				timestamp: r.timestamp,
+				nodeId: r.nodeId,
+				message: `node ${r.nodeId} topology changed (v${prev} -> v${v}, degree=${r.degree ?? "?"})`,
+			});
 		}
 
 		const uplink: Packet = {
@@ -293,14 +360,16 @@ export class NodeFirmware {
 			const nextCount = ids.length;
 			this.lastNeighborSignature = sig;
 			this.lastNeighborCount = nextCount;
-			this.lastTopologyChangeMs = now;
 			this.topologyVersion += 1;
 			this.pendingTopologyEvent = { timestamp: now, prevCount, nextCount };
 		}
 	}
 
 	private pruneStaleNeighbors(now: number) {
-		const timeoutMs = this.cfg.neighborTimeoutMs;
+		const helloIdleMs = this.cfg.helloIntervalIdleMs ?? 10_000;
+		const timeoutMs = this.neighborTimeoutOverride
+			? this.cfg.neighborTimeoutMs
+			: Math.max(this.cfg.neighborTimeoutMs, helloIdleMs * 2);
 		for (const [id, n] of this.neighbors.entries()) {
 			if (now - n.lastSeenMs > timeoutMs) this.neighbors.delete(id);
 		}
@@ -311,8 +380,21 @@ export class NodeFirmware {
 		for (const p of packets) {
 			//skip packets not addressed to this node or broadcast
 			if (p.destId !== -1 && p.destId !== this.id) continue;
-			// Any successful reception implies connectivity (prevents everyone timing out into ISOLATED)
-			if (p.srcId !== this.id) this.lastAckMs = now;
+
+			const payloadType = p.payload?.type;
+			const isMeshTraffic =
+				p.type === PacketType.UWB_BLINK ||
+				p.type === PacketType.BLE_ACK ||
+				payloadType === "UWB_BLINK" ||
+				payloadType === "BLE_ACK" ||
+				payloadType === "HELLO" ||
+				payloadType === "RANGING_POLL" ||
+				payloadType === "RANGING_RESP" ||
+				payloadType === "BLE_MESH_REPORT" ||
+				p.type === PacketType.PANIC;
+			if (isMeshTraffic && p.srcId !== this.id) {
+				this.lastMeshTrafficMs = now;
+			}
 
 			// PANIC: immediately ACK the sender.
 			// This provides a fast, explicit "I heard you" response for alarm packets.
@@ -331,6 +413,43 @@ export class NodeFirmware {
 				};
 				this.hal.radioSend(ack);
 			}
+
+			// UWB Blink handshake (ETM)
+			if (p.type === PacketType.UWB_BLINK || p.payload?.type === "UWB_BLINK") {
+				this.recordNeighborObservation(p, now);
+				if (p.srcId !== this.id) {
+					const degree = this.neighbors.size;
+					const leaderVector = makePriorityVector({
+						hasBackhaul: this.lteCapable,
+						degree,
+						batteryV: this.hal.getBatteryVoltage(),
+						id: this.id,
+						moving: this.state === "MOVING",
+					});
+					const ack: Packet = {
+						id: `${this.id}-ble-ack-${p.id}`,
+						type: PacketType.BLE_ACK,
+						srcId: this.id,
+						destId: p.srcId,
+						payload: {
+							type: "BLE_ACK",
+							range: p.payload?.range ?? 0,
+							angle: p.payload?.angle ?? 0,
+							estX: this.est.x,
+							estY: this.est.y,
+							degree,
+							batteryV: this.hal.getBatteryVoltage(),
+							hasBackhaul: this.lteCapable,
+							leaderId: this.leaderId ?? this.id,
+							leaderVector,
+							status: this.state,
+						},
+						timestamp: now,
+					};
+					this.hal.radioSend(ack);
+				}
+			}
+
 			if (p.payload?.type === "HELLO") this.recordNeighborObservation(p, now);
 
 			//Ranging packets
@@ -340,11 +459,12 @@ export class NodeFirmware {
 				//if someone asked us for ranging, respond
 				if (p.payload?.type === "RANGING_POLL" && p.srcId !== this.id) {
 					const degree = this.neighbors.size;
-					const leaderScore = nodeScore({
-						lteCapable: this.lteCapable,
+					const leaderVector = makePriorityVector({
+						hasBackhaul: this.lteCapable,
 						degree,
 						batteryV: this.hal.getBatteryVoltage(),
 						id: this.id,
+						moving: this.state === "MOVING",
 					});
 					const resp: Packet = {
 						id: `${this.id}-resp-${p.id}`,
@@ -359,22 +479,34 @@ export class NodeFirmware {
 							estY: this.est.y,
 							degree,
 							batteryV: this.hal.getBatteryVoltage(),
-							lteCapable: this.lteCapable,
+							hasBackhaul: this.lteCapable,
 							leaderId: this.leaderId ?? this.id,
-							leaderScore,
+							leaderVector,
+							status: this.state,
 						},
 						timestamp: now,
 					};
 					this.hal.radioSend(resp);
 				}
 			}
-			//ACK is used to detect isolation state (if no ACKs received for a while, node is isolated)
+			// BLE_ACK updates connectivity for moving nodes and provides fresh ranging data.
+			if (p.type === PacketType.BLE_ACK || p.payload?.type === "BLE_ACK") {
+				this.lastAckMs = now;
+				this.recordNeighborObservation(p, now);
+				if (this.state !== "ISOLATED") {
+					this.sendMeshReport(now);
+				}
+			}
+
+			// ACK is used to detect isolation state (if no ACKs received for a while, node is isolated)
 			if (p.payload?.type === "ACK") {
 				this.lastAckMs = now;
 			}
 
-			// Uplink gossip: non-leaders send their cloud report to the current leader.
-			if (p.payload?.type === "UPLINK_GOSSIP") {
+			// Mesh reports: non-leaders send their cloud report to the current leader.
+			if (p.payload?.type === "UPLINK_GOSSIP" || p.payload?.type === "BLE_MESH_REPORT") {
+				// Relay is OFF when isolated or moving.
+				if (this.state === "ISOLATED" || this.state === "MOVING") continue;
 				const payload = p.payload as { report?: UplinkNodeReport; targetLeaderId?: unknown; ttl?: unknown };
 				const report = payload.report;
 				if (!report) continue;
@@ -392,7 +524,31 @@ export class NodeFirmware {
 				// If this node is the intended target leader, accept the report immediately.
 				// Leader election runs later in the tick, so role may not be updated yet.
 				if (isTargetLeader) {
-					this.forwardedUplinkByNode.set(report.nodeId, { report, lastSeenMs: now });
+					if (this.role === NodeRole.LEADER || this.leaderId === this.id) {
+						this.forwardedUplinkByNode.set(report.nodeId, { report, lastSeenMs: now });
+						this.sendUplinkBatch(now);
+						continue;
+					}
+
+					// Relay received a report targeted to itself; forward toward its known leader if possible.
+					const upstreamLeaderId = Number.isFinite(this.leaderId) ? this.leaderId : null;
+					if (upstreamLeaderId !== null && upstreamLeaderId !== this.id && ttl > 0) {
+						const nextHop = this.leaderNextHop ?? upstreamLeaderId;
+						const fwd: Packet = {
+							id: `${this.id}-mesh-report-fwd-${key}`,
+							type: PacketType.DATA,
+							srcId: this.id,
+							destId: nextHop !== this.id ? nextHop : -1,
+							payload: {
+								type: "BLE_MESH_REPORT",
+								targetLeaderId: upstreamLeaderId,
+								ttl: ttl - 1,
+								report,
+							},
+							timestamp: now,
+						};
+						this.hal.radioSend(fwd);
+					}
 					continue;
 				}
 
@@ -400,12 +556,12 @@ export class NodeFirmware {
 				if (ttl > 0 && p.srcId !== this.id) {
 					const nextHop = this.leaderNextHop;
 					const fwd: Packet = {
-						id: `${this.id}-uplink-gossip-fwd-${key}`,
+						id: `${this.id}-mesh-report-fwd-${key}`,
 						type: PacketType.DATA,
 						srcId: this.id,
 						destId: nextHop !== null && nextHop !== this.id ? nextHop : -1,
 						payload: {
-							type: "UPLINK_GOSSIP",
+							type: "BLE_MESH_REPORT",
 							targetLeaderId: Number.isFinite(targetLeaderId) ? targetLeaderId : undefined,
 							ttl: ttl - 1,
 							report,
@@ -425,7 +581,25 @@ export class NodeFirmware {
 		const payloadEstX = p.payload?.estX;
 		const payloadEstY = p.payload?.estY;
 		const payloadLeaderId = p.payload?.leaderId;
-		const payloadLeaderScore = p.payload?.leaderScore;
+		const payloadLeaderVector = p.payload?.leaderVector;
+		const payloadStatus = p.payload?.status;
+		const normalizedLeaderVector = payloadLeaderVector
+			? makePriorityVector({
+					id: Number.isFinite(payloadLeaderVector?.id)
+						? Number(payloadLeaderVector.id)
+						: Number.isFinite(payloadLeaderId)
+							? Number(payloadLeaderId)
+							: p.srcId,
+					hasBackhaul:
+						payloadLeaderVector?.hasBackhaul ??
+						payloadLeaderVector?.lteCapable ??
+						p.payload?.hasBackhaul ??
+						p.payload?.lteCapable,
+					degree: payloadLeaderVector?.degree ?? p.payload?.degree,
+					batteryV: payloadLeaderVector?.batteryV ?? p.payload?.batteryV,
+					moving: payloadLeaderVector?.moving,
+				})
+			: undefined;
 		const next: NeighborState = {
 			id: p.srcId,
 			rangeMeters: p.payload?.range ?? p.payload?.rangeMeters ?? prev?.rangeMeters ?? 0,
@@ -435,84 +609,57 @@ export class NodeFirmware {
 			batteryV: p.payload?.batteryV ?? prev?.batteryV,
 			degree: p.payload?.degree ?? prev?.degree,
 			lteCapable: p.payload?.lteCapable ?? prev?.lteCapable,
-			leaderId: Number.isFinite(payloadLeaderId) ? payloadLeaderId : prev?.leaderId,
-			leaderScore: Number.isFinite(payloadLeaderScore) ? payloadLeaderScore : prev?.leaderScore,
+			hasBackhaul: p.payload?.hasBackhaul ?? p.payload?.lteCapable ?? prev?.hasBackhaul ?? prev?.lteCapable,
+			status:
+				payloadStatus === "MOVING" || payloadStatus === "STATIONARY" || payloadStatus === "ISOLATED"
+					? payloadStatus
+					: prev?.status,
+			leaderId: Number.isFinite(payloadLeaderId)
+				? payloadLeaderId
+				: Number.isFinite(normalizedLeaderVector?.id)
+					? normalizedLeaderVector!.id
+					: prev?.leaderId,
+			leaderVector: normalizedLeaderVector ?? prev?.leaderVector,
 			estX: Number.isFinite(payloadEstX) ? payloadEstX : prev?.estX,
 			estY: Number.isFinite(payloadEstY) ? payloadEstY : prev?.estY,
 		};
 		this.neighbors.set(p.srcId, next);
 	}
 
-	///Send a ranging poll if enough time has passed since the last one
-	private hasIncompleteNeighborInfo() {
-		for (const n of this.neighbors.values()) {
-			// Range comes only from ranging injection; HELLOs default to 0.
-			if (!Number.isFinite(n.rangeMeters) || n.rangeMeters <= 0) return true;
-			if (n.angleRad === undefined) return true;
-		}
-		return false;
-	}
-
-	///Send a ranging poll if policy allows
-	private maybeSendRangingPoll(now: number, prevState: NodeFirmware["state"], stateChanged: boolean) {
-		const TOPOLOGY_RECENT_MS = 5_000;
-		const isMoving = this.state === "MOVING";
-		const topologyRecentlyChanged = now - this.lastTopologyChangeMs <= TOPOLOGY_RECENT_MS;
-		const recoveredFromIsolation = prevState === "ISOLATED" && this.state !== "ISOLATED";
-		const needsLearning = this.hasIncompleteNeighborInfo();
-
-		const movingIntervalMs = this.cfg.rangingIntervalMovingMs ?? 1_000;
-		const idleIntervalMs = this.cfg.rangingIntervalIdleMs ?? 10_000;
-		const maintenanceMs = this.cfg.rangingMaintenanceMs ?? 0;
-
-		// ICUM event-driven mode: when stationary+stable, only range on events or when
-		// we still lack measurements.
-		if (this.cfg.eventDrivenSensing && !isMoving && !topologyRecentlyChanged) {
-			const shouldFire = recoveredFromIsolation || stateChanged || needsLearning;
-			if (!shouldFire) {
-				if (maintenanceMs > 0 && now - this.lastRangePollMs >= maintenanceMs) {
-					// fallthrough to send a very slow maintenance poll
-				} else {
-					return;
-				}
-			}
-		}
-
-		const intervalMs =
-			this.cfg.eventDrivenSensing === false
-				? movingIntervalMs
-				: isMoving || topologyRecentlyChanged
-				? movingIntervalMs
-				: idleIntervalMs;
-		if (now - this.lastRangePollMs < intervalMs) return;
-		this.lastRangePollMs = now;
+	///Send a UWB blink (ETM) if policy allows
+	private maybeSendBlink(now: number) {
+		if (this.state !== "MOVING") return;
+		const intervalMs = 1_000;
+		if (this.blinkTimerMs < intervalMs) return;
+		this.blinkTimerMs = 0;
 		const degree = this.neighbors.size;
-		const leaderScore = nodeScore({
-			lteCapable: this.lteCapable,
+		const leaderVector = makePriorityVector({
+			hasBackhaul: this.lteCapable,
 			degree,
 			batteryV: this.hal.getBatteryVoltage(),
 			id: this.id,
+			moving: this.state === "MOVING",
 		});
-		const poll: Packet = {
-			id: `${this.id}-poll-${now}`,
-			type: PacketType.DATA,
+		const blink: Packet = {
+			id: `${this.id}-blink-${now}`,
+			type: PacketType.UWB_BLINK,
 			srcId: this.id,
 			destId: -1,
 			payload: {
-				type: "RANGING_POLL",
+				type: "UWB_BLINK",
 				range: 0,
 				angle: 0,
 				estX: this.est.x,
 				estY: this.est.y,
 				degree,
 				batteryV: this.hal.getBatteryVoltage(),
-				lteCapable: this.lteCapable,
-				leaderId: this.leaderId ?? this.id,
-				leaderScore,
+				hasBackhaul: this.lteCapable,
+				leaderVector,
+				status: this.state,
 			},
 			timestamp: now,
 		};
-		this.hal.radioSend(poll);
+		this.hal.radioSend(blink);
 	}
 
 	///Update the node's state based on IMU readings
@@ -526,25 +673,36 @@ export class NodeFirmware {
 		const linAccelG = linAccelMag / 9.81;
 
 		const isMoving = linAccelG > this.cfg.accelMoveThresholdG;
-		const disconnected = now - this.lastAckMs > this.cfg.isolationNoAckMs;
+		const isolationMs = this.cfg.isolationNoAckMs;
+		const disconnected = isMoving ? now - this.lastAckMs > isolationMs : now - this.lastMeshTrafficMs > isolationMs;
 
 		// Isolation is a connectivity state: it can happen whether moving or stationary.
 		if (disconnected) {
 			this.state = "ISOLATED";
+			this.movingStopStartMs = null;
 			return;
 		}
 
 		// If we were isolated and connectivity is back, recover based on IMU.
 		if (this.state === "ISOLATED") {
 			this.state = isMoving ? "MOVING" : "STATIONARY";
+			this.movingStopStartMs = null;
 			return;
 		}
 
 		// Normal motion classification.
 		if (isMoving) {
 			this.state = "MOVING";
-		} else if (this.state === "MOVING") {
-			this.state = "STATIONARY";
+			this.movingStopStartMs = null;
+			return;
+		}
+
+		// Require 5s continuous low-accel before switching to STATIONARY.
+		if (this.state === "MOVING") {
+			if (this.movingStopStartMs === null) this.movingStopStartMs = now;
+			if (now - this.movingStopStartMs >= 5_000) {
+				this.state = "STATIONARY";
+			}
 		}
 	}
 
@@ -563,83 +721,56 @@ export class NodeFirmware {
 			return;
 		}
 
-		const self: LeaderScoreInput = {
-			lteCapable: this.lteCapable,
+		const selfVector = makePriorityVector({
+			hasBackhaul: this.lteCapable,
 			degree,
 			batteryV: this.hal.getBatteryVoltage(),
 			id: this.id,
-		};
-		let bestLeaderId = this.id;
-		let bestLeaderScore = nodeScore(self);
-		let bestNextHop: number | null = null;
+			moving: this.state === "MOVING",
+		});
+		const isEligible = (v: PriorityVector) => !v.moving;
 
-		for (const n of this.neighbors.values()) {
-			const directCandidate: LeaderScoreInput = {
-				lteCapable: n.lteCapable ?? false,
-				degree: n.degree ?? degree,
-				batteryV: n.batteryV ?? 0,
-				id: n.id,
-			};
-			const neighborLeaderId = n.leaderId;
-			const neighborLeaderScore = n.leaderScore;
-			const candidateLeaderId = Number.isFinite(neighborLeaderId) ? neighborLeaderId! : directCandidate.id;
-			const candidateLeaderScore = Number.isFinite(neighborLeaderScore)
-				? neighborLeaderScore!
-				: nodeScore(directCandidate);
-			if (candidateLeaderScore > bestLeaderScore) {
-				bestLeaderScore = candidateLeaderScore;
-				bestLeaderId = candidateLeaderId;
-				bestNextHop = n.id;
+		const bestCandidate = (() => {
+			let best: { id: number; vector: PriorityVector; nextHop: number | null } | null = isEligible(selfVector)
+				? { id: this.id, vector: selfVector, nextHop: null }
+				: null;
+
+			for (const n of this.neighbors.values()) {
+				const neighborVector = makePriorityVector({
+					hasBackhaul: n.hasBackhaul ?? n.lteCapable ?? false,
+					degree: n.degree ?? degree,
+					batteryV: n.batteryV ?? 0,
+					id: n.id,
+					moving: n.status === "MOVING",
+				});
+				if (!isEligible(neighborVector)) continue;
+				if (!best || comparePriority(neighborVector, best.vector) > 0) {
+					best = { id: n.id, vector: neighborVector, nextHop: n.id };
+				}
 			}
+
+			return best;
+		})();
+
+		// Moving nodes are never eligible for leader/relay.
+		if (this.state === "MOVING") {
+			this.role = NodeRole.IDLE;
+			this.leaderId = bestCandidate && bestCandidate.id !== this.id ? bestCandidate.id : null;
+			this.leaderNextHop = bestCandidate && bestCandidate.id !== this.id ? bestCandidate.nextHop : null;
+			return;
 		}
 
-		this.leaderId = bestLeaderId;
-		this.leaderNextHop = bestLeaderId === this.id ? null : bestNextHop;
-		this.role = bestLeaderId === this.id ? NodeRole.LEADER : NodeRole.RELAY;
-		if (this.state === "ISOLATED") this.role = NodeRole.ISOLATED;
-	}
+		if (!bestCandidate) {
+			this.leaderId = null;
+			this.leaderNextHop = null;
+			this.role = NodeRole.IDLE;
+			return;
+		}
 
-	private maybeSendHello(now: number) {
-		// Keepalive HELLO:
-		// - Fast when moving/topology is changing.
-		// - Much slower when stationary+stable to reduce chatter while keeping
-		//   neighbor tables alive.
-		const FAST_MS = this.cfg.helloIntervalMovingMs ?? 1_000;
-		const SLOW_MS = this.cfg.helloIntervalIdleMs ?? 15_000;
-		const TOPOLOGY_RECENT_MS = 5_000;
-		const isMoving = this.state === "MOVING";
-		const topologyRecentlyChanged = now - this.lastTopologyChangeMs <= TOPOLOGY_RECENT_MS;
-		const intervalMs =
-			this.cfg.eventDrivenSensing === false ? FAST_MS : isMoving || topologyRecentlyChanged ? FAST_MS : SLOW_MS;
-		if (now - this.lastHelloMs < intervalMs) return;
-		this.lastHelloMs = now;
-		const degree = this.neighbors.size;
-		const leaderScore = nodeScore({
-			lteCapable: this.lteCapable,
-			degree,
-			batteryV: this.hal.getBatteryVoltage(),
-			id: this.id,
-		});
-		const hello: Packet = {
-			id: `${this.id}-hello-${now}`,
-			type: PacketType.HELLO,
-			srcId: this.id,
-			destId: -1,
-			payload: {
-				type: "HELLO",
-				range: 0,
-				angle: 0,
-				estX: this.est.x,
-				estY: this.est.y,
-				degree,
-				batteryV: this.hal.getBatteryVoltage(),
-				lteCapable: this.lteCapable,
-				leaderId: this.leaderId ?? this.id,
-				leaderScore,
-			},
-			timestamp: now,
-		};
-		this.hal.radioSend(hello);
+		this.leaderId = bestCandidate.id;
+		this.leaderNextHop = bestCandidate.id === this.id ? null : bestCandidate.nextHop;
+		this.role = this.leaderId === this.id ? NodeRole.LEADER : NodeRole.RELAY;
+		if (this.state === "ISOLATED") this.role = NodeRole.ISOLATED;
 	}
 
 	// Cooperative localization update.
@@ -654,50 +785,46 @@ export class NodeFirmware {
 	//
 	// This is intentionally simpler and more stable than the old per-tick summed-gradient
 	// update (which tended to produce weird non-monotonic noise curves).
-	private runGraphOptimization(dtMs: number) {
+	private runGraphOptimization(_dtMs: number) {
 		if (this.neighbors.size === 0) return;
-		let sumX = 0;
-		let sumY = 0;
-		let used = 0;
+		const alpha = 0.2;
+		const lambdaD = this.cfg.lambdaDistance ?? 1.0;
+		const lambdaTheta = this.cfg.lambdaAngle ?? 0.5;
 
 		for (const n of this.neighbors.values()) {
 			if (!Number.isFinite(n.rangeMeters) || n.rangeMeters <= 0) continue;
-			if (n.angleRad === undefined) continue;
 			const estX = n.estX;
 			const estY = n.estY;
 			if (estX === undefined || estY === undefined) continue;
 			if (!Number.isFinite(estX) || !Number.isFinite(estY)) continue;
 
-			const measDx = n.rangeMeters * Math.cos(n.angleRad);
-			const measDy = n.rangeMeters * Math.sin(n.angleRad);
-			const inferredSelfX = estX - measDx;
-			const inferredSelfY = estY - measDy;
-			if (!Number.isFinite(inferredSelfX) || !Number.isFinite(inferredSelfY)) continue;
+			const dx = estX - this.est.x;
+			const dy = estY - this.est.y;
+			const dist = Math.sqrt(dx * dx + dy * dy);
+			if (!Number.isFinite(dist) || dist === 0) continue;
 
-			sumX += inferredSelfX;
-			sumY += inferredSelfY;
-			used++;
+			const eDist = dist - n.rangeMeters;
+			const corr = alpha * lambdaD * eDist;
+			const ux = dx / dist;
+			const uy = dy / dist;
+			this.est.x += corr * ux;
+			this.est.y += corr * uy;
+
+			// Angle correction (optional when AoA available): nudge perpendicular to reduce bearing error.
+			if (n.angleRad !== undefined) {
+				const measured = n.angleRad;
+				const predicted = Math.atan2(dy, dx);
+				let eTheta = predicted - measured;
+				while (eTheta > Math.PI) eTheta -= 2 * Math.PI;
+				while (eTheta < -Math.PI) eTheta += 2 * Math.PI;
+				const perpX = -uy;
+				const perpY = ux;
+				const thetaCorr = alpha * lambdaTheta * eTheta * dist;
+				this.est.x += thetaCorr * perpX;
+				this.est.y += thetaCorr * perpY;
+			}
 		}
 
-		if (used === 0) return;
-		const targetX = sumX / used;
-		const targetY = sumY / used;
-
-		// Smoothly move toward the inferred position; cap to avoid teleporting.
-		const alpha = Math.min(1, Math.max(0, this.cfg.learningRate * (dtMs / 1000)));
-		let stepX = (targetX - this.est.x) * alpha;
-		let stepY = (targetY - this.est.y) * alpha;
-
-		const stepNorm = Math.sqrt(stepX * stepX + stepY * stepY);
-		const maxStepMeters = 5; // this means we can move at most 5m per second
-		if (stepNorm > maxStepMeters) {
-			const scale = maxStepMeters / stepNorm;
-			stepX *= scale;
-			stepY *= scale;
-		}
-
-		this.est.x += stepX;
-		this.est.y += stepY;
 		if (!Number.isFinite(this.est.x) || !Number.isFinite(this.est.y)) {
 			this.est = { x: 0, y: 0 };
 		}
@@ -724,6 +851,36 @@ export class NodeFirmware {
 	}
 }
 
-const nodeScore = (input: LeaderScoreInput) => {
-	return (input.lteCapable ? 1 : 0) * 1_000_000 + input.degree * 10_000 + input.batteryV * 1_000 + (10_000 - input.id);
+const comparePriority = (a: PriorityVector, b: PriorityVector): number => {
+	const normalize = (v: PriorityVector) => ({
+		hasBackhaul: Boolean(v.hasBackhaul),
+		degree: Number.isFinite(v.degree) ? v.degree : 0,
+		batteryV: Number.isFinite(v.batteryV) ? Math.round(v.batteryV * 1000) / 1000 : 0,
+		id: Number.isFinite(v.id) ? v.id : Number.POSITIVE_INFINITY,
+		moving: v.moving ?? false,
+	});
+	const A = normalize(a);
+	const B = normalize(b);
+
+	if (A.moving && !B.moving) return -1;
+	if (B.moving && !A.moving) return 1;
+	if (A.hasBackhaul !== B.hasBackhaul) return A.hasBackhaul ? 1 : -1;
+	if (A.degree !== B.degree) return A.degree > B.degree ? 1 : -1;
+	if (A.batteryV !== B.batteryV) return A.batteryV > B.batteryV ? 1 : -1;
+	if (A.id !== B.id) return A.id < B.id ? 1 : -1;
+	return 0;
 };
+
+const makePriorityVector = (input: {
+	hasBackhaul?: boolean;
+	degree?: number;
+	batteryV?: number;
+	id: number;
+	moving?: boolean;
+}): PriorityVector => ({
+	hasBackhaul: Boolean(input.hasBackhaul),
+	degree: Number.isFinite(input.degree) ? Number(input.degree) : 0,
+	batteryV: Number.isFinite(input.batteryV) ? Number(input.batteryV) : 0,
+	id: input.id,
+	moving: input.moving ?? false,
+});

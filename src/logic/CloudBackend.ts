@@ -9,6 +9,7 @@ export interface CloudBackendOptions {
 	warmupIterations?: number;
 	finalIterations?: number;
 	pruneAgeMs?: number;
+	pruneClusterAfterMs?: number; // remove nodes not seen in active cluster after this age
 }
 
 /**
@@ -81,12 +82,14 @@ export class CloudBackend {
 	private graphSeedId: number | null = null;
 	private readonly rng: () => number;
 	private recordCounter = 0;
+	private lastFusionActiveIds: Set<number> = new Set();
+	private lastFusionTime = 0;
+	private lastSeenByNode: Map<number, number> = new Map();
 
 	private readonly opts: Required<Omit<CloudBackendOptions, "rng">>;
 
 	// Configuration
 	private FUSION_WINDOW_MS = 1000; // Fuse data every 1 second
-	private lastFusionTime = 0;
 
 	// Track how long nodes have been in the graph to avoid fixing them too early
 	private nodeStabilityCounter: Map<number, number> = new Map();
@@ -107,16 +110,29 @@ export class CloudBackend {
 			angleSigma: opts?.angleSigma ?? (20 * Math.PI) / 180,
 			warmupIterations: opts?.warmupIterations ?? 15,
 			finalIterations: opts?.finalIterations ?? 50,
-			pruneAgeMs: opts?.pruneAgeMs ?? 30_000,
+			pruneAgeMs: opts?.pruneAgeMs ?? Number.POSITIVE_INFINITY,
+			pruneClusterAfterMs: opts?.pruneClusterAfterMs ?? 60_000,
 		};
 	}
 
 	private pruneStaleRecords(currentTime: number) {
+		if (!Number.isFinite(this.opts.pruneAgeMs)) return;
 		const cutoff = currentTime - this.opts.pruneAgeMs;
 		// Prune the main DB
 		if (this.db.length > 0) {
 			this.db = this.db.filter((r) => r.timestamp >= cutoff);
 		}
+	}
+
+	private pruneStaleCluster(currentTime: number, activeNodeIds: Set<number>) {
+		if (!Number.isFinite(this.opts.pruneClusterAfterMs)) return;
+		if (activeNodeIds.size === 0) return;
+		const cutoff = currentTime - this.opts.pruneClusterAfterMs;
+		this.db = this.db.filter((r) => {
+			if (activeNodeIds.has(r.nodeId)) return true;
+			const lastSeen = this.lastSeenByNode.get(r.nodeId) ?? r.timestamp;
+			return lastSeen >= cutoff;
+		});
 	}
 
 	public recordEvent(event: Omit<CloudEvent, "id">) {
@@ -142,8 +158,21 @@ export class CloudBackend {
 		// immediately rather than waiting for the prune timeout.
 		// We inject a synthetic record with NO neighbors.
 		const prev = this.db.find((r) => r.nodeId === opts.nodeId);
-		const lastPos = prev?.position ?? { x: 0, y: 0 }; // We don't know where it is, just keep last pos
-		
+		let lastPos = prev?.position;
+		if (!lastPos && this.graph) {
+			const pose = this.graph.getNodePose(opts.nodeId);
+			if (pose) lastPos = { x: pose.x, y: pose.y };
+		}
+		if (!lastPos) {
+			// Deterministic fallback to avoid overlapping isolated nodes at (0,0).
+			const angle = (opts.nodeId * 137.508 * Math.PI) / 180; // golden angle
+			const radius = 6 + (opts.nodeId % 5) * 2;
+			lastPos = {
+				x: 20 + Math.cos(angle) * radius,
+				y: 15 + Math.sin(angle) * radius,
+			};
+		}
+
 		const isolatedRecord: FusedRecord = {
 			id: `${opts.nodeId}-panic-${this.recordCounter++}`,
 			nodeId: opts.nodeId,
@@ -171,6 +200,9 @@ export class CloudBackend {
 			this.buffer.set(report.nodeId, []);
 		}
 		this.buffer.get(report.nodeId)!.push(report);
+		if (Number.isFinite(report.timestamp)) {
+			this.lastSeenByNode.set(report.nodeId, report.timestamp);
+		}
 	}
 
 	/**
@@ -182,6 +214,7 @@ export class CloudBackend {
 			this.runFusion();
 			this.lastFusionTime = currentTime;
 			this.pruneStaleRecords(currentTime);
+			this.pruneStaleCluster(this.lastFusionTime, this.lastFusionActiveIds);
 			return true; // Indicates database updated
 		}
 		return false;
@@ -203,12 +236,14 @@ export class CloudBackend {
 		const activeNodeIds = new Set<number>();
 		const fixedNodeIds: number[] = [];
 		const supernodeIds = new Set<number>();
+		let fusionTime = 0;
 
 		// 0. Identify Supernodes (Anchors)
 		this.buffer.forEach((reports, nodeId) => {
 			if (reports.length === 0) return;
-			activeNodeIds.add(nodeId);
 			const latest = reports[reports.length - 1];
+			if (latest && Number.isFinite(latest.timestamp)) fusionTime = Math.max(fusionTime, latest.timestamp);
+			activeNodeIds.add(nodeId);
 			if (latest.x !== undefined && latest.y !== undefined) {
 				supernodeIds.add(nodeId);
 			}
@@ -395,43 +430,45 @@ export class CloudBackend {
 
 			const latestReport = reports[reports.length - 1];
 			const neighbors = latestReport.neighbors
-				? latestReport.neighbors.map((n) => {
-						// Use consensus values if available
-						const key = nodeId < n.id ? `${nodeId}-${n.id}` : `${n.id}-${nodeId}`;
-						let finalRange = n.range || 0;
-						let finalAoA = n.aoa || 0;
+				? latestReport.neighbors
+						.filter((n) => Number.isFinite(n.range))
+						.map((n) => {
+							// Use consensus values if available
+							const key = nodeId < n.id ? `${nodeId}-${n.id}` : `${n.id}-${nodeId}`;
+							let finalRange = n.range || 0;
+							let finalAoA = n.aoa || 0;
 
-						// Weighted Averaged Distance
-						const dists = distMap.get(key);
-						if (dists && dists.length > 0) {
-							const totalWeight = dists.reduce((sum, d) => sum + d.weight, 0);
-							const weightedSum = dists.reduce((sum, d) => sum + d.val * d.weight, 0);
-							finalRange = weightedSum / totalWeight;
-						}
-
-						// Weighted Averaged Angle
-						const vecs = angleMap.get(key);
-						if (vecs && vecs.length > 0) {
-							let sumX = 0;
-							let sumY = 0;
-							vecs.forEach((v) => {
-								sumX += v.x * v.weight;
-								sumY += v.y * v.weight;
-							});
-							const avgAngle = Math.atan2(sumY, sumX);
-							if (nodeId < n.id) {
-								finalAoA = avgAngle;
-							} else {
-								finalAoA = avgAngle + Math.PI;
+							// Weighted Averaged Distance
+							const dists = distMap.get(key);
+							if (dists && dists.length > 0) {
+								const totalWeight = dists.reduce((sum, d) => sum + d.weight, 0);
+								const weightedSum = dists.reduce((sum, d) => sum + d.val * d.weight, 0);
+								finalRange = weightedSum / totalWeight;
 							}
-						}
 
-						return {
-							id: n.id,
-							range: finalRange,
-							aoa: finalAoA,
-						};
-				  })
+							// Weighted Averaged Angle
+							const vecs = angleMap.get(key);
+							if (vecs && vecs.length > 0) {
+								let sumX = 0;
+								let sumY = 0;
+								vecs.forEach((v) => {
+									sumX += v.x * v.weight;
+									sumY += v.y * v.weight;
+								});
+								const avgAngle = Math.atan2(sumY, sumX);
+								if (nodeId < n.id) {
+									finalAoA = avgAngle;
+								} else {
+									finalAoA = avgAngle + Math.PI;
+								}
+							}
+
+							return {
+								id: n.id,
+								range: finalRange,
+								aoa: finalAoA,
+							};
+						})
 				: [];
 
 			const record: FusedRecord = {
@@ -446,7 +483,7 @@ export class CloudBackend {
 					lng: lngCount > 0 ? sumLng / lngCount : undefined,
 				},
 				avgBattery: parseFloat((sumBat / count).toFixed(1)),
-				status: "STABLE",
+				status: latestReport.status === "MOVING" ? "MOVING" : "STABLE",
 				neighbors,
 			};
 
@@ -455,6 +492,8 @@ export class CloudBackend {
 
 		this.buffer.clear();
 		if (this.db.length > 500) this.db = this.db.slice(0, 500);
+		this.lastFusionActiveIds = new Set(activeNodeIds);
+		this.lastFusionTime = fusionTime || this.lastFusionTime;
 	}
 
 	public getRecords(): FusedRecord[] {
@@ -469,5 +508,7 @@ export class CloudBackend {
 		this.nodeStabilityCounter.clear();
 		this.events = [];
 		this.eventCounter = 0;
+		this.lastFusionActiveIds.clear();
+		this.lastSeenByNode.clear();
 	}
 }

@@ -14,6 +14,8 @@ export enum PacketType {
 	ELECTION = "ELECTION",
 	PANIC = "PANIC",
 	UPLINK = "UPLINK",
+	UWB_BLINK = "UWB_BLINK",
+	BLE_ACK = "BLE_ACK",
 }
 
 export interface Packet {
@@ -49,6 +51,8 @@ export interface NeighborEntry {
 	rssi: number;
 	leaderId?: number;
 	leaderBat?: number;
+	degree?: number;
+	hasBackhaul?: boolean;
 	parentId?: number;
 	neighborCount?: number;
 	status?: "MOVING" | "STATIONARY";
@@ -132,6 +136,6 @@ export interface RangingEngine {
 	measure: (
 		sender: { id: number; x: number; y: number },
 		receiver: { id: number; x: number; y: number },
-		opts: RangingOptions
+		opts: RangingOptions,
 	) => RangingResult;
 }

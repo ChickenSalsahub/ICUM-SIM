@@ -26,7 +26,7 @@ import { computeCloudStructureStatsMeters } from "./logic/metrics/CloudTopologyM
 import { DraggableWindow } from "./components/DraggableWindow";
 import { NodeConfig, NodeRole, NodeType, Packet, PacketType, VisualPacket, Wall } from "./types";
 import { SimulationRunner } from "./engine/SimulationRunner";
-import type { FirmwareConfig } from "./firmware/types";
+import type { FirmwareConfig, NeighborObservation } from "./firmware/types";
 import { createRollingMeanConvergenceTracker } from "./experiments/lib/convergence";
 
 const PIXELS_PER_METER = 20;
@@ -62,10 +62,10 @@ const CANVAS_WIDTH = 1200;
 const CANVAS_HEIGHT = 800;
 
 // Keep UI arena consistent with experiment bounds (0..50m in both axes).
-const ARENAHEADER = "Arena (48m × 35m)";
+const ARENAHEADER = "Arena (50m × 50m)";
 const OFFSET_X_PX = 60; // Increased to make room for axis labels
 const OFFSET_Y_PX = 60;
-const WORLD_BOUNDS_M = { minX: 0, maxX: 48, minY: 0, maxY: 35 };
+const WORLD_BOUNDS_M = { minX: 0, maxX: 50, minY: 0, maxY: 30 };
 const WORLD_BOUNDS_PX = {
 	minX: WORLD_BOUNDS_M.minX * PIXELS_PER_METER + OFFSET_X_PX,
 	maxX: WORLD_BOUNDS_M.maxX * PIXELS_PER_METER + OFFSET_X_PX,
@@ -100,6 +100,17 @@ class UiNode {
 	public isGossiping = false;
 	public isElecting = false;
 	public isolationTimer = 0;
+	public orbitCenterX: number;
+	public orbitCenterY: number;
+	public orbitRadiusM: number;
+	public orbitAngleRad: number;
+	public orbitAngularSpeedRadPerSec: number;
+	public orbitDirection: 1 | -1;
+	public wanderHeadingRad: number;
+	public wanderTurnRateRadPerSec: number;
+	public wanderSpeedMps: number;
+	public wanderChangeTimerMs: number;
+	public wanderChangeIntervalMs: number;
 
 	private globalPos: UiGlobalPosition | null = null;
 	private localGraph: Map<number, Pose2D> = new Map();
@@ -115,10 +126,28 @@ class UiNode {
 		this.targetX = x;
 		this.targetY = y;
 		this.battery = 100;
+		this.orbitCenterX = x;
+		this.orbitCenterY = y;
+		this.orbitRadiusM = 1.5;
+		this.orbitAngleRad = 0;
+		this.orbitAngularSpeedRadPerSec = 0;
+		this.orbitDirection = 1;
+		this.wanderHeadingRad = Math.random() * Math.PI * 2;
+		this.wanderTurnRateRadPerSec = (Math.random() * 2 - 1) * 0.6;
+		this.wanderSpeedMps = 1.0;
+		this.wanderChangeIntervalMs = 4_000;
+		this.wanderChangeTimerMs = Math.random() * this.wanderChangeIntervalMs;
 	}
 
 	public toggleMode() {
 		this.motionMode = this.motionMode === "MOVING" ? "STATIONARY" : "MOVING";
+		if (this.motionMode === "MOVING") {
+			this.wanderHeadingRad = Math.random() * Math.PI * 2;
+			this.wanderTurnRateRadPerSec = (Math.random() * 2 - 1) * 0.8;
+			this.wanderSpeedMps = 0.6 + Math.random() * 0.8;
+			this.wanderChangeIntervalMs = 2_000 + Math.random() * 4_000;
+			this.wanderChangeTimerMs = this.wanderChangeIntervalMs;
+		}
 	}
 
 	public setGlobalPosition(lat: number, lng: number) {
@@ -153,10 +182,10 @@ class UiNode {
 				r === "LEADER"
 					? NodeRole.LEADER
 					: r === "RELAY"
-					? NodeRole.RELAY
-					: r === "ISOLATED"
-					? NodeRole.ISOLATED
-					: NodeRole.IDLE;
+						? NodeRole.RELAY
+						: r === "ISOLATED"
+							? NodeRole.ISOLATED
+							: NodeRole.IDLE;
 		}
 
 		if (opts.firmwareState) this.firmwareState = opts.firmwareState;
@@ -213,7 +242,7 @@ const doIntersect = (
 	p1: { x: number; y: number },
 	q1: { x: number; y: number },
 	p2: { x: number; y: number },
-	q2: { x: number; y: number }
+	q2: { x: number; y: number },
 ) => {
 	const orientation = (p: any, q: any, r: any) => {
 		const val = (q.y - p.y) * (r.x - q.x) - (q.x - p.x) * (r.y - q.y);
@@ -232,10 +261,10 @@ const doIntersect = (
 // For anchor-free topology, prefer the aligned and pairwise-distance metrics below.
 
 const App: React.FC = () => {
-    const [viewMode, setViewMode] = useState<"SIM" | "ANALYSIS">("SIM");
+	const [viewMode, setViewMode] = useState<"SIM" | "ANALYSIS">("SIM");
 	const [nodes, setNodes] = useState<UiNode[]>([]);
 	const [links, setLinks] = useState<Link[]>([]);
-    // ... rest of state
+	// ... rest of state
 
 	const [packets, setPackets] = useState<Packet[]>([]);
 	const [visualPackets, setVisualPackets] = useState<VisualPacket[]>([]);
@@ -311,11 +340,11 @@ const App: React.FC = () => {
 
 	const [firmwareTuning, setFirmwareTuning] = useState<FirmwareConfig>({
 		accelMoveThresholdG: 0.5,
-		isolationNoAckMs: 10_000,
-		neighborTimeoutMs: 5_000,
+		isolationNoAckMs: 30_000,
+		neighborTimeoutMs: 20_000,
 		eventDrivenSensing: true,
 		helloIntervalMovingMs: 1_000,
-		helloIntervalIdleMs: 15_000,
+		helloIntervalIdleMs: 10_000,
 		rangingIntervalMovingMs: 1_000,
 		rangingIntervalIdleMs: 10_000,
 		rangingMaintenanceMs: 0,
@@ -329,6 +358,7 @@ const App: React.FC = () => {
 		angleSigma: (20 * Math.PI) / 180,
 		warmupIterations: 15,
 		finalIterations: 50,
+		pruneClusterAfterMs: 60_000,
 	});
 
 	const nodesRef = useRef<UiNode[]>([]);
@@ -399,7 +429,7 @@ const App: React.FC = () => {
 					{ x: (n.x - OFFSET_X_PX) / PIXELS_PER_METER, y: (n.y - OFFSET_Y_PX) / PIXELS_PER_METER },
 					{ vx: 0, vy: 0 },
 					3.7,
-					n.type === "HARDWARE_GW"
+					n.type === "HARDWARE_GW",
 				);
 			}
 		},
@@ -409,7 +439,7 @@ const App: React.FC = () => {
 			simTuning.packetLoss,
 			simTuning.uwbAngleNoiseStdDeg,
 			simTuning.uwbNoiseSigmaMeters,
-		]
+		],
 	);
 
 	const applyCloudTuning = useCallback(() => {
@@ -515,7 +545,7 @@ const App: React.FC = () => {
 				setCloudEventsBaseline([...baselineCloud.getEvents()]);
 			}
 		},
-		[]
+		[],
 	);
 
 	const gameLoop = useCallback(
@@ -553,7 +583,7 @@ const App: React.FC = () => {
 							sx = sourceNode.x;
 							sy = sourceNode.y;
 						}
-						
+
 						if (targetNode) {
 							// Interpolate between current source and current target
 							tx = sx + (targetNode.x - sx) * vp.progress;
@@ -562,20 +592,13 @@ const App: React.FC = () => {
 							// Fallback if target is gone
 							tx = sx + (vp.x - vp.startX) * vp.progress;
 						}
-						
+
 						vp.x = tx;
 						vp.y = ty;
 
 						// Check wall intersection
 						for (const w of currentWalls) {
-							if (
-								doIntersect(
-									{ x: sx, y: sy },
-									{ x: vp.x, y: vp.y },
-									{ x: w.x1, y: w.y1 },
-									{ x: w.x2, y: w.y2 }
-								)
-							) {
+							if (doIntersect({ x: sx, y: sy }, { x: vp.x, y: vp.y }, { x: w.x1, y: w.y1 }, { x: w.x2, y: w.y2 })) {
 								return null;
 							}
 						}
@@ -603,7 +626,7 @@ const App: React.FC = () => {
 					y1: (w.y1 - OFFSET_Y_PX) / PIXELS_PER_METER,
 					x2: (w.x2 - OFFSET_X_PX) / PIXELS_PER_METER,
 					y2: (w.y2 - OFFSET_Y_PX) / PIXELS_PER_METER,
-				}))
+				})),
 			);
 
 			runner.setHooks({
@@ -632,7 +655,7 @@ const App: React.FC = () => {
 						});
 					}
 				},
-				onDeliver: ({ packet, senderPos }) => {
+				onDeliver: ({ packet, senderId, recipientId, senderPos }) => {
 					if (packet.destId !== -1) {
 						newVisuals.push({
 							id: Math.random().toString(),
@@ -641,11 +664,28 @@ const App: React.FC = () => {
 							y: senderPos.y * PIXELS_PER_METER + OFFSET_Y_PX,
 							startX: senderPos.x * PIXELS_PER_METER + OFFSET_X_PX,
 							startY: senderPos.y * PIXELS_PER_METER + OFFSET_Y_PX,
-							targetId: packet.destId,
+							targetId: recipientId,
 							progress: 0,
 							speed: 2.5,
 							style: "LINE",
 							sourceId: packet.srcId,
+						});
+						return;
+					}
+
+					if (packet.payload?.type === "RANGING_POLL") {
+						newVisuals.push({
+							id: Math.random().toString(),
+							packet,
+							x: senderPos.x * PIXELS_PER_METER + OFFSET_X_PX,
+							y: senderPos.y * PIXELS_PER_METER + OFFSET_Y_PX,
+							startX: senderPos.x * PIXELS_PER_METER + OFFSET_X_PX,
+							startY: senderPos.y * PIXELS_PER_METER + OFFSET_Y_PX,
+							targetId: recipientId,
+							progress: 0,
+							speed: 2.5,
+							style: "LINE",
+							sourceId: senderId,
 						});
 					}
 				},
@@ -672,59 +712,38 @@ const App: React.FC = () => {
 				let vxMps = 0;
 				let vyMps = 0;
 				if (node.motionMode === "MOVING" && !node.isDragging) {
-					const marginPx = 20;
-					const pickTarget = () => ({
-						x:
-							WORLD_BOUNDS_PX.minX +
-							marginPx +
-							Math.random() * (WORLD_BOUNDS_PX.maxX - WORLD_BOUNDS_PX.minX - 2 * marginPx),
-						y:
-							WORLD_BOUNDS_PX.minY +
-							marginPx +
-							Math.random() * (WORLD_BOUNDS_PX.maxY - WORLD_BOUNDS_PX.minY - 2 * marginPx),
-					});
-					const isOutOfBounds = (x: number, y: number) =>
-						x < WORLD_BOUNDS_PX.minX ||
-						x > WORLD_BOUNDS_PX.maxX ||
-						y < WORLD_BOUNDS_PX.minY ||
-						y > WORLD_BOUNDS_PX.maxY;
-					const pathBlocked = (x1: number, y1: number, x2: number, y2: number) =>
-						currentWalls.some((w) =>
-							doIntersect({ x: x1, y: y1 }, { x: x2, y: y2 }, { x: w.x1, y: w.y1 }, { x: w.x2, y: w.y2 })
-						);
-
-					// If the target is outside the arena or behind a wall, reroll it.
-					if (isOutOfBounds(node.targetX, node.targetY) || pathBlocked(node.x, node.y, node.targetX, node.targetY)) {
-						for (let attempt = 0; attempt < 20; attempt++) {
-							const t = pickTarget();
-							if (!pathBlocked(node.x, node.y, t.x, t.y)) {
-								node.targetX = t.x;
-								node.targetY = t.y;
-								break;
-							}
-						}
+					// Random-walk motion: constant speed with slow heading drift.
+					node.battery = Math.max(0, node.battery - 0.01 * deltaTime);
+					const dtSec = deltaTime;
+					node.wanderChangeTimerMs -= deltaTime * 1000;
+					if (node.wanderChangeTimerMs <= 0) {
+						node.wanderHeadingRad = Math.random() * Math.PI * 2;
+						node.wanderTurnRateRadPerSec = (Math.random() * 2 - 1) * 0.8;
+						node.wanderSpeedMps = 0.6 + Math.random() * 0.8;
+						node.wanderChangeIntervalMs = 2_000 + Math.random() * 4_000;
+						node.wanderChangeTimerMs = node.wanderChangeIntervalMs;
 					}
+					const jitter = (Math.random() * 2 - 1) * 0.1;
+					node.wanderHeadingRad += (node.wanderTurnRateRadPerSec + jitter) * dtSec;
+					vxMps = Math.cos(node.wanderHeadingRad) * node.wanderSpeedMps;
+					vyMps = Math.sin(node.wanderHeadingRad) * node.wanderSpeedMps;
 
-					let dist = Math.sqrt(Math.pow(node.targetX - node.x, 2) + Math.pow(node.targetY - node.y, 2));
-					if (dist < 10) {
-						for (let attempt = 0; attempt < 20; attempt++) {
-							const t = pickTarget();
-							if (!pathBlocked(node.x, node.y, t.x, t.y)) {
-								node.targetX = t.x;
-								node.targetY = t.y;
-								break;
-							}
-						}
-						dist = Math.sqrt(Math.pow(node.targetX - node.x, 2) + Math.pow(node.targetY - node.y, 2));
-					}
-
-					if (dist >= 10) {
-						node.battery = Math.max(0, node.battery - 0.01 * deltaTime);
-						const speedPxPerSec = config.movingSpeed * 100;
-						const vxPx = ((node.targetX - node.x) / dist) * speedPxPerSec;
-						const vyPx = ((node.targetY - node.y) / dist) * speedPxPerSec;
-						vxMps = vxPx / PIXELS_PER_METER;
-						vyMps = vyPx / PIXELS_PER_METER;
+					// If next step would exit bounds, reflect heading back into the world.
+					const vxPxPerSec = vxMps * PIXELS_PER_METER;
+					const vyPxPerSec = vyMps * PIXELS_PER_METER;
+					const nextX = node.x + vxPxPerSec * dtSec;
+					const nextY = node.y + vyPxPerSec * dtSec;
+					const margin = 18; // node radius
+					const hitX = nextX < WORLD_BOUNDS_PX.minX + margin || nextX > WORLD_BOUNDS_PX.maxX - margin;
+					const hitY = nextY < WORLD_BOUNDS_PX.minY + margin || nextY > WORLD_BOUNDS_PX.maxY - margin;
+					if (hitX || hitY) {
+						let dx = Math.cos(node.wanderHeadingRad);
+						let dy = Math.sin(node.wanderHeadingRad);
+						if (hitX) dx = -dx;
+						if (hitY) dy = -dy;
+						node.wanderHeadingRad = Math.atan2(dy, dx);
+						vxMps = Math.cos(node.wanderHeadingRad) * node.wanderSpeedMps;
+						vyMps = Math.sin(node.wanderHeadingRad) * node.wanderSpeedMps;
 					}
 				}
 				runner.setNodeVelocity(node.id, { vx: vxMps, vy: vyMps });
@@ -733,21 +752,22 @@ const App: React.FC = () => {
 
 			runner.step(deltaTime * 1000);
 			const snap = runner.snapshot();
-			simNowMsRef.current = snap.timeMs;
+			const nowMs = snap.timeMs;
+			simNowMsRef.current = nowMs;
 			for (const sn of snap.nodes) {
 				const node = currentNodes.find((n) => n.id === sn.id);
 				if (!node) continue;
 				if (!node.isDragging) {
-					node.x = sn.trueX * PIXELS_PER_METER + OFFSET_X_PX;
-					node.y = sn.trueY * PIXELS_PER_METER + OFFSET_Y_PX;
+					node.x = sn.x * PIXELS_PER_METER + OFFSET_X_PX;
+					node.y = sn.y * PIXELS_PER_METER + OFFSET_Y_PX;
 					// keep target position unless we auto-rerolled it above
 				}
 				node.updateFromEngine({
-					engineTimeMs: snap.timeMs,
+					engineTimeMs: nowMs,
 					firmwareRole: sn.firmware.role,
 					firmwareState: sn.firmware.state,
 					estPosition: sn.firmware.estPosition,
-					neighbors: sn.firmware.neighbors.map((nb) => ({
+					neighbors: sn.firmware.neighbors.map((nb: NeighborObservation) => ({
 						id: nb.id,
 						rangeMeters: nb.rangeMeters,
 						angleRad: nb.angleRad,
@@ -780,7 +800,6 @@ const App: React.FC = () => {
 			setLinks(newLinks);
 
 			// 4. CLOUD BACKEND (baseline + robust; ingest is driven by firmware uplink packets)
-			const nowMs = snap.timeMs;
 			if (nowMs - lastCloudTickRef.current > 250) {
 				lastCloudTickRef.current = nowMs;
 				const baselineCloud = cloudBackendBaselineRef.current;
@@ -799,7 +818,7 @@ const App: React.FC = () => {
 			setNodes([...currentNodes]);
 			animationRef.current = requestAnimationFrame(gameLoop);
 		},
-		[isPlaying, config, simTuning, capturePacket, ensureRunner, ingestUplinkToCloud]
+		[isPlaying, config, simTuning, capturePacket, ensureRunner, ingestUplinkToCloud],
 	);
 
 	useEffect(() => {
@@ -855,8 +874,9 @@ const App: React.FC = () => {
 		if (draggedNodeIdRef.current !== null) {
 			const node = nodesRef.current.find((n) => n.id === draggedNodeIdRef.current);
 			if (node) {
-				node.x = mouseX - dragOffsetRef.current.x;
-				node.y = mouseY - dragOffsetRef.current.y;
+				const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
+				node.x = clamp(mouseX - dragOffsetRef.current.x, WORLD_BOUNDS_PX.minX, WORLD_BOUNDS_PX.maxX);
+				node.y = clamp(mouseY - dragOffsetRef.current.y, WORLD_BOUNDS_PX.minY, WORLD_BOUNDS_PX.maxY);
 				node.targetX = node.x;
 				node.targetY = node.y;
 				const runner = runnerRef.current;
@@ -901,7 +921,7 @@ const App: React.FC = () => {
 		// Finish Node Dragging
 		if (draggedNodeIdRef.current !== null) {
 			const distMoved = Math.sqrt(
-				Math.pow(mouseX - dragStartPosRef.current.x, 2) + Math.pow(mouseY - dragStartPosRef.current.y, 2)
+				Math.pow(mouseX - dragStartPosRef.current.x, 2) + Math.pow(mouseY - dragStartPosRef.current.y, 2),
 			);
 			if (distMoved < 5) {
 				const node = nodesRef.current.find((n) => n.id === draggedNodeIdRef.current);
@@ -923,7 +943,7 @@ const App: React.FC = () => {
 			{ x: (x - OFFSET_X_PX) / PIXELS_PER_METER, y: (y - OFFSET_Y_PX) / PIXELS_PER_METER },
 			{ vx: 0, vy: 0 },
 			3.7,
-			type === "HARDWARE_GW"
+			type === "HARDWARE_GW",
 		);
 		setNodes((prev) => [...prev, n]);
 		nodesRef.current = [...nodesRef.current, n];
@@ -1070,26 +1090,37 @@ const App: React.FC = () => {
 		setContextMenu(null);
 	};
 
-    // --- RENDER ---
-    if (viewMode === "ANALYSIS") {
-        return (
-            <div style={{ width: "100vw", height: "100vh", backgroundColor: "white", overflow: "auto", position: "relative" }}>
-                 <button
-                    onClick={() => setViewMode("SIM")}
-                    style={{
-                        position: "fixed", top: "1rem", right: "1rem", zIndex: 50,
-                        display: "flex", alignItems: "center", gap: "0.5rem",
-                        padding: "0.5rem 1rem", backgroundColor: "#1f2937", color: "white",
-                        borderRadius: "0.25rem", border: "none", cursor: "pointer",
-                        boxShadow: "0 10px 15px -3px rgba(0, 0, 0, 0.1)"
-                    }}
-                >
-                    <Activity size={18} /> Back to Simulator
-                </button>
-                <AnalysisDashboard />
-            </div>
-        )
-    }
+	// --- RENDER ---
+	if (viewMode === "ANALYSIS") {
+		return (
+			<div
+				style={{ width: "100vw", height: "100vh", backgroundColor: "white", overflow: "auto", position: "relative" }}
+			>
+				<button
+					onClick={() => setViewMode("SIM")}
+					style={{
+						position: "fixed",
+						top: "1rem",
+						right: "1rem",
+						zIndex: 50,
+						display: "flex",
+						alignItems: "center",
+						gap: "0.5rem",
+						padding: "0.5rem 1rem",
+						backgroundColor: "#1f2937",
+						color: "white",
+						borderRadius: "0.25rem",
+						border: "none",
+						cursor: "pointer",
+						boxShadow: "0 10px 15px -3px rgba(0, 0, 0, 0.1)",
+					}}
+				>
+					<Activity size={18} /> Back to Simulator
+				</button>
+				<AnalysisDashboard />
+			</div>
+		);
+	}
 
 	return (
 		<>
@@ -1100,19 +1131,25 @@ const App: React.FC = () => {
 				onMouseMove={handleMouseMove}
 				onMouseDown={(e) => handleMouseDown(e, "bg")}
 			>
-                <div style={{ position: "absolute", top: 16, right: 16, zIndex: 9999 }}>
-                     <button
-                        onClick={() => setViewMode("ANALYSIS")}
-                        style={{
-                            display: "flex", alignItems: "center", gap: "8px",
-                            padding: "8px 16px", backgroundColor: "#4f46e5", color: "white",
-                            borderRadius: "6px", border: "none", cursor: "pointer",
-                            boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.1)"
-                        }}
-                    >
-                        <Database size={18} /> View Analysis
-                    </button>
-                </div>
+				<div style={{ position: "absolute", top: 16, right: 16, zIndex: 9999 }}>
+					<button
+						onClick={() => setViewMode("ANALYSIS")}
+						style={{
+							display: "flex",
+							alignItems: "center",
+							gap: "8px",
+							padding: "8px 16px",
+							backgroundColor: "#4f46e5",
+							color: "white",
+							borderRadius: "6px",
+							border: "none",
+							cursor: "pointer",
+							boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.1)",
+						}}
+					>
+						<Database size={18} /> View Analysis
+					</button>
+				</div>
 				<div style={styles.sidebar}>
 					<div>
 						<h1 style={{ margin: 0, color: "#38bdf8", fontSize: "22px", fontWeight: "900" }}>MESH SIM v21</h1>
@@ -1355,13 +1392,13 @@ const App: React.FC = () => {
 							min="1000"
 							max="60000"
 							step="1000"
-							value={firmwareTuning.helloIntervalIdleMs ?? 15000}
+							value={firmwareTuning.helloIntervalIdleMs ?? 10000}
 							onChange={(e) => setFirmwareTuning({ ...firmwareTuning, helloIntervalIdleMs: Number(e.target.value) })}
 							title="How often a node sends HELLO while stationary and stable"
 							style={{ width: "100%" }}
 						/>
 						<div style={{ fontSize: "9px", color: "#cbd5e1", textAlign: "right" }}>
-							{((firmwareTuning.helloIntervalIdleMs ?? 15000) / 1000).toFixed(0)} s
+							{((firmwareTuning.helloIntervalIdleMs ?? 10000) / 1000).toFixed(0)} s
 						</div>
 
 						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 8 }}>
@@ -1585,7 +1622,6 @@ const App: React.FC = () => {
 								>
 									TOPOLOGY
 								</button>
-
 							</div>
 							<div
 								style={{
@@ -1630,8 +1666,8 @@ const App: React.FC = () => {
 														{r.position.x.toFixed(0)}, {r.position.y.toFixed(0)}
 													</td>
 													<td style={{ padding: "4px" }}>
-														{r.position.lat ? r.position.lat.toFixed(6) : "-"},{" "}
-														{r.position.lng ? r.position.lng.toFixed(6) : "-"}
+														{typeof r.position.lat === "number" ? r.position.lat.toFixed(6) : "-"},{" "}
+														{typeof r.position.lng === "number" ? r.position.lng.toFixed(6) : "-"}
 													</td>
 													<td style={{ padding: "4px" }}>{r.avgBattery.toFixed(1)}%</td>
 													<td
@@ -1700,10 +1736,7 @@ const App: React.FC = () => {
 										}
 										// Compute cloudStats and convergence status
 										const cloudStats = computeCloudStructureStatsMeters({ records: uniqueRecords, truthById, edges });
-										const { convergenceText, convergenceColor } = computeCloudConvergence(
-											uniqueRecords,
-											cloudStats
-										);
+										const { convergenceText, convergenceColor } = computeCloudConvergence(uniqueRecords, cloudStats);
 										const lastPanicTsByNodeId = new Map<number, number>();
 										for (const e of cloudEvents) {
 											if (e.kind !== "PANIC") continue;
@@ -2007,6 +2040,15 @@ const App: React.FC = () => {
 								{packets
 									.filter((p) => packetFilter === "ALL" || p.type === packetFilter)
 									.map((p) => {
+										const srcNode = nodes.find((n) => n.id === p.srcId);
+										const stateColor =
+											srcNode?.firmwareState === "MOVING"
+												? "#facc15"
+												: srcNode?.firmwareState === "ISOLATED"
+													? "#ef4444"
+													: srcNode?.firmwareState === "STATIONARY"
+														? "#4ade80"
+														: "#94a3b8";
 										const payloadKind =
 											p.type === PacketType.DATA && p.payload && typeof p.payload === "object" && "type" in p.payload
 												? String((p.payload as { type?: unknown }).type ?? "DATA")
@@ -2023,6 +2065,8 @@ const App: React.FC = () => {
 													color: "#cbd5e1",
 													display: "flex",
 													gap: "8px",
+													borderLeft: `3px solid ${stateColor}`,
+													backgroundColor: `${stateColor}14`,
 												}}
 											>
 												<span style={{ fontWeight: "bold", color: getPacketColor(p.type) }}>{displayType}</span>
@@ -2189,49 +2233,42 @@ const App: React.FC = () => {
 								{ARENAHEADER}
 							</text>
 
-                            {/* X-Axis Labels */}
-                            {Array.from({ length: 9 }).map((_, i) => {
-                                const m = i * 10; // 0, 10, 20...
-                                if (m > 50) return null;
-                                const px = WORLD_BOUNDS_PX.minX + m * PIXELS_PER_METER;
-                                return (
-                                    <g key={`x-axis-${m}`} transform={`translate(${px}, ${WORLD_BOUNDS_PX.minY - 5})`}>
-                                        <line y1="0" y2="5" stroke="#38bdf8" strokeWidth="1" opacity="0.5" />
-                                        <text
-                                            y="-4"
-                                            textAnchor="middle"
-                                            fill="#38bdf8"
-                                            fontSize="9"
-                                            fontFamily="monospace"
-                                            opacity="0.8"
-                                        >
-                                            {m}m
-                                        </text>
-                                    </g>
-                                );
-                            })}
-                            {/* Y-Axis Labels */}
-                            {Array.from({ length: 6 }).map((_, i) => {
-                                const m = i * 10;
-                                if (m > 40) return null;
-                                const py = WORLD_BOUNDS_PX.minY + m * PIXELS_PER_METER;
-                                return (
-                                    <g key={`y-axis-${m}`} transform={`translate(${WORLD_BOUNDS_PX.minX - 5}, ${py})`}>
-                                        <line x1="0" x2="5" stroke="#38bdf8" strokeWidth="1" opacity="0.5" />
-                                        <text
-                                            x="-4"
-                                            y="3"
-                                            textAnchor="end"
-                                            fill="#38bdf8"
-                                            fontSize="9"
-                                            fontFamily="monospace"
-                                            opacity="0.8"
-                                        >
-                                            {m}m
-                                        </text>
-                                    </g>
-                                );
-                            })}
+							{/* X-Axis Labels */}
+							{Array.from({ length: 9 }).map((_, i) => {
+								const m = i * 10; // 0, 10, 20...
+								if (m > 50) return null;
+								const px = WORLD_BOUNDS_PX.minX + m * PIXELS_PER_METER;
+								return (
+									<g key={`x-axis-${m}`} transform={`translate(${px}, ${WORLD_BOUNDS_PX.minY - 5})`}>
+										<line y1="0" y2="5" stroke="#38bdf8" strokeWidth="1" opacity="0.5" />
+										<text y="-4" textAnchor="middle" fill="#38bdf8" fontSize="9" fontFamily="monospace" opacity="0.8">
+											{m}m
+										</text>
+									</g>
+								);
+							})}
+							{/* Y-Axis Labels */}
+							{Array.from({ length: 6 }).map((_, i) => {
+								const m = i * 10;
+								if (m > 40) return null;
+								const py = WORLD_BOUNDS_PX.minY + m * PIXELS_PER_METER;
+								return (
+									<g key={`y-axis-${m}`} transform={`translate(${WORLD_BOUNDS_PX.minX - 5}, ${py})`}>
+										<line x1="0" x2="5" stroke="#38bdf8" strokeWidth="1" opacity="0.5" />
+										<text
+											x="-4"
+											y="3"
+											textAnchor="end"
+											fill="#38bdf8"
+											fontSize="9"
+											fontFamily="monospace"
+											opacity="0.8"
+										>
+											{m}m
+										</text>
+									</g>
+								);
+							})}
 						</g>
 						{/* GHOST GRAPH VISUALIZATION (Cooperative Localization Belief) */}
 						{(() => {
@@ -2396,6 +2433,16 @@ const App: React.FC = () => {
 							/>
 						)}
 						{visualPackets.map((vp) => {
+							const srcNode = nodes.find((n) => n.id === vp.sourceId);
+							const stateColor =
+								srcNode?.firmwareState === "MOVING"
+									? "#facc15"
+									: srcNode?.firmwareState === "ISOLATED"
+										? "#ef4444"
+										: srcNode?.firmwareState === "STATIONARY"
+											? "#4ade80"
+											: undefined;
+							const packetColor = stateColor ?? getPacketColor(vp.packet.type);
 							if (vp.style === "RING") {
 								const radius = (vp.maxRadius || 100) * vp.progress;
 								const opacity = (1.0 - vp.progress) * 0.3;
@@ -2406,23 +2453,14 @@ const App: React.FC = () => {
 										cy={vp.y}
 										r={radius}
 										fill="none"
-										stroke={getPacketColor(vp.packet.type)}
+										stroke={packetColor}
 										strokeWidth={2}
 										strokeOpacity={opacity}
 										pointerEvents="none"
 									/>
 								);
 							} else {
-								return (
-									<circle
-										key={vp.id}
-										cx={vp.x}
-										cy={vp.y}
-										r={3}
-										fill={getPacketColor(vp.packet.type)}
-										pointerEvents="none"
-									/>
-								);
+								return <circle key={vp.id} cx={vp.x} cy={vp.y} r={3} fill={packetColor} pointerEvents="none" />;
 							}
 						})}
 						{nodes.map((n) => {

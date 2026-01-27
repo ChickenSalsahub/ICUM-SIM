@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { SimulationRunner } from "../SimulationRunner";
 
+// Tests world bounds clamping and velocity zeroing.
+
 describe("SimulationRunner world bounds", () => {
 	it("clamps position and zeros velocity when exceeding bounds", () => {
 		const runner = new SimulationRunner({ worldBounds: { minX: 0, maxX: 1, minY: 0, maxY: 1 } });
