@@ -77,7 +77,7 @@ export function runExperimentE(): ExperimentETimeRow[] {
 						seed,
 						timeSeconds: tMs / 1000,
 						txTotal: sumTx(snap.nodes),
-						rmse: rmseAlignedRigid(snap),
+						rmse: rmseAlignedRigid(snap.nodes),
 						rangeResidualMae: measurementRangeResidualMae(snap.nodes),
 						angleResidualMae: measurementAngleResidualMae(snap.nodes),
 					});

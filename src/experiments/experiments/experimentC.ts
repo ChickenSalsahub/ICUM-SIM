@@ -65,7 +65,7 @@ export function runExperimentCScenarios(): ExperimentCScenarioTimeRow[] {
 					applyMotionScenario(runner, scenario, t);
 					const snap = runner.snapshot();
 					const currentTotalTx = sumTx(snap.nodes);
-					const currentRmse = rmseAlignedRigid(snap);
+					const currentRmse = rmseAlignedRigid(snap.nodes);
 
 					// Instantaneous rate: (delta_tx / nodes) / (delta_time_min)
 					// delta_time is logEveryMs (1 sec) = 1/60 min

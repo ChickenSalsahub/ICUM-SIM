@@ -26,9 +26,10 @@ function makeNode(args: { id: number; trueX: number; trueY: number; estX: number
 
 	return {
 		id: args.id,
+		x: args.trueX,
+		y: args.trueY,
 		trueX: args.trueX,
 		trueY: args.trueY,
-		batteryV: 3.7,
 		firmware: firmware as FirmwareSnapshot,
 		txCount: 0,
 	};
@@ -180,9 +181,10 @@ describe("experiments metrics", () => {
 		const nodes: RunnerNode[] = [
 			{
 				id: 1,
+				x: 0,
+				y: 0,
 				trueX: 0,
 				trueY: 0,
-				batteryV: 3.7,
 				txCount: 0,
 				firmware: {
 					estPosition: { x: 10, y: -5 },
@@ -191,9 +193,10 @@ describe("experiments metrics", () => {
 			},
 			{
 				id: 2,
+				x: 1,
+				y: 0,
 				trueX: 1,
 				trueY: 0,
-				batteryV: 3.7,
 				txCount: 0,
 				firmware: {
 					// Same cluster A frame
@@ -203,9 +206,10 @@ describe("experiments metrics", () => {
 			},
 			{
 				id: 3,
+				x: 10,
+				y: 0,
 				trueX: 10,
 				trueY: 0,
-				batteryV: 3.7,
 				txCount: 0,
 				firmware: {
 					// Cluster B uses a different frame
@@ -215,9 +219,10 @@ describe("experiments metrics", () => {
 			},
 			{
 				id: 4,
+				x: 11,
+				y: 0,
 				trueX: 11,
 				trueY: 0,
-				batteryV: 3.7,
 				txCount: 0,
 				firmware: {
 					// Same cluster B frame

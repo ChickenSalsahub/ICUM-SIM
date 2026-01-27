@@ -52,6 +52,7 @@ export function runExperimentDScenarios(): ExperimentDScenarioTimeRow[] {
 
 		const cloud = new CloudBackend({
 			rng: createMulberry32(baseSeed + 500 + scenarioOffset),
+			mode: "fusion",
 		});
 
 		runner.setHooks({

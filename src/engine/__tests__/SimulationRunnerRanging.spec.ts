@@ -18,6 +18,71 @@ function absAngleErrorRad(a: number, b: number): number {
 }
 
 describe("SimulationRunner ranging: truth vs perceived", () => {
+	it("event-driven does not emit UWB_BLINK when stationary", () => {
+		const prevRandom = Math.random;
+		Math.random = () => 0;
+		try {
+			const runner = new SimulationRunner({
+				seed: 321,
+				packetLoss: 0,
+				uwbRangeMeters: 100,
+				uwbNoiseSigma: 0,
+				uwbAngleNoiseStdRad: 0,
+				firmwareConfig: {
+					eventDrivenSensing: true,
+					helloIntervalIdleMs: 10_000,
+				},
+			});
+
+			runner.addNode(1, { x: 0, y: 0 }, { vx: 0, vy: 0 }, 3.7, false);
+			runner.addNode(2, { x: 3, y: 4 }, { vx: 0, vy: 0 }, 3.7, false);
+
+			let blinkCount = 0;
+			runner.setHooks({
+				onDeliver: (evt) => {
+					if (evt.packet.payload?.type === "UWB_BLINK") blinkCount += 1;
+				},
+			});
+
+			runner.step(10_000);
+			expect(blinkCount).toBe(0);
+		} finally {
+			Math.random = prevRandom;
+		}
+	});
+
+	it("event-driven emits UWB_BLINK when moving", () => {
+		const prevRandom = Math.random;
+		Math.random = () => 0;
+		try {
+			const runner = new SimulationRunner({
+				seed: 322,
+				packetLoss: 0,
+				uwbRangeMeters: 100,
+				uwbNoiseSigma: 0,
+				uwbAngleNoiseStdRad: 0,
+				firmwareConfig: {
+					eventDrivenSensing: true,
+				},
+			});
+
+			runner.addNode(1, { x: 0, y: 0 }, { vx: 0.2, vy: 0 }, 3.7, false);
+			runner.addNode(2, { x: 3, y: 4 }, { vx: 0, vy: 0 }, 3.7, false);
+
+			let blinkCount = 0;
+			runner.setHooks({
+				onDeliver: (evt) => {
+					if (evt.packet.payload?.type === "UWB_BLINK") blinkCount += 1;
+				},
+			});
+
+			runner.step(1_000);
+			expect(blinkCount).toBeGreaterThan(0);
+		} finally {
+			Math.random = prevRandom;
+		}
+	});
+
 	it("exposes correct true distance and injected payload angle/range when noise=0", () => {
 		const prevRandom = Math.random;
 		Math.random = () => 0;
@@ -41,7 +106,7 @@ describe("SimulationRunner ranging: truth vs perceived", () => {
 			runner.addNode(1, { x: 0, y: 0 }, { vx: 0, vy: 0 }, 3.7, false);
 			runner.addNode(2, { x: 3, y: 4 }, { vx: 0, vy: 0 }, 3.7, false);
 
-			type Deliver = Parameters<NonNullable<Parameters<SimulationRunner["setHooks"]>[0]>["onDeliver"]>[0];
+			type Deliver = Parameters<NonNullable<NonNullable<Parameters<SimulationRunner["setHooks"]>[0]>["onDeliver"]>>[0];
 			const deliveries: Deliver[] = [];
 			runner.setHooks({
 				onDeliver: (evt) => {
