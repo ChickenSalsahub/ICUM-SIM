@@ -1093,6 +1093,25 @@ const App: React.FC = () => {
 		setContextMenu(null);
 	};
 
+	const handleSetBatteryLife = () => {
+		if (!contextMenu) return;
+		const pctStr = prompt("Enter battery percentage (0-100):");
+		if (!pctStr) {
+			setContextMenu(null);
+			return;
+		}
+		const pct = parseFloat(pctStr);
+		if (!Number.isFinite(pct)) {
+			setContextMenu(null);
+			return;
+		}
+		const node = nodesRef.current.find((n) => n.id === contextMenu.nodeId);
+		if (node) {
+			node.battery = Math.max(0, Math.min(100, Math.round(pct)));
+		}
+		setContextMenu(null);
+	};
+
 	// --- RENDER ---
 	if (viewMode === "ANALYSIS") {
 		return (
@@ -2657,6 +2676,17 @@ const App: React.FC = () => {
 						onClick={handleSetGlobalPosition}
 					>
 						<Wifi size={12} /> Set Global Position
+					</button>
+					<button
+						style={{
+							...styles.btn,
+							justifyContent: "flex-start",
+							backgroundColor: "transparent",
+							color: "#f1f5f9",
+						}}
+						onClick={handleSetBatteryLife}
+					>
+						<Zap size={12} /> Set Battery Life
 					</button>
 					<button
 						style={{
