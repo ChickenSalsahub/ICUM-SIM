@@ -5,8 +5,8 @@ import { EXPERIMENT_WORLD_BOUNDS_M } from "./lib/types.ts";
 import { runExperimentAScenariosWithOptions } from "./experiments/experimentA.ts";
 import { runExperimentB, runExperimentBRaw, runExperimentBSummary } from "./experiments/experimentB.ts";
 import { runExperimentCScenarios } from "./experiments/experimentC.ts";
-import { runExperimentDScenarios } from "./experiments/experimentD.ts";
-import { runExperimentE } from "./experiments/experimentE.ts";
+// import { runExperimentDScenarios } from "./experiments/experimentD.ts";
+// import { runExperimentE } from "./experiments/experimentE.ts";
 
 function writePublicCsv(filename: string, header: string, rows: string[]) {
 	const outDir = path.join(process.cwd(), "public", "data");
@@ -40,7 +40,7 @@ export function main() {
 	cleanupLegacyOutputs();
 
 	console.log(
-		`World bounds enabled: x=[${EXPERIMENT_WORLD_BOUNDS_M.minX}, ${EXPERIMENT_WORLD_BOUNDS_M.maxX}] y=[${EXPERIMENT_WORLD_BOUNDS_M.minY}, ${EXPERIMENT_WORLD_BOUNDS_M.maxY}]`
+		`World bounds enabled: x=[${EXPERIMENT_WORLD_BOUNDS_M.minX}, ${EXPERIMENT_WORLD_BOUNDS_M.maxX}] y=[${EXPERIMENT_WORLD_BOUNDS_M.minY}, ${EXPERIMENT_WORLD_BOUNDS_M.maxY}]`,
 	);
 
 	// Experiment A: compare baseline periodic vs ETM across a few noise levels.
@@ -71,8 +71,8 @@ export function main() {
 					txPerNodePerMin(r.etmTx, 10, r.timeSeconds),
 					r.etmRmseAligned,
 					r.etmMaeAligned,
-				].join(",")
-			)
+				].join(","),
+			),
 		);
 	}
 
@@ -89,14 +89,14 @@ export function main() {
 	writePublicCsv(
 		"experiments_B_clean.csv",
 		headerBClean,
-		b.map((r) => [r.nodeCount, r.noiseSigma, r.rmseAligned, r.maeAligned, r.pairwiseDistMae].join(","))
+		b.map((r) => [r.nodeCount, r.noiseSigma, r.rmseAligned, r.maeAligned, r.pairwiseDistMae].join(",")),
 	);
 
 	const headerBRawClean = "node_count,uwb_sigma_m,seed,rmse_aligned_m,mae_aligned_m,pairwise_dist_mae_m\n";
 	writePublicCsv(
 		"experiments_B_raw_clean.csv",
 		headerBRawClean,
-		bRaw.map((r) => [r.nodeCount, r.noiseSigma, r.seed, r.rmseAligned, r.maeAligned, r.pairwiseDistMae].join(","))
+		bRaw.map((r) => [r.nodeCount, r.noiseSigma, r.seed, r.rmseAligned, r.maeAligned, r.pairwiseDistMae].join(",")),
 	);
 
 	// Cleaner summary: median + IQR only for the anchor-free metrics most used in the report.
@@ -119,8 +119,8 @@ export function main() {
 				r.pairwiseDistMae_median,
 				r.pairwiseDistMae_p25,
 				r.pairwiseDistMae_p75,
-			].join(",")
-		)
+			].join(","),
+		),
 	);
 
 	{
@@ -128,53 +128,45 @@ export function main() {
 		writePublicCsv(
 			`experiments_C_all.csv`,
 			"scenario,time_s,node_count,tx_per_node_per_min,rmse_aligned_m\n",
-			rows.map((r) =>
-				[
-					r.scenario,
-					r.timeSeconds,
-					r.nodes,
-					r.txPerNodePerMin,
-					r.rmse,
-				].join(",")
-			)
+			rows.map((r) => [r.scenario, r.timeSeconds, r.nodes, r.txPerNodePerMin, r.rmse].join(",")),
 		);
 	}
 
-	{
-		const rows = runExperimentDScenarios();
-		writePublicCsv(
-			`experiments_D_all.csv`,
-			"scenario,time_s,node_count,cloud_rmse_m,cloud_coverage_nodes\n",
-			rows.map((r) =>
-				[
-					r.scenario,
-					r.timeSeconds,
-					r.nodes,
-					r.cloudRmse,
-					r.cloudCoverage,
-				].join(",")
-			)
-		);
-	}
+	// {
+	// 	const rows = runExperimentDScenarios();
+	// 	writePublicCsv(
+	// 		`experiments_D_all.csv`,
+	// 		"scenario,time_s,node_count,cloud_rmse_m,cloud_coverage_nodes\n",
+	// 		rows.map((r) =>
+	// 			[
+	// 				r.scenario,
+	// 				r.timeSeconds,
+	// 				r.nodes,
+	// 				r.cloudRmse,
+	// 				r.cloudCoverage,
+	// 			].join(",")
+	// 		)
+	// 	);
+	// }
 
-	{
-		const rows = runExperimentE();
-		writePublicCsv(
-			`experiments_E_all.csv`,
-			"scenario,policy,seed,time_s,tx_total,tx_per_node_per_min,rmse_aligned_m\n",
-			rows.map((r) =>
-				[
-					r.scenario,
-					r.policy,
-					r.seed,
-					r.timeSeconds,
-					r.txTotal,
-					txPerNodePerMin(r.txTotal, 10, r.timeSeconds),
-					r.rmse,
-				].join(",")
-			)
-		);
-	}
+	// {
+	// 	const rows = runExperimentE();
+	// 	writePublicCsv(
+	// 		`experiments_E_all.csv`,
+	// 		"scenario,policy,seed,time_s,tx_total,tx_per_node_per_min,rmse_aligned_m\n",
+	// 		rows.map((r) =>
+	// 			[
+	// 				r.scenario,
+	// 				r.policy,
+	// 				r.seed,
+	// 				r.timeSeconds,
+	// 				r.txTotal,
+	// 				txPerNodePerMin(r.txTotal, 10, r.timeSeconds),
+	// 				r.rmse,
+	// 			].join(",")
+	// 		)
+	// 	);
+	// }
 }
 const isMain = () => import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain()) {
