@@ -352,6 +352,7 @@ const App: React.FC = () => {
 		lambdaAngle: 0.5,
 		learningRate: 0.2,
 	});
+	const isEventDriven = firmwareTuning.eventDrivenSensing !== false;
 
 	const [cloudTuning, setCloudTuning] = useState<CloudBackendOptions>({
 		distanceSigma: 0.15,
@@ -1347,118 +1348,125 @@ const App: React.FC = () => {
 							</button>
 						</div>
 						<div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-							<div style={{ fontSize: "9px", color: "#cbd5e1" }}>Event-driven</div>
-							<input
-								type="checkbox"
-								checked={!!firmwareTuning.eventDrivenSensing}
+							<div style={{ fontSize: "9px", color: "#cbd5e1" }}>Messaging Mode</div>
+							<select
+								value={isEventDriven ? "ETM" : "PERIODIC"}
 								onChange={(e) => {
-									const checked = e.target.checked;
+									const isEtm = e.target.value === "ETM";
 									const next: FirmwareConfig = {
 										...firmwareTuning,
-										eventDrivenSensing: checked,
+										eventDrivenSensing: isEtm,
+										...(isEtm
+											? {}
+											: {
+													helloIntervalMovingMs:
+														firmwareTuning.helloIntervalIdleMs ?? firmwareTuning.helloIntervalMovingMs,
+													rangingIntervalIdleMs:
+														firmwareTuning.rangingIntervalMovingMs ?? firmwareTuning.rangingIntervalIdleMs,
+												}),
 									};
 									setFirmwareTuning(next);
 									applyFirmwareTuning(next);
 								}}
-							/>
+								style={{
+									fontSize: "10px",
+									backgroundColor: "#0f172a",
+									color: "#e2e8f0",
+									border: "1px solid #334155",
+									borderRadius: 4,
+									padding: "2px 6px",
+								}}
+							>
+								<option value="ETM">Event-driven (ETM)</option>
+								<option value="PERIODIC">Periodic (fixed interval)</option>
+							</select>
 						</div>
 						<div style={{ fontSize: "9px", color: "#64748b" }}>
-							On: stationary nodes only range on events. Off: periodic HELLO/RANGING.
+							{isEventDriven
+								? "Event-driven: UWB blinks only while MOVING; stationary sends HELLO only."
+								: "Periodic: HELLO and BLINK cadence follow the intervals below."}
 						</div>
 						<div style={{ fontSize: "9px", color: "#64748b" }}>
 							Cadence sliders below require <b>Apply</b>.
 						</div>
 
-						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 8 }}>
-							HELLO Interval (moving)
-						</div>
-						<input
-							type="range"
-							min="250"
-							max="5000"
-							step="250"
-							value={firmwareTuning.helloIntervalMovingMs ?? 1000}
-							onChange={(e) => setFirmwareTuning({ ...firmwareTuning, helloIntervalMovingMs: Number(e.target.value) })}
-							title="How often a node sends HELLO while moving/topology-changing"
-							style={{ width: "100%" }}
-						/>
-						<div style={{ fontSize: "9px", color: "#cbd5e1", textAlign: "right" }}>
-							{((firmwareTuning.helloIntervalMovingMs ?? 1000) / 1000).toFixed(2)} s
-						</div>
+						{isEventDriven ? (
+							<>
+								<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 8 }}>
+									HELLO Interval (stationary state)
+								</div>
+								<input
+									type="range"
+									min="1000"
+									max="60000"
+									step="1000"
+									value={firmwareTuning.helloIntervalIdleMs ?? 10000}
+									onChange={(e) =>
+										setFirmwareTuning({ ...firmwareTuning, helloIntervalIdleMs: Number(e.target.value) })
+									}
+									title="How often a node sends HELLO while stationary and stable"
+									style={{ width: "100%" }}
+								/>
+								<div style={{ fontSize: "9px", color: "#cbd5e1", textAlign: "right" }}>
+									{((firmwareTuning.helloIntervalIdleMs ?? 10000) / 1000).toFixed(0)} s
+								</div>
+							</>
+						) : (
+							<>
+								<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 8 }}>
+									HELLO Interval (all states)
+								</div>
+								<input
+									type="range"
+									min="1000"
+									max="60000"
+									step="1000"
+									value={firmwareTuning.helloIntervalIdleMs ?? 10000}
+									onChange={(e) => {
+										const value = Number(e.target.value);
+										setFirmwareTuning({
+											...firmwareTuning,
+											helloIntervalIdleMs: value,
+											helloIntervalMovingMs: value,
+										});
+									}}
+									title="How often a node sends HELLO in periodic mode"
+									style={{ width: "100%" }}
+								/>
+								<div style={{ fontSize: "9px", color: "#cbd5e1", textAlign: "right" }}>
+									{((firmwareTuning.helloIntervalIdleMs ?? 10000) / 1000).toFixed(0)} s
+								</div>
+							</>
+						)}
 
-						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 6 }}>
-							HELLO Interval (idle)
-						</div>
-						<input
-							type="range"
-							min="1000"
-							max="60000"
-							step="1000"
-							value={firmwareTuning.helloIntervalIdleMs ?? 10000}
-							onChange={(e) => setFirmwareTuning({ ...firmwareTuning, helloIntervalIdleMs: Number(e.target.value) })}
-							title="How often a node sends HELLO while stationary and stable"
-							style={{ width: "100%" }}
-						/>
-						<div style={{ fontSize: "9px", color: "#cbd5e1", textAlign: "right" }}>
-							{((firmwareTuning.helloIntervalIdleMs ?? 10000) / 1000).toFixed(0)} s
-						</div>
-
-						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 8 }}>
-							RANGING Poll Interval (moving)
-						</div>
-						<input
-							type="range"
-							min="250"
-							max="5000"
-							step="250"
-							value={firmwareTuning.rangingIntervalMovingMs ?? 1000}
-							onChange={(e) =>
-								setFirmwareTuning({ ...firmwareTuning, rangingIntervalMovingMs: Number(e.target.value) })
-							}
-							title="How often a node broadcasts RANGING_POLL while moving/topology-changing"
-							style={{ width: "100%" }}
-						/>
-						<div style={{ fontSize: "9px", color: "#cbd5e1", textAlign: "right" }}>
-							{((firmwareTuning.rangingIntervalMovingMs ?? 1000) / 1000).toFixed(2)} s
-						</div>
-
-						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 6 }}>
-							RANGING Poll Interval (idle)
-						</div>
-						<input
-							type="range"
-							min="1000"
-							max="60000"
-							step="1000"
-							value={firmwareTuning.rangingIntervalIdleMs ?? 10000}
-							onChange={(e) => setFirmwareTuning({ ...firmwareTuning, rangingIntervalIdleMs: Number(e.target.value) })}
-							title="How often a node broadcasts RANGING_POLL while stationary and stable"
-							style={{ width: "100%" }}
-						/>
-						<div style={{ fontSize: "9px", color: "#cbd5e1", textAlign: "right" }}>
-							{((firmwareTuning.rangingIntervalIdleMs ?? 10000) / 1000).toFixed(0)} s
-						</div>
-
-						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 8 }}>
-							Maintenance Ranging (event-driven)
-						</div>
-						<input
-							type="range"
-							min="0"
-							max="60000"
-							step="1000"
-							value={firmwareTuning.rangingMaintenanceMs ?? 0}
-							onChange={(e) => setFirmwareTuning({ ...firmwareTuning, rangingMaintenanceMs: Number(e.target.value) })}
-							title="When event-driven is ON, allow a slow periodic ranging poll (0 disables)"
-							style={{ width: "100%" }}
-						/>
-						<div style={{ fontSize: "9px", color: "#cbd5e1", textAlign: "right" }}>
-							{(firmwareTuning.rangingMaintenanceMs ?? 0) === 0
-								? "Off"
-								: `${((firmwareTuning.rangingMaintenanceMs ?? 0) / 1000).toFixed(0)} s`}
-						</div>
-						<div style={{ fontSize: "9px", color: "#64748b" }}>Use this to prevent complete silence while idle.</div>
-						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 6 }}>Move Threshold</div>
+						{!isEventDriven && (
+							<>
+								<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 8 }}>
+									UWB Blink Interval (all states)
+								</div>
+								<input
+									type="range"
+									min="250"
+									max="5000"
+									step="250"
+									value={firmwareTuning.rangingIntervalMovingMs ?? 1000}
+									onChange={(e) => {
+										const value = Number(e.target.value);
+										setFirmwareTuning({
+											...firmwareTuning,
+											rangingIntervalMovingMs: value,
+											rangingIntervalIdleMs: value,
+										});
+									}}
+									title="How often a node sends UWB blinks in periodic mode"
+									style={{ width: "100%" }}
+								/>
+								<div style={{ fontSize: "9px", color: "#cbd5e1", textAlign: "right" }}>
+									{((firmwareTuning.rangingIntervalMovingMs ?? 1000) / 1000).toFixed(2)} s
+								</div>
+							</>
+						)}
+						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 6 }}>IMU Move Threshold</div>
 						<input
 							type="range"
 							min="0.1"
@@ -1472,7 +1480,7 @@ const App: React.FC = () => {
 							Move Threshold: {firmwareTuning.accelMoveThresholdG.toFixed(2)} g
 						</div>
 						<div style={{ fontSize: "9px", color: "#64748b" }}>Higher = fewer MOVING detections.</div>
-						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 6 }}>Isolation No-ACK</div>
+						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 6 }}>Isolation Timeout</div>
 						<input
 							type="range"
 							min="5000"

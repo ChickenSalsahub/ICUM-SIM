@@ -230,8 +230,10 @@ export class NodeFirmware {
 
 	///Send a HELLO heartbeat if policy allows
 	private maybeSendHello(now: number) {
-		if (this.state !== "STATIONARY") return;
+		const useEventDriven = this.cfg.eventDrivenSensing !== false;
+		if (useEventDriven && this.state !== "STATIONARY") return;
 		const intervalMs = this.cfg.helloIntervalIdleMs ?? 10_000;
+		if (!Number.isFinite(intervalMs) || intervalMs <= 0) return;
 		if (!this.helloPrimed) {
 			this.helloPrimed = true;
 			this.helloTimerMs = intervalMs;
@@ -638,8 +640,10 @@ export class NodeFirmware {
 
 	///Send a UWB blink (ETM) if policy allows
 	private maybeSendBlink(now: number) {
-		if (this.state !== "MOVING") return;
-		const intervalMs = 1_000;
+		const useEventDriven = this.cfg.eventDrivenSensing !== false;
+		if (useEventDriven && this.state !== "MOVING") return;
+		const intervalMs = useEventDriven ? 1_000 : (this.cfg.rangingIntervalMovingMs ?? 1_000);
+		if (!Number.isFinite(intervalMs) || intervalMs <= 0) return;
 		if (this.blinkTimerMs < intervalMs) return;
 		this.blinkTimerMs = 0;
 		const degree = this.neighbors.size;
