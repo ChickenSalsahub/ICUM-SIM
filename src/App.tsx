@@ -62,7 +62,7 @@ const CANVAS_WIDTH = 1200;
 const CANVAS_HEIGHT = 800;
 
 // Keep UI arena consistent with experiment bounds (0..50m in both axes).
-const ARENAHEADER = "Arena (50m × 50m)";
+const ARENAHEADER = "Arena (50m × 30m)";
 const OFFSET_X_PX = 60; // Increased to make room for axis labels
 const OFFSET_Y_PX = 60;
 const WORLD_BOUNDS_M = { minX: 0, maxX: 50, minY: 0, maxY: 30 };
