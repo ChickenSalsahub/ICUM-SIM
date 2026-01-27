@@ -363,7 +363,7 @@ const App: React.FC = () => {
 
 	const nodesRef = useRef<UiNode[]>([]);
 	const runnerRef = useRef<SimulationRunner | null>(null);
-	const cloudBackendBaselineRef = useRef<CloudBackend>(new CloudBackend({ ...cloudTuning }));
+	const cloudBackendBaselineRef = useRef<CloudBackend>(new CloudBackend({ ...cloudTuning, mode: "passive" }));
 	const visualPacketsRef = useRef<VisualPacket[]>([]);
 	const wallsRef = useRef<Wall[]>([]);
 	const animationRef = useRef<number | undefined>(undefined);
@@ -443,7 +443,7 @@ const App: React.FC = () => {
 	);
 
 	const applyCloudTuning = useCallback(() => {
-		cloudBackendBaselineRef.current = new CloudBackend({ ...cloudTuning });
+		cloudBackendBaselineRef.current = new CloudBackend({ ...cloudTuning, mode: "passive" });
 		setFusedRecordsBaseline([]);
 		setCloudEventsBaseline([]);
 	}, [cloudTuning]);
@@ -528,6 +528,8 @@ const App: React.FC = () => {
 					timestamp: nowMs,
 					battery: Number(r.batteryV ?? 0),
 					status: r.status === "MOVING" ? "MOVING" : "STATIONARY",
+					estX: Number.isFinite(r.estX) ? r.estX : undefined,
+					estY: Number.isFinite(r.estY) ? r.estY : undefined,
 					neighbors,
 				};
 
@@ -1720,9 +1722,44 @@ const App: React.FC = () => {
 											if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
 											truthById.set(n.id, { x, y });
 										}
+										const recordById = new Map<number, FusedRecord>();
+										for (const r of uniqueRecords) recordById.set(r.nodeId, r);
+										const positionsById = new Map<number, { x: number; y: number }>();
+										const seed = uniqueRecords.find((r) =>
+											(r.neighbors ?? []).some((n) => Number.isFinite(n.range) && Number.isFinite(n.aoa)),
+										);
+										if (seed) positionsById.set(seed.nodeId, { x: 0, y: 0 });
+										let progressed = true;
+										let guard = 0;
+										while (progressed && guard < uniqueRecords.length * 2) {
+											progressed = false;
+											guard += 1;
+											for (const r of uniqueRecords) {
+												const base = positionsById.get(r.nodeId);
+												if (!base) continue;
+												for (const n of r.neighbors ?? []) {
+													if (!Number.isFinite(n.range) || !Number.isFinite(n.aoa)) continue;
+													if (positionsById.has(n.id)) continue;
+													const theta = n.aoa + Math.PI;
+													positionsById.set(n.id, {
+														x: base.x + n.range * Math.cos(theta),
+														y: base.y + n.range * Math.sin(theta),
+													});
+													progressed = true;
+												}
+											}
+										}
+										const recordsForView = uniqueRecords.map((r) => {
+											const pos = positionsById.get(r.nodeId);
+											if (!pos) return r;
+											return {
+												...r,
+												position: { x: pos.x, y: pos.y, lat: r.position.lat, lng: r.position.lng },
+											};
+										});
 										const edgeSet = new Set<string>();
 										const edges: Array<[number, number]> = [];
-										const idsPresent = new Set(uniqueRecords.map((r) => r.nodeId));
+										const idsPresent = new Set(recordsForView.map((r) => r.nodeId));
 										for (const r of uniqueRecords) {
 											for (const n of r.neighbors) {
 												if (!idsPresent.has(n.id)) continue;
@@ -1735,7 +1772,11 @@ const App: React.FC = () => {
 											}
 										}
 										// Compute cloudStats and convergence status
-										const cloudStats = computeCloudStructureStatsMeters({ records: uniqueRecords, truthById, edges });
+										const cloudStats = computeCloudStructureStatsMeters({
+											records: recordsForView,
+											truthById,
+											edges,
+										});
 										const { convergenceText, convergenceColor } = computeCloudConvergence(uniqueRecords, cloudStats);
 										const lastPanicTsByNodeId = new Map<number, number>();
 										for (const e of cloudEvents) {
@@ -1792,8 +1833,8 @@ const App: React.FC = () => {
 											);
 
 										// Calculate bounds
-										const xs = uniqueRecords.map((r) => r.position.x);
-										const ys = uniqueRecords.map((r) => r.position.y);
+										const xs = recordsForView.map((r) => r.position.x);
+										const ys = recordsForView.map((r) => r.position.y);
 										const minX = Math.min(...xs);
 										const maxX = Math.max(...xs);
 										const minY = Math.min(...ys);
@@ -1872,9 +1913,10 @@ const App: React.FC = () => {
 												>
 													{/* Edges */}
 													{uniqueRecords.map((r) => {
-														const start = transform(r.position.x, r.position.y);
+														const source = recordsForView.find((s) => s.nodeId === r.nodeId) ?? r;
+														const start = transform(source.position.x, source.position.y);
 														return r.neighbors.map((n) => {
-															const target = uniqueRecords.find((t) => t.nodeId === n.id);
+															const target = recordsForView.find((s) => s.nodeId === n.id);
 															if (!target) return null;
 															const end = transform(target.position.x, target.position.y);
 
@@ -1910,7 +1952,7 @@ const App: React.FC = () => {
 													})}
 
 													{/* Nodes */}
-													{uniqueRecords.map((r) => {
+													{recordsForView.map((r) => {
 														const pos = transform(r.position.x, r.position.y);
 														const panic = isPanicActive(r.nodeId);
 														return (

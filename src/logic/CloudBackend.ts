@@ -2,6 +2,7 @@ import { RelativePoseGraph } from "./localization/CooperativeLocalization.ts";
 
 export interface CloudBackendOptions {
 	rng?: () => number;
+	mode?: "passive" | "fusion";
 	// Normalization scales for residuals.
 	distanceSigma?: number; // meters
 	angleSigma?: number; // radians
@@ -20,6 +21,8 @@ export interface RawReport {
 	timestamp: number;
 	x?: number; // Optional: Ground truth might not be available
 	y?: number; // Optional
+	estX?: number;
+	estY?: number;
 	lat?: number;
 	lng?: number;
 	battery: number;
@@ -85,8 +88,9 @@ export class CloudBackend {
 	private lastFusionActiveIds: Set<number> = new Set();
 	private lastFusionTime = 0;
 	private lastSeenByNode: Map<number, number> = new Map();
+	private readonly mode: "passive" | "fusion";
 
-	private readonly opts: Required<Omit<CloudBackendOptions, "rng">>;
+	private readonly opts: Required<Omit<CloudBackendOptions, "rng" | "mode">>;
 
 	// Configuration
 	private FUSION_WINDOW_MS = 1000; // Fuse data every 1 second
@@ -105,6 +109,7 @@ export class CloudBackend {
 
 	constructor(opts?: CloudBackendOptions) {
 		this.rng = opts?.rng ?? Math.random;
+		this.mode = opts?.mode ?? "passive";
 		this.opts = {
 			distanceSigma: opts?.distanceSigma ?? 0.15,
 			angleSigma: opts?.angleSigma ?? (20 * Math.PI) / 180,
@@ -159,7 +164,7 @@ export class CloudBackend {
 		// We inject a synthetic record with NO neighbors.
 		const prev = this.db.find((r) => r.nodeId === opts.nodeId);
 		let lastPos = prev?.position;
-		if (!lastPos && this.graph) {
+		if (!lastPos && this.mode === "fusion" && this.graph) {
 			const pose = this.graph.getNodePose(opts.nodeId);
 			if (pose) lastPos = { x: pose.x, y: pose.y };
 		}
@@ -211,13 +216,78 @@ export class CloudBackend {
 	 */
 	public tick(currentTime: number) {
 		if (currentTime - this.lastFusionTime > this.FUSION_WINDOW_MS) {
-			this.runFusion();
+			if (this.mode === "fusion") {
+				this.runFusion();
+			} else {
+				this.runPassive();
+			}
 			this.lastFusionTime = currentTime;
 			this.pruneStaleRecords(currentTime);
-			this.pruneStaleCluster(this.lastFusionTime, this.lastFusionActiveIds);
+			if (this.mode === "fusion") {
+				this.pruneStaleCluster(this.lastFusionTime, this.lastFusionActiveIds);
+			}
 			return true; // Indicates database updated
 		}
 		return false;
+	}
+
+	private runPassive() {
+		if (this.buffer.size === 0) return;
+		const activeNodeIds = new Set<number>();
+		this.buffer.forEach((reports, nodeId) => {
+			if (reports.length === 0) return;
+			const latest = reports[reports.length - 1];
+			activeNodeIds.add(nodeId);
+			let sumBat = 0;
+			let sumLat = 0;
+			let sumLng = 0;
+			let latCount = 0;
+			let lngCount = 0;
+			for (const r of reports) {
+				sumBat += r.battery;
+				if (r.lat !== undefined) {
+					sumLat += r.lat;
+					latCount++;
+				}
+				if (r.lng !== undefined) {
+					sumLng += r.lng;
+					lngCount++;
+				}
+			}
+			const prev = this.db.find((r) => r.nodeId === nodeId);
+			const posX = latest.x ?? latest.estX ?? prev?.position?.x ?? 0;
+			const posY = latest.y ?? latest.estY ?? prev?.position?.y ?? 0;
+			const neighbors = latest.neighbors
+				? latest.neighbors
+						.filter((n) => Number.isFinite(n.range))
+						.map((n) => ({
+							id: n.id,
+							range: n.range ?? 0,
+							aoa: n.aoa ?? 0,
+						}))
+				: [];
+
+			const record: FusedRecord = {
+				id: `${nodeId}-${this.recordCounter++}`,
+				nodeId,
+				timestamp: latest.timestamp,
+				sampleCount: reports.length,
+				position: {
+					x: parseFloat(posX.toFixed(2)),
+					y: parseFloat(posY.toFixed(2)),
+					lat: latCount > 0 ? sumLat / latCount : undefined,
+					lng: lngCount > 0 ? sumLng / lngCount : undefined,
+				},
+				avgBattery: parseFloat((sumBat / reports.length).toFixed(1)),
+				status: latest.status === "MOVING" ? "MOVING" : "STABLE",
+				neighbors,
+			};
+			this.db.unshift(record);
+		});
+
+		this.buffer.clear();
+		if (this.db.length > 500) this.db = this.db.slice(0, 500);
+		this.lastFusionActiveIds = activeNodeIds;
 	}
 
 	/**

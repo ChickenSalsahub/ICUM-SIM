@@ -105,6 +105,8 @@ export function runExperimentDScenarios(): ExperimentDScenarioTimeRow[] {
 						timestamp: timeMs,
 						battery: Number(r.batteryV ?? 0),
 						status: r.status === "MOVING" ? "MOVING" : "STATIONARY",
+						estX: Number.isFinite(r.estX) ? r.estX : undefined,
+						estY: Number.isFinite(r.estY) ? r.estY : undefined,
 						neighbors,
 					};
 

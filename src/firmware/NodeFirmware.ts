@@ -78,6 +78,7 @@ export class NodeFirmware {
 	private lastPanicMs = -1;
 	private forwardedUplinkByNode: Map<number, { report: UplinkNodeReport; lastSeenMs: number }> = new Map();
 	private seenUplinkGossip: Map<string, number> = new Map();
+	private helloPrimed = false;
 
 	private pruneSeenUplinkGossip(now: number) {
 		// Opportunistic cleanup to avoid unbounded growth.
@@ -138,7 +139,7 @@ export class NodeFirmware {
 		const prevState = this.state;
 		this.consumeRadio(now);
 		this.pruneStaleNeighbors(now);
-		this.detectTopologyChange(now);
+		const topologyChanged = this.detectTopologyChange(now);
 		this.updateStateFromImu(now);
 		const stateChanged = this.state !== prevState;
 
@@ -153,6 +154,9 @@ export class NodeFirmware {
 		}
 
 		this.runLeaderElection(now);
+		if (topologyChanged && this.state === "STATIONARY") {
+			this.sendMeshReport(now);
+		}
 		this.maybeSendHello(now);
 		this.maybeSendBlink(now);
 		this.maybeSendUplink(now, prevState, stateChanged);
@@ -228,6 +232,10 @@ export class NodeFirmware {
 	private maybeSendHello(now: number) {
 		if (this.state !== "STATIONARY") return;
 		const intervalMs = this.cfg.helloIntervalIdleMs ?? 10_000;
+		if (!this.helloPrimed) {
+			this.helloPrimed = true;
+			this.helloTimerMs = intervalMs;
+		}
 		if (this.helloTimerMs < intervalMs) return;
 		this.helloTimerMs = 0;
 		const degree = this.neighbors.size;
@@ -362,7 +370,9 @@ export class NodeFirmware {
 			this.lastNeighborCount = nextCount;
 			this.topologyVersion += 1;
 			this.pendingTopologyEvent = { timestamp: now, prevCount, nextCount };
+			return true;
 		}
+		return false;
 	}
 
 	private pruneStaleNeighbors(now: number) {
@@ -788,8 +798,6 @@ export class NodeFirmware {
 	private runGraphOptimization(_dtMs: number) {
 		if (this.neighbors.size === 0) return;
 		const alpha = 0.2;
-		const lambdaD = this.cfg.lambdaDistance ?? 1.0;
-		const lambdaTheta = this.cfg.lambdaAngle ?? 0.5;
 
 		for (const n of this.neighbors.values()) {
 			if (!Number.isFinite(n.rangeMeters) || n.rangeMeters <= 0) continue;
@@ -804,25 +812,11 @@ export class NodeFirmware {
 			if (!Number.isFinite(dist) || dist === 0) continue;
 
 			const eDist = dist - n.rangeMeters;
-			const corr = alpha * lambdaD * eDist;
+			const corr = alpha * eDist;
 			const ux = dx / dist;
 			const uy = dy / dist;
 			this.est.x += corr * ux;
 			this.est.y += corr * uy;
-
-			// Angle correction (optional when AoA available): nudge perpendicular to reduce bearing error.
-			if (n.angleRad !== undefined) {
-				const measured = n.angleRad;
-				const predicted = Math.atan2(dy, dx);
-				let eTheta = predicted - measured;
-				while (eTheta > Math.PI) eTheta -= 2 * Math.PI;
-				while (eTheta < -Math.PI) eTheta += 2 * Math.PI;
-				const perpX = -uy;
-				const perpY = ux;
-				const thetaCorr = alpha * lambdaTheta * eTheta * dist;
-				this.est.x += thetaCorr * perpX;
-				this.est.y += thetaCorr * perpY;
-			}
 		}
 
 		if (!Number.isFinite(this.est.x) || !Number.isFinite(this.est.y)) {
@@ -855,7 +849,7 @@ const comparePriority = (a: PriorityVector, b: PriorityVector): number => {
 	const normalize = (v: PriorityVector) => ({
 		hasBackhaul: Boolean(v.hasBackhaul),
 		degree: Number.isFinite(v.degree) ? v.degree : 0,
-		batteryV: Number.isFinite(v.batteryV) ? Math.round(v.batteryV * 1000) / 1000 : 0,
+		batteryTier: Number.isFinite(v.batteryV) ? Math.floor(v.batteryV * 10) : 0,
 		id: Number.isFinite(v.id) ? v.id : Number.POSITIVE_INFINITY,
 		moving: v.moving ?? false,
 	});
@@ -866,7 +860,7 @@ const comparePriority = (a: PriorityVector, b: PriorityVector): number => {
 	if (B.moving && !A.moving) return 1;
 	if (A.hasBackhaul !== B.hasBackhaul) return A.hasBackhaul ? 1 : -1;
 	if (A.degree !== B.degree) return A.degree > B.degree ? 1 : -1;
-	if (A.batteryV !== B.batteryV) return A.batteryV > B.batteryV ? 1 : -1;
+	if (A.batteryTier !== B.batteryTier) return A.batteryTier > B.batteryTier ? 1 : -1;
 	if (A.id !== B.id) return A.id < B.id ? 1 : -1;
 	return 0;
 };
