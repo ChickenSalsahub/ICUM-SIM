@@ -53,8 +53,10 @@ export class NodeFirmware {
 
 	private role: NodeRole = NodeRole.IDLE;
 	private state: "STATIONARY" | "MOVING" | "ISOLATED" = "STATIONARY";
-	private est: NodePoseEstimate = { x: 0, y: 0 };
-	private neighbors: Map<number, NeighborState> = new Map();
+
+	private est: NodePoseEstimate = { x: 0, y: 0 }; //PoseGraph estimate
+	private neighbors: Map<number, NeighborState> = new Map(); //PoseGraph of neighbors
+
 	private lastAckMs = 0;
 	private helloTimerMs: number;
 	private rangingTimerMs: number;
@@ -72,7 +74,7 @@ export class NodeFirmware {
 	private topologyVersion = 0;
 	private lastUplinkTopologyVersionByNode: Map<number, number> = new Map();
 	private lteCapable: boolean;
-	private gpsCapable: boolean; // [NEW]
+	private gpsCapable: boolean;
 	private leaderId: number | null = null;
 	private leaderNextHop: number | null = null;
 	private lastPanicMs = -1;
@@ -106,8 +108,8 @@ export class NodeFirmware {
 			rangingIntervalMovingMs: 1_000,
 			rangingIntervalIdleMs: 10_000,
 			rangingMaintenanceMs: 0,
-			lambdaDistance: 1.0,
-			lambdaAngle: 0.5,
+			lambdaDistance: 1.0, //for graph optimization weighting
+			lambdaAngle: 0.5, // angular component omitted in optimization step
 			learningRate: 0.2, // spring-relaxation step (matches paper's α)
 			...cfg,
 		};
@@ -130,6 +132,7 @@ export class NodeFirmware {
 		this.lastMeshTrafficMs = this.hal.getTimeMs();
 	}
 
+	//the main function called on every firmware tick
 	public tick(dtMs: number) {
 		const now = this.hal.getTimeMs();
 		this.helloTimerMs += dtMs;
@@ -160,6 +163,8 @@ export class NodeFirmware {
 		this.maybeSendHello(now);
 		this.maybeSendBlink(now);
 		this.maybeSendUplink(now, prevState, stateChanged);
+
+		//The spring relaxation graph optimization step
 		this.runGraphOptimization(dtMs);
 	}
 
@@ -787,42 +792,61 @@ export class NodeFirmware {
 		if (this.state === "ISOLATED") this.role = NodeRole.ISOLATED;
 	}
 
-	// Cooperative localization update.
-	//
-	// Each neighbor provides:
-	// - their current estimated position (estX/estY) in a shared evolving frame
-	// - a measured range+bearing from *self -> neighbor* (rangeMeters/angleRad)
-	//
-	// From a neighbor j, self can infer where it should be:
-	//   p_i ~= p_j - r_ij * [cos(theta_ij), sin(theta_ij)]
-	// We take a weighted average over all such inferences and move toward it.
-	//
-	// This is intentionally simpler and more stable than the old per-tick summed-gradient
-	// update (which tended to produce weird non-monotonic noise curves).
+	/**
+	 * Distributed Graph Optimization (Spring Relaxation)
+	 *
+	 * Implements the core localization engine
+	 * this uses a force-directed graph approach where every node locally relaxes its position to minimize stress on its edges.
+	 */
 	private runGraphOptimization(_dtMs: number) {
+		// The network is modelled as a graph G=(V,E) where V are nodes and E are ranging constraints
 		if (this.neighbors.size === 0) return;
+
+		// Learning Rate (α) determines the stiffness of the springs or the step size of the gradient descent.
 		const alpha = 0.2;
 
+		// Iterate over all connected edges E (neighbors) to calculate forces on this node (Vertex i).
 		for (const n of this.neighbors.values()) {
+			// d_ij: The measured UWB range between node i and j (Equation 5)
 			if (!Number.isFinite(n.rangeMeters) || n.rangeMeters <= 0) continue;
+
+			// P_j: The current position estimate vector of the neighbor [x_j, y_j]^T
 			const estX = n.estX;
 			const estY = n.estY;
 			if (estX === undefined || estY === undefined) continue;
 			if (!Number.isFinite(estX) || !Number.isFinite(estY)) continue;
 
+			// (P_j - P_i): The vector difference between neighbor and self.
 			const dx = estX - this.est.x;
 			const dy = estY - this.est.y;
+
+			// ||P_j - P_i ||: The Euclidean distance of the current estimates
 			const dist = Math.sqrt(dx * dx + dy * dy);
 			if (!Number.isFinite(dist) || dist === 0) continue;
 
+			//Equation 5: Distance Error Term (e_dist)
+			// e_dist(i,j) = || P_j - P_i || - d_ij
+			// This represents the error between where the nodes *think* they are vs. what UWB measured.
 			const eDist = dist - n.rangeMeters;
+
+			//Correction Vector (ΔP_dist):  ΔP ~ α * e_dist * UnitVector
+			//Calculate the scalar correction magnitude (α * e_dist)
 			const corr = alpha * eDist;
+
+			//Calculate the Unit Vector ( (P_j - P_i) / || P_j - P_i || )
+			// This determines the direction of the force.
 			const ux = dx / dist;
 			const uy = dy / dist;
+
+			//Apply the gradient descent step to minimize Cost Function J
+			// This implementation only minimizes the Distance component (λ_d).
+			// The Angular component (λ_theta) mentioned in Equation 4 is omitted here.
+			// It is omitted as
 			this.est.x += corr * ux;
 			this.est.y += corr * uy;
 		}
 
+		// Safety: Reset to origin if the optimization diverges to Infinity/NaN.
 		if (!Number.isFinite(this.est.x) || !Number.isFinite(this.est.y)) {
 			this.est = { x: 0, y: 0 };
 		}
@@ -849,6 +873,7 @@ export class NodeFirmware {
 	}
 }
 
+//-- Leader Election Priority Comparison --
 const comparePriority = (a: PriorityVector, b: PriorityVector): number => {
 	const normalize = (v: PriorityVector) => ({
 		hasBackhaul: Boolean(v.hasBackhaul),
