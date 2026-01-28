@@ -12,7 +12,7 @@ export class UWBRanging implements RangingEngine {
 
 	constructor(
 		_pixelsPerMeter: number,
-		opts?: { rng?: () => number; noiseStdMeters?: number; angleNoiseStdRad?: number }
+		opts?: { rng?: () => number; noiseStdMeters?: number; angleNoiseStdRad?: number },
 	) {
 		// Default RNG: Math.random
 		this.rng = opts?.rng ?? Math.random;
@@ -31,7 +31,7 @@ export class UWBRanging implements RangingEngine {
 	public measure(
 		sender: { id: number; x: number; y: number },
 		receiver: { id: number; x: number; y: number },
-		opts: RangingOptions
+		opts: RangingOptions,
 	): RangingResult {
 		const { pixelsPerMeter, maxRangeMeters, walls } = opts;
 		// Vector from sender -> receiver (bearing as seen by sender)
@@ -62,7 +62,7 @@ export class UWBRanging implements RangingEngine {
 			};
 		}
 
-		// Add Gaussian noise via Box-Muller
+		// Add Gaussian noise via Box-Muller Box Muller
 		const noise = this.gaussian() * this.noiseStdMeters;
 		const measured = Math.max(0, trueDistMeters + noise);
 		const c = 299_792_458; // speed of light m/s

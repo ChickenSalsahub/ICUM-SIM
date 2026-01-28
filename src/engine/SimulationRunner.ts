@@ -191,6 +191,7 @@ export class SimulationRunner {
 		}
 	}
 
+	//Running the simulation for a single step
 	public step(dtMs: number) {
 		this.timeMs += dtMs;
 

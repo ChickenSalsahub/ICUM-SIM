@@ -264,7 +264,6 @@ const App: React.FC = () => {
 	const [viewMode, setViewMode] = useState<"SIM" | "ANALYSIS">("SIM");
 	const [nodes, setNodes] = useState<UiNode[]>([]);
 	const [links, setLinks] = useState<Link[]>([]);
-	// ... rest of state
 
 	const [packets, setPackets] = useState<Packet[]>([]);
 	const [visualPackets, setVisualPackets] = useState<VisualPacket[]>([]);
