@@ -142,14 +142,29 @@ export function bestFitRigid2D(truth: Pt[], est: Pt[]): Rigid2D | undefined {
 	return sseFlip < sseNo ? tfFlip : tfNo;
 }
 
-export function applyRigid2D(p: Pt, tf: Rigid2D): Pt {
-	const y = tf.flipY ? -p.y : p.y;
+/**
+ * Applies a rigid body transformation (Rotation + Translation) to a point.
+ * This aligns the node's estimated position with the ground truth coordinate frame.
+ */
+export function applyRigid2D(point: Pt, transform: Rigid2D): Pt {
+	// Optional coordinate flip (e.g., if axes are inverted between systems)
+	const correctedY = transform.flipY ? -point.y : point.y;
+
+	/**
+	 * Standard 2D Rotation and Translation formula:
+	 * x' = x*cos(θ) - y*sin(θ) + tx
+	 * y' = x*sin(θ) + y*cos(θ) + ty
+	 * * transform.c corresponds to cos(θ)
+	 * transform.s corresponds to sin(θ)
+	 */
+	const rotatedX = transform.c * point.x - transform.s * correctedY;
+	const rotatedY = transform.s * point.x + transform.c * correctedY;
+
 	return {
-		x: tf.c * p.x - tf.s * y + tf.tx,
-		y: tf.s * p.x + tf.c * y + tf.ty,
+		x: rotatedX + transform.tx,
+		y: rotatedY + transform.ty,
 	};
 }
-
 /**
  * Anchor-free ALE: aligns estimated positions to truth before scoring.
  */
@@ -239,18 +254,29 @@ export function aleAlignedRigid(nodes: RunnerNodes) {
 
 /**
  * Anchor-free RMSE: rigidly aligns estimated positions to truth before scoring.
+ * RMSE Aligned RMSE
+ */
+/**
+ * Calculates the Aligned Root Mean Square Error (RMSE) for nodes
+ * This acts as the "Oracle" evaluation mentioned in the paper
  */
 export function rmseAlignedRigid(nodes: RunnerNodes) {
+	// Basic safety check: we need at least two nodes to define a relative shape
 	if (nodes.length < 2) return rmse(nodes);
+
 	const nodeIds: number[] = [];
-	const truth: Pt[] = [];
-	const est: Pt[] = [];
+	const truth: Pt[] = []; // Ground truth coordinates from the simulator
+	const est: Pt[] = []; // Estimated positions from the node's internal belief
+
+	//Extract data from the simulator "Oracle" view and the node's estimated positions
 	for (const node of nodes) {
 		const p = node.firmware.estPosition;
+		// If a node has failed to calculate a position, it's a NaN error.
 		if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) return Number.NaN;
 		nodeIds.push(node.id);
 		const trueX = Number.isFinite((node as any).trueX) ? (node as any).trueX : node.x;
 		const trueY = Number.isFinite((node as any).trueY) ? (node as any).trueY : node.y;
+
 		truth.push({ x: trueX, y: trueY });
 		est.push({ x: p.x, y: p.y });
 	}
@@ -258,11 +284,15 @@ export function rmseAlignedRigid(nodes: RunnerNodes) {
 	const idToIndex = new Map<number, number>();
 	for (let i = 0; i < nodeIds.length; i++) idToIndex.set(nodeIds[i], i);
 
+	//Build an adjacency graph based on UWB connectivity
 	const adjacency: number[][] = Array.from({ length: nodes.length }, () => []);
 	let edgeCount = 0;
 	for (const node of nodes) {
+		// Get the index of the current node
 		const i = idToIndex.get(node.id);
 		if (i === undefined) continue;
+
+		// For each neighbor observed by this node
 		for (const nb of node.firmware.neighbors) {
 			const j = idToIndex.get(nb.id);
 			if (j === undefined || j === i) continue;
@@ -272,11 +302,16 @@ export function rmseAlignedRigid(nodes: RunnerNodes) {
 		}
 	}
 
+	// Find connected components
+	// In a decentralized mesh, the coordinate frame only exists within connected clusters[cite: 74].
 	const components: number[][] = [];
 	if (edgeCount === 0) {
 		components.push(Array.from({ length: nodes.length }, (_, i) => i));
 	} else {
+		// create a visited array to keep track of visited nodes
 		const visited = new Array<boolean>(nodes.length).fill(false);
+
+		//for all nodes, perform DFS to find connected components
 		for (let i = 0; i < nodes.length; i++) {
 			if (visited[i]) continue;
 			const comp: number[] = [];
@@ -295,24 +330,23 @@ export function rmseAlignedRigid(nodes: RunnerNodes) {
 		}
 	}
 
-	let sumSq = 0;
-	let validCount = 0;
+	let sumSq = 0; // Sum of squared errors
+	let validCount = 0; // Count of valid nodes considered
+
+	// Perform rigid alignment for each connected sub-graph.
 	for (const comp of components) {
-		if (comp.length < 2) {
-			// Skip isolated nodes in anchor-free RMSE calculation.
-			// Falling back to absolute error for single nodes is misleading
-			// because the coordinate frame origin is arbitrary.
-			continue;
-		}
+		// Skip isolated nodes: an anchor-free system cannot localize a single point.
+		if (comp.length < 2) continue;
 
 		const truthC = comp.map((i) => truth[i]);
 		const estC = comp.map((i) => est[i]);
+
+		// APPLY KABSCH ALGORITHM: Find optimal Rotation (R) and Translation (t).
 		const tf = bestFitRigid2D(truthC, estC);
-		if (!tf) {
-			continue;
-		}
+		if (!tf) continue;
 
 		for (const i of comp) {
+			// Transform the estimate to the ground truth frame to measure SHAPE error.
 			const aligned = applyRigid2D(est[i], tf);
 			const dx = aligned.x - truth[i].x;
 			const dy = aligned.y - truth[i].y;
@@ -320,6 +354,8 @@ export function rmseAlignedRigid(nodes: RunnerNodes) {
 			validCount++;
 		}
 	}
+
+	// Final result: The Root Mean Square of the aligned errors
 	return validCount > 0 ? Math.sqrt(sumSq / validCount) : Number.NaN;
 }
 
