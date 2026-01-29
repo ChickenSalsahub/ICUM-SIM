@@ -283,7 +283,7 @@ const App: React.FC = () => {
 	const [showCloudLogs, setShowCloudLogs] = useState(false);
 	const [showPacketSniffer, setShowPacketSniffer] = useState(false);
 	const [showBatteryMonitor, setShowBatteryMonitor] = useState(false);
-	const [cloudViewMode, setCloudViewMode] = useState<"RAW" | "FUSED" | "TOPOLOGY">("FUSED");
+	const [cloudViewMode, setCloudViewMode] = useState<"RAW" | "DATA" | "TOPOLOGY">("TOPOLOGY");
 
 	const [packetFilter, setPacketFilter] = useState<string>("ALL");
 	const [tick, setTick] = useState(0);
@@ -1268,7 +1268,7 @@ const App: React.FC = () => {
 						<div style={{ fontSize: "9px", color: "#cbd5e1", textAlign: "right" }}>{config.movingSpeed}x</div>
 						<div style={{ fontSize: "9px", color: "#64748b" }}>Only affects nodes you toggle to MOVING.</div>
 
-						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 6 }}>Max Leaders</div>
+						{/* <div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 6 }}>Max Leaders</div>
 						<input
 							type="range"
 							min="1"
@@ -1279,10 +1279,10 @@ const App: React.FC = () => {
 							title="UI constraint: limit how many leader nodes can exist"
 							style={{ width: "100%", accentColor: "#ec4899" }}
 						/>
-						<div style={{ fontSize: "9px", color: "#f472b6", textAlign: "right" }}>{config.maxLeaders} Leaders</div>
+						<div style={{ fontSize: "9px", color: "#f472b6", textAlign: "right" }}>{config.maxLeaders} Leaders</div> */}
 
 						{/* RESTORED SLIDER */}
-						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 6 }}>Min Cluster Size</div>
+						{/* <div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 6 }}>Min Cluster Size</div>
 						<input
 							type="range"
 							min="2"
@@ -1295,7 +1295,7 @@ const App: React.FC = () => {
 						/>
 						<div style={{ fontSize: "9px", color: "#a855f7", textAlign: "right" }}>
 							Min Size: {config.minClusterSize}
-						</div>
+						</div> */}
 						<div style={{ fontSize: "9px", color: "#64748b" }}>Used by the UI/cluster visualization.</div>
 
 						<div style={{ height: 1, backgroundColor: "#334155", margin: "8px 0" }} />
@@ -1516,7 +1516,7 @@ const App: React.FC = () => {
 						</div>
 
 						<div style={{ height: 1, backgroundColor: "#334155", margin: "8px 0" }} />
-						<div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+						{/* <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
 							<div style={{ fontSize: "10px", color: "#94a3b8", fontWeight: 600 }}>Cloud Fusion</div>
 							<button
 								style={{ ...styles.btn, backgroundColor: "#334155", padding: "4px 8px", fontSize: "10px" }}
@@ -1524,9 +1524,9 @@ const App: React.FC = () => {
 							>
 								Apply
 							</button>
-						</div>
-						<div style={{ fontSize: "9px", color: "#64748b" }}>Affects how the cloud optimizer weights residuals.</div>
-						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 6 }}>Distance σ (Cloud)</div>
+						</div> */}
+						{/* <div style={{ fontSize: "9px", color: "#64748b" }}>Affects how the cloud optimizer weights residuals.</div> */}
+						{/* <div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 6 }}>Distance σ (Cloud)</div>
 						<input
 							type="range"
 							min="0.01"
@@ -1535,13 +1535,13 @@ const App: React.FC = () => {
 							value={cloudTuning.distanceSigma ?? 0.15}
 							onChange={(e) => setCloudTuning({ ...cloudTuning, distanceSigma: Number(e.target.value) })}
 							style={{ width: "100%" }}
-						/>
-						<div style={{ fontSize: "9px", color: "#cbd5e1", textAlign: "right" }}>
+						/> */}
+						{/* <div style={{ fontSize: "9px", color: "#cbd5e1", textAlign: "right" }}>
 							Distance σ: {(cloudTuning.distanceSigma ?? 0.15).toFixed(2)} m
 						</div>
 						<div style={{ fontSize: "9px", color: "#64748b" }}>Expected range noise used for weighting.</div>
-						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 6 }}>Angle σ (Cloud)</div>
-						<input
+						<div style={{ fontSize: "10px", color: "#cbd5e1", fontWeight: 600, marginTop: 6 }}>Angle σ (Cloud)</div> */}
+						{/* <input
 							type="range"
 							min="0"
 							max="60"
@@ -1549,11 +1549,11 @@ const App: React.FC = () => {
 							value={(cloudTuning.angleSigma ?? (20 * Math.PI) / 180) * (180 / Math.PI)}
 							onChange={(e) => setCloudTuning({ ...cloudTuning, angleSigma: (Number(e.target.value) * Math.PI) / 180 })}
 							style={{ width: "100%" }}
-						/>
-						<div style={{ fontSize: "9px", color: "#cbd5e1", textAlign: "right" }}>
+						/> */}
+						{/* <div style={{ fontSize: "9px", color: "#cbd5e1", textAlign: "right" }}>
 							Angle σ: {(((cloudTuning.angleSigma ?? (20 * Math.PI) / 180) * 180) / Math.PI).toFixed(0)}°
-						</div>
-						<div style={{ fontSize: "9px", color: "#64748b" }}>Expected bearing noise used for weighting.</div>
+						</div> */}
+						{/* <div style={{ fontSize: "9px", color: "#64748b" }}>Expected bearing noise used for weighting.</div> */}
 					</div>
 
 					<div style={styles.panel}>
@@ -1609,18 +1609,18 @@ const App: React.FC = () => {
 						>
 							<div style={{ padding: "8px", borderBottom: "1px solid #334155", display: "flex", gap: "4px" }}>
 								<button
-									onClick={() => setCloudViewMode("FUSED")}
+									onClick={() => setCloudViewMode("DATA")}
 									style={{
 										fontSize: "9px",
 										padding: "4px 8px",
 										borderRadius: "4px",
 										border: "none",
-										backgroundColor: cloudViewMode === "FUSED" ? "#38bdf8" : "#1e293b",
-										color: cloudViewMode === "FUSED" ? "#0f172a" : "#94a3b8",
+										backgroundColor: cloudViewMode === "DATA" ? "#38bdf8" : "#1e293b",
+										color: cloudViewMode === "DATA" ? "#0f172a" : "#94a3b8",
 										cursor: "pointer",
 									}}
 								>
-									FUSED DATA
+									DATA
 								</button>
 								<button
 									onClick={() => setCloudViewMode("RAW")}
@@ -1671,7 +1671,7 @@ const App: React.FC = () => {
 									</>
 								)}
 							</div>
-							{cloudViewMode === "FUSED" ? (
+							{cloudViewMode === "DATA" ? (
 								<div style={{ padding: "8px", overflowX: "auto" }}>
 									<table
 										style={{ width: "100%", borderCollapse: "collapse", fontSize: "10px", fontFamily: "monospace" }}
