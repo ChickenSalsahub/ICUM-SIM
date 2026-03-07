@@ -112,7 +112,7 @@ class UiNode {
 	public wanderChangeTimerMs: number;
 	public wanderChangeIntervalMs: number;
 
-	private globalPos: UiGlobalPosition | null = null;
+	public globalPos: UiGlobalPosition | null = null;
 	private localGraph: Map<number, Pose2D> = new Map();
 	private estLocal: { x: number; y: number } | null = null;
 
@@ -597,7 +597,20 @@ const App: React.FC = () => {
 
 						vp.x = tx;
 						vp.y = ty;
+						// ANCHOR IMPLEMENTATION
+						if(sourceNode?.globalPos && targetNode) {
+							const dist = Math.sqrt((sourceNode.x - targetNode.x)**2+(sourceNode.y - targetNode.y)**2) / PIXELS_PER_METER
 
+							let AoA = Array.from(sourceNode.neighbors.values()).find(node => node.id === targetNode.id)?.aoa ?? 0;
+
+							const sourceLat = sourceNode.globalPos.lat * Math.PI / 180
+							const sourceLng = sourceNode.globalPos.lng * Math.PI / 180
+							const delta = dist / 6371000
+							const targetLat = (Math.asin(Math.sin(sourceLat) * Math.cos(delta) + Math.cos(sourceLat) * Math.sin(delta) * Math.cos(AoA))) * 180 / Math.PI
+							const targetLng = (sourceLng + Math.atan2(Math.sin(AoA) * Math.sin(delta) * Math.cos(sourceLat), Math.cos(delta) - Math.sin(sourceLat) * Math.sin(targetLat)))  * 180 / Math.PI
+							targetNode.setGlobalPosition(targetLat, targetLng)
+						}
+						
 						// Check wall intersection
 						for (const w of currentWalls) {
 							if (doIntersect({ x: sx, y: sy }, { x: vp.x, y: vp.y }, { x: w.x1, y: w.y1 }, { x: w.x2, y: w.y2 })) {
@@ -1077,8 +1090,8 @@ const App: React.FC = () => {
 
 	const handleSetGlobalPosition = () => {
 		if (!contextMenu) return;
-		const latStr = prompt("Enter Latitude (e.g. 52.5200):");
-		const lngStr = prompt("Enter Longitude (e.g. 13.4050):");
+		const latStr = prompt("Enter Latitude (e.g. 52.5200):", "52.5200");
+		const lngStr = prompt("Enter Longitude (e.g. 13.4050):", "13.4050");
 		if (latStr && lngStr) {
 			const lat = parseFloat(latStr);
 			const lng = parseFloat(lngStr);
@@ -1970,7 +1983,7 @@ const App: React.FC = () => {
 																		textAnchor="middle"
 																		style={{ pointerEvents: "none" }}
 																	>
-																		{n.range.toFixed(1)}m / {((n.aoa * 180) / Math.PI).toFixed(0)}°
+																		{n.range.toFixed(1)}m / {((n.aoa * 180) / Math.PI).toFixed(0)}° {/*HERE LOL*/}
 																	</text>
 																</g>
 															);
