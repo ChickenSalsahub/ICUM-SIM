@@ -19,6 +19,8 @@ import {
 	Scale,
 	TrendingDown,
 	BrickWall,
+	Wrench,
+	NotebookPen,
 } from "lucide-react";
 import { AnalysisDashboard } from "./components/AnalysisDashboard";
 import { CloudBackend, type CloudBackendOptions, type CloudEvent, FusedRecord } from "./logic/CloudBackend";
@@ -28,6 +30,8 @@ import { NodeConfig, NodeRole, NodeType, Packet, PacketType, VisualPacket, Wall 
 import { SimulationRunner } from "./engine/SimulationRunner";
 import type { FirmwareConfig, NeighborObservation } from "./firmware/types";
 import { createRollingMeanConvergenceTracker } from "./experiments/lib/convergence";
+import { getLatestPerNode, runEKFStep, NodeLocation, GlobalTransformEKF, buildRelativePositions, EKFCanvas } from "./kalman"
+import { number } from "mathjs";
 
 const PIXELS_PER_METER = 20;
 
@@ -283,11 +287,24 @@ const App: React.FC = () => {
 	const [showCloudLogs, setShowCloudLogs] = useState(false);
 	const [showPacketSniffer, setShowPacketSniffer] = useState(false);
 	const [showBatteryMonitor, setShowBatteryMonitor] = useState(false);
+	const [showFilterConfiguration, setShowFilterConfiguration] = useState(false);
 	const [cloudViewMode, setCloudViewMode] = useState<"RAW" | "DATA" | "TOPOLOGY">("TOPOLOGY");
 
 	const [packetFilter, setPacketFilter] = useState<string>("ALL");
 	const [tick, setTick] = useState(0);
 	const [isPlaying, setIsPlaying] = useState(true);
+
+	/* onst ekfRef = useRef<GlobalTransformEKF | null>(null);
+	useEffect(() => {
+		ekfRef.current = new GlobalTransformEKF();
+		}, []);
+
+	if (!ekfRef.current) {
+	ekfRef.current = new GlobalTransformEKF();
+	}
+
+	const ekf = ekfRef.current; */
+	const ekfMapRef = useRef<Record<number, GlobalTransformEKF>>({});
 
 	const exportSnifferPackets = useCallback(() => {
 		const filtered = packets.filter((p) => packetFilter === "ALL" || p.type === packetFilter);
@@ -523,6 +540,8 @@ const App: React.FC = () => {
 							.filter((n: any) => Number.isFinite(n.id) && Number.isFinite(n.range))
 					: [];
 
+				const currentNodeGlobalPos = nodesRef.current.find((n) => n.id === nodeId)?.globalPos
+
 				const report: any = {
 					nodeId,
 					timestamp: nowMs,
@@ -530,6 +549,8 @@ const App: React.FC = () => {
 					status: r.status === "MOVING" ? "MOVING" : "STATIONARY",
 					estX: Number.isFinite(r.estX) ? r.estX : undefined,
 					estY: Number.isFinite(r.estY) ? r.estY : undefined,
+					lat: currentNodeGlobalPos ? currentNodeGlobalPos?.lat : undefined,
+					lng: currentNodeGlobalPos ? currentNodeGlobalPos?.lng : undefined,
 					neighbors,
 				};
 
@@ -541,13 +562,49 @@ const App: React.FC = () => {
 				}
 
 				baselineCloud.ingest(report);
+
 			}
 
 			if (recordedBackendEvents) {
 				setCloudEventsBaseline([...baselineCloud.getEvents()]);
 			}
-		},
-		[],
+
+		const nodeLocations: Record<string, NodeLocation> = (getLatestPerNode(baselineCloud.db)[0].positions)
+		const origin = (getLatestPerNode(baselineCloud.db)[0].origin)
+
+			if(origin){
+			let locations: NodeLocation[] = [];
+			for (const node of Object.entries(nodeLocations)) {
+				locations.push({nodeId: parseInt(node[0]), kalmanLat: node[1].kalmanLat, kalmanLng: node[1].kalmanLng, lat: node[1].lat, lng: node[1].lng})
+			}
+
+			const relativePositions = buildRelativePositions(
+				locations,
+				origin.lat, 
+				origin.lng
+				);
+
+			const now = performance.now();
+
+			let dt = 0;
+
+			if (lastTimeRef.current !== null) {
+				dt = (now - lastTimeRef.current) / 1000;
+			}
+
+			lastTimeRef.current = now;
+
+			runEKFStep(
+				ekfMapRef.current,
+				locations, 
+				dt,
+				origin.lat,
+				origin.lng, 
+			);
+			//console.log(locations)
+		}
+	},
+	[],
 	);
 
 	const gameLoop = useCallback(
@@ -598,7 +655,8 @@ const App: React.FC = () => {
 						vp.x = tx;
 						vp.y = ty;
 						// ANCHOR IMPLEMENTATION
-						if(sourceNode?.globalPos && targetNode) {
+						if(sourceNode?.globalPos && targetNode?.motionMode == "MOVING") {
+							//console.log(sourceNode, targetNode)
 							const dist = Math.sqrt((sourceNode.x - targetNode.x)**2+(sourceNode.y - targetNode.y)**2) / PIXELS_PER_METER
 
 							let AoA = Array.from(sourceNode.neighbors.values()).find(node => node.id === targetNode.id)?.aoa ?? 0;
@@ -606,8 +664,10 @@ const App: React.FC = () => {
 							const sourceLat = sourceNode.globalPos.lat * Math.PI / 180
 							const sourceLng = sourceNode.globalPos.lng * Math.PI / 180
 							const delta = dist / 6371000
+
 							const targetLat = (Math.asin(Math.sin(sourceLat) * Math.cos(delta) + Math.cos(sourceLat) * Math.sin(delta) * Math.cos(AoA))) * 180 / Math.PI
 							const targetLng = (sourceLng + Math.atan2(Math.sin(AoA) * Math.sin(delta) * Math.cos(sourceLat), Math.cos(delta) - Math.sin(sourceLat) * Math.sin(targetLat)))  * 180 / Math.PI
+
 							targetNode.setGlobalPosition(targetLat, targetLng)
 						}
 						
@@ -1105,6 +1165,7 @@ const App: React.FC = () => {
 		setContextMenu(null);
 	};
 
+
 	const handleSetBatteryLife = () => {
 		if (!contextMenu) return;
 		const pctStr = prompt("Enter battery percentage (0-100):");
@@ -1245,6 +1306,16 @@ const App: React.FC = () => {
 							onClick={() => setShowBatteryMonitor(!showBatteryMonitor)}
 						>
 							<TrendingDown size={14} /> Battery Monitor
+						</button>
+					</div>
+
+					<div style={styles.panel}>
+						<span style={styles.label}>Kalman Filter</span>
+						<button
+							style={{ ...styles.btn, backgroundColor: showCloudLogs ? "#3b82f6" : "#334155" }}
+							onClick={() => setShowFilterConfiguration(!showFilterConfiguration)}
+						>
+							<Wrench size={14} /> Filter Configuration
 						</button>
 					</div>
 
@@ -1683,6 +1754,7 @@ const App: React.FC = () => {
 											: ""}
 									</>
 								)}
+								
 							</div>
 							{cloudViewMode === "DATA" ? (
 								<div style={{ padding: "8px", overflowX: "auto" }}>
@@ -2191,6 +2263,24 @@ const App: React.FC = () => {
 							</div>
 						</DraggableWindow>
 					)}
+					{showFilterConfiguration && (
+						<DraggableWindow
+							id="kalman"
+							title="Kalman Filter"
+							icon={Wrench}
+							initialX={200}
+							initialY={100}
+							initialHeight={705}
+							initialWidth={1100}
+							onClose={() => setShowFilterConfiguration(false)}
+							onFocus={() => focusWindow("kalman")}
+							zIndex={100}
+						>
+						<EKFCanvas />
+							
+						</DraggableWindow>
+					)}
+					
 
 					{/* ... (Existing Inspectors & SVG Rendering Logic) ... */}
 					{openWindows.map((id) => {

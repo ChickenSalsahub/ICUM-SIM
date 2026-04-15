@@ -72,7 +72,7 @@ export class CloudBackend {
 	private buffer: Map<number, RawReport[]> = new Map();
 
 	// The "Database"
-	private db: FusedRecord[] = [];
+	public db: FusedRecord[] = [];
 
 	// Event log (non-fusion telemetry)
 	private events: CloudEvent[] = [];
