@@ -239,8 +239,6 @@ export class GlobalTransformEKF {
   } 
 }
 
-
-
 type LatLng = { lat: number; lng: number };
 
 
@@ -431,7 +429,6 @@ useEffect(() => {
 
   if (!renderLocations.length) return;
 
-  // 🔥 Collect all points (GPS + Kalman)
   let allPoints: Vec2[] = [];
 
   for (const node of renderLocations) {
@@ -448,7 +445,6 @@ useEffect(() => {
     allPoints.push(gps, kalman);
   }
 
-  // 🔥 Compute center
   const center = {
     x: allPoints.reduce((sum, p) => sum + p.x, 0) / allPoints.length,
     y: allPoints.reduce((sum, p) => sum + p.y, 0) / allPoints.length,
@@ -464,7 +460,6 @@ useEffect(() => {
     y: canvasCenter.y - (p.y - center.y) * zoom + pan.y,
   });
 
-  // 🎨 Draw nodes
   for (const node of renderLocations) {
     const gps = gpsToLocal(
       { lat: node.lat, lng: node.lng },
@@ -479,19 +474,19 @@ useEffect(() => {
     const gpsScreen = toScreen(gps);
     const kalmanScreen = toScreen(kalman);
 
-    // 🔵 GPS point
+    //GPS
     ctx.fillStyle = "blue";
     ctx.beginPath();
     ctx.arc(gpsScreen.x, gpsScreen.y, 5, 0, Math.PI * 2);
     ctx.fill();
 
-    // 🟢 Kalman point
+    //Kalman
     ctx.fillStyle = "green";
     ctx.beginPath();
     ctx.arc(kalmanScreen.x, kalmanScreen.y, 5, 0, Math.PI * 2);
     ctx.fill();
 
-    // 🔴 Residual line
+    //Line
     ctx.strokeStyle = "red";
     ctx.beginPath();
     ctx.moveTo(kalmanScreen.x, kalmanScreen.y);
@@ -581,7 +576,6 @@ useEffect(() => {
           gap: "12px"
         }}
       >
-        {/* Column 1 */}
         <div style={{ display: "flex", flexDirection: "column", gap: "4px", fontSize: "16px" }}>
           <span>Current expected Noise: {R} </span>
           <button
@@ -595,8 +589,6 @@ useEffect(() => {
             <NotebookPen size={12} /> Set R
           </button>
         </div>
-
-        {/* Column 2 */}
         <div style={{ display: "flex", flexDirection: "column", gap: "4px", fontSize: "16px" }}>
           <span>Current Trust in Filter: {N}</span>
           <button
@@ -615,22 +607,19 @@ useEffect(() => {
         style={{
           display: "flex",
           gap: "16px",
-          height: "600px", // 👈 match canvas height
+          height: "600px", 
         }}
       >
-        {/* Canvas */}
         <canvas
           ref={canvasRef}
           width={800}
           height={600}
           style={{ flexShrink: 0 }}
         />
-
-        {/* Debug panel */}
         <div
           style={{
             flex: 1,
-            overflowY: "auto",     // 👈 internal scroll
+            overflowY: "auto", 
             fontFamily: "monospace",
             fontSize: "12px",
             borderLeft: "1px solid #334155",
@@ -638,115 +627,107 @@ useEffect(() => {
           }}
         >
 
-<div
-  style={{
-    display: "grid",
-    gridTemplateColumns: "repeat(2, 1fr)",
-    gap: "12px",
-  }}
->
-  {renderLocations.map((node) => {
-    if (!renderEKF) return null;
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(2, 1fr)",
+              gap: "12px",
+            }}
+          >
+            {renderLocations.map((node) => {
+              if (!renderEKF) return null;
 
-    const origin = {
-      lat: renderLocations[0].lat,
-      lng: renderLocations[0].lng,
-    };
+              const origin = {
+                lat: renderLocations[0].lat,
+                lng: renderLocations[0].lng,
+              };
 
-    const gps = gpsToLocal(
-      { lat: node.lat, lng: node.lng },
-      origin
-    );
+              const gps = gpsToLocal(
+                { lat: node.lat, lng: node.lng },
+                origin
+              );
 
-    const kalman = gpsToLocal(
-      { lat: node.kalmanLat, lng: node.kalmanLng },
-      origin
-    );
+              const kalman = gpsToLocal(
+                { lat: node.kalmanLat, lng: node.kalmanLng },
+                origin
+              );
 
-    const dx = gps.x - kalman.x;
-    const dy = gps.y - kalman.y;
-    const dist = Math.sqrt(dx * dx + dy * dy);
+              const dx = gps.x - kalman.x;
+              const dy = gps.y - kalman.y;
+              const dist = Math.sqrt(dx * dx + dy * dy);
 
-    if (!errorHistoryRef.current[node.nodeId]) {
-      errorHistoryRef.current[node.nodeId] = [];
-    }
+              if (!errorHistoryRef.current[node.nodeId]) {
+                errorHistoryRef.current[node.nodeId] = [];
+              }
 
-    const history = errorHistoryRef.current[node.nodeId];
-    history.push(dist);
-    if (history.length > 100) history.shift();
+              const history = errorHistoryRef.current[node.nodeId];
+              history.push(dist);
+              if (history.length > 100) history.shift();
 
-    // 🔥 fixed scale (important)
-    const maxScale = 50; // meters (adjust as needed)
-    const points = history
-      .map((v, i) => {
-        const x = (i / 100) * 100;
-        const y = 100 - Math.min(v / maxScale, 1) * 100;
-        return `${x},${y}`;
-      })
-      .join(" ");
+              const maxScale = 50; //SCALE IF NEEDED
+              const points = history
+                .map((v, i) => {
+                  const x = (i / 100) * 100;
+                  const y = 100 - Math.min(v / maxScale, 1) * 100;
+                  return `${x},${y}`;
+                })
+                .join(" ");
 
-    const color =
-      dist < 30 ? "#22c55e" : dist < 100 ? "#f59e0b" : "#ef4444";
+              const color =
+                dist < 30 ? "#22c55e" : dist < 100 ? "#f59e0b" : "#ef4444";
 
-    return (
-      <div
-        key={node.nodeId}
-        style={{
-          background: "#0f172a",
-          border: "1px solid #334155",
-          borderRadius: "8px",
-          padding: "10px",
-          boxShadow: "0 2px 6px rgba(0,0,0,0.3)",
-        }}
-      >
-        {/* Header */}
-        <div
-          style={{
-            fontWeight: "bold",
-            marginBottom: "6px",
-            color: "#e2e8f0",
-          }}
-        >
-          Node {node.nodeId}
-        </div>
+              return (
+                <div
+                  key={node.nodeId}
+                  style={{
+                    background: "#0f172a",
+                    border: "1px solid #334155",
+                    borderRadius: "8px",
+                    padding: "10px",
+                    boxShadow: "0 2px 6px rgba(0,0,0,0.3)",
+                  }}
+                >
+                  <div
+                    style={{
+                      fontWeight: "bold",
+                      marginBottom: "6px",
+                      color: "#e2e8f0",
+                    }}
+                  >
+                    Node {node.nodeId}
+                  </div>
+                  <div style={{ fontSize: "11px", color: "#94a3b8" }}>
+                    GPS:
+                    <div>
+                      ({gps.x.toFixed(1)}, {gps.y.toFixed(1)})
+                    </div>
 
-        {/* Values */}
-        <div style={{ fontSize: "11px", color: "#94a3b8" }}>
-          GPS:
-          <div>
-            ({gps.x.toFixed(1)}, {gps.y.toFixed(1)})
+                    Kalman:
+                    <div>
+                      ({kalman.x.toFixed(1)}, {kalman.y.toFixed(1)})
+                    </div>
+                  </div>
+                  <div
+                    style={{
+                      marginTop: "6px",
+                      fontWeight: "bold",
+                      color,
+                    }}
+                  >
+                    Δ {dist.toFixed(1)} m
+                  </div>
+                  <svg width="100%" height="50" style={{ marginTop: "6px" }}>
+                    <polyline
+                      fill="none"
+                      stroke="#38bdf8"
+                      strokeWidth="2"
+                      points={points}
+                    />
+                  </svg>
+                </div>
+              );
+            })}
           </div>
-
-          Kalman:
-          <div>
-            ({kalman.x.toFixed(1)}, {kalman.y.toFixed(1)})
-          </div>
-        </div>
-
-        {/* Error */}
-        <div
-          style={{
-            marginTop: "6px",
-            fontWeight: "bold",
-            color,
-          }}
-        >
-          Δ {dist.toFixed(1)} m
-        </div>
-
-        {/* Sparkline */}
-        <svg width="100%" height="50" style={{ marginTop: "6px" }}>
-          <polyline
-            fill="none"
-            stroke="#38bdf8"
-            strokeWidth="2"
-            points={points}
-          />
-        </svg>
-      </div>
-    );
-  })}
-</div>
         </div>
       </div>
     </div>
