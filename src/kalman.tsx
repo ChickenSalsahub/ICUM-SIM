@@ -30,7 +30,7 @@ export function getLatestPerNode(data: FusedRecord[]): Record<number, any> {
     return [{positions, origin}];
 }
 
-let R = 25; let N = 0.1;
+let R = 25; let N = 0.01; let globalDt: number; let sTD = 5;
 
 const handleSetR = (EKF: Record<number, GlobalTransformEKF>) => {
   const r = prompt("Enter how noisy we THINK the GPS is", "The higher, the noiser (Square the number)");
@@ -49,6 +49,13 @@ const handleSetNoise = (EKF: Record<number, GlobalTransformEKF>) => {
      for (const ekf of Object.values(EKF)) {
       ekf.updateQ(N)
     }
+  }
+}
+const handleSetSTD = () => {
+ const std = prompt("Enter how large the std for noise ACTUALLY is", "Change BEFORE initialization");
+  if (std){
+    N = parseFloat(std)
+    sTD = N;
   }
 }
 
@@ -149,11 +156,42 @@ function scaleMatrix(A: number[][], scalar: number): number[][] {
   return A.map(row => row.map(v => v * scalar));
 }
 
+function cloneMatrix(m: number[][]): number[][] {
+  return [
+    [m[0][0], m[0][1], m[0][2], m[0][3]],
+    [m[1][0], m[1][1], m[1][2], m[1][3]],
+    [m[2][0], m[2][1], m[2][2], m[2][3]],
+    [m[3][0], m[3][1], m[3][2], m[3][3]]
+  ];
+}
+
+function computeNIS(y: number[], S: number[][]): number {
+  const s00 = S[0][0], s01 = S[0][1];
+  const s10 = S[1][0], s11 = S[1][1];
+
+  const det = s00 * s11 - s01 * s10;
+
+  if (Math.abs(det) < 1e-9) return 0;
+
+  const invS00 =  s11 / det;
+  const invS01 = -s01 / det;
+  const invS10 = -s10 / det;
+  const invS11 =  s00 / det;
+
+  return (
+    y[0] * (invS00 * y[0] + invS01 * y[1]) +
+    y[1] * (invS10 * y[0] + invS11 * y[1])
+  );
+}
+
 export class GlobalTransformEKF {
-  x: number[]; // [px, py, vx, vy]
+  x: number[];
   P: number[][];
   Q: number[][];
   R: number[][];
+
+  Q0: number[][];
+  nis_ema: number;
 
   constructor() {
     this.x = [0, 0, 0, 0];
@@ -165,6 +203,8 @@ export class GlobalTransformEKF {
       [R, 0],
       [0, R],
     ];
+    this.Q0 = cloneMatrix(this.Q);
+    this.nis_ema = 2.0;
   }
 
   updateQ(Noise: number) {
@@ -213,13 +253,39 @@ export class GlobalTransformEKF {
       this.R
     )
     
+    const nis = computeNIS(y, S);
+
+    this.nis_ema = 0.9 * this.nis_ema + 0.1 * nis;
+
+    // thresholds for 2D
+    const lower = 1.0;
+    const upper = 6.0;
+
+    let scale = 1.0;
+
+    if (this.nis_ema > upper) {
+      scale = 1 + 0.3 * (this.nis_ema / upper - 1);
+    } else if (this.nis_ema < lower) {
+      scale = 1 - 0.1 * (1 - this.nis_ema / lower);
+    }
+
+    scale = Math.max(0.5, Math.min(5.0, scale));
+
+   this.Q = [
+      [this.Q0[0][0] * scale, this.Q0[0][1] * scale, this.Q0[0][2] * scale, this.Q0[0][3] * scale],
+      [this.Q0[1][0] * scale, this.Q0[1][1] * scale, this.Q0[1][2] * scale, this.Q0[1][3] * scale],
+      [this.Q0[2][0] * scale, this.Q0[2][1] * scale, this.Q0[2][2] * scale, this.Q0[2][3] * scale],
+      [this.Q0[3][0] * scale, this.Q0[3][1] * scale, this.Q0[3][2] * scale, this.Q0[3][3] * scale]
+    ];
+    N = this.Q0[0][0];
+    console.log(N, this.Q0[0][0], scale)
 
     const det = S[0][0] * S[1][1] - S[0][1] * S[1][0];
     
     if (Math.abs(det) < 1e-6) {
       console.warn("Singular matrix S", S);
       return;
-    }
+    } 
 
     const K = mul(
       mul(this.P, transpose(H)),
@@ -258,8 +324,8 @@ function gpsToLocal( point: LatLng, origin: LatLng ): Vec2 {
   const metersPerDegLng = 111_320 * Math.cos(latRad);
 
   return {
-    x: dLng * metersPerDegLng,
-    y: dLat * metersPerDegLat,
+    x: dLat * metersPerDegLng,
+    y: dLng * metersPerDegLat,
   };
 }
 
@@ -295,9 +361,20 @@ function enuToLatLng(enu: Vec2, origin: LatLng): LatLng {
   return { lat, lng };
 }
 
+
+
 let renderLocations: NodeLocation[] = [];
 let renderEKF: Record<number, GlobalTransformEKF>
 let renderOrigin: LatLng;
+let renderTrue: Record<number, {x: number, y: number}> = []
+let posChange: Record<number,{ prev: Vec2; curr: Vec2 }> = [];
+
+
+const simState: Record<number, {
+  truePos: Vec2;
+  velocity: Vec2;
+  ekf: GlobalTransformEKF;
+}> = {};
 
 export function runEKFStep(
   ekfMap: Record<number, GlobalTransformEKF>,
@@ -315,10 +392,21 @@ export function runEKFStep(
 
       const ekf = ekfMap[node.nodeId];
 
+      globalDt = dt;
       ekf.predict(dt);
 
       const enu = gpsToLocal({ lat: node.lat, lng: node.lng }, { lat: originLat, lng: originLng });
 
+      if (!posChange[node.nodeId]){
+        posChange[node.nodeId] = {
+          prev: {x:0,y:0}, 
+          curr: enu
+        };
+      } else {
+        posChange[node.nodeId].prev = posChange[node.nodeId].curr
+        posChange[node.nodeId].curr = enu
+      }
+      
       ekf.update(enu);
 
       const latLng = enuToLatLng(
@@ -339,7 +427,66 @@ export function runEKFStep(
   renderLocations = locations; 
   renderEKF = ekfMap;
   renderOrigin = { lat: originLat, lng: originLng }
-  console.log(locations, ekfMap)
+
+    // 🔊 Gaussian noise
+  function gaussianNoise(std: number) {
+    return std * Math.sqrt(-2 * Math.log(Math.random())) * Math.cos(2 * Math.PI * Math.random());
+  }
+
+
+  function generatePos (nodeId: number, noise: number) {
+
+    const ogGPS = gpsToLocal({ lat: renderLocations[nodeId].lat, lng: renderLocations[nodeId].lng } , renderOrigin)
+    return {
+      x: ogGPS.x + gaussianNoise(noise),
+      y: ogGPS.y + gaussianNoise(noise)
+    };
+  }
+
+  //simulate + EKF per node
+  for (const node of renderLocations) {
+    if (!simState[node.nodeId]) {
+      simState[node.nodeId] = {
+        truePos: { x: generatePos(node.nodeId-1, 10).x, y: generatePos(node.nodeId-1, 10).y }, //{ x: 1 * Math.cos(0.2 * t + node.nodeId), y: 1 * Math.sin(0.2 * t + node.nodeId) }
+        velocity: {
+          x: renderEKF[node.nodeId].x[2],
+          y: renderEKF[node.nodeId].x[3]
+        },
+        ekf: renderEKF[node.nodeId]
+      };
+    }
+
+    const sim = simState[node.nodeId];
+
+
+    const a1 = posChange[node.nodeId].curr.x - posChange[node.nodeId].prev.x
+    const a2 = posChange[node.nodeId].curr.y - posChange[node.nodeId].prev.y
+    sim.truePos.x += a1 + gaussianNoise(1)
+    sim.truePos.y += a2 + gaussianNoise(1)
+  
+    // Noise modeling: regular noise, small continuous bias, and rare extreme spikes
+    const gps = {
+      x: sim.truePos.x,
+      y: sim.truePos.y
+    };
+
+    sim.ekf.predict(globalDt);
+    sim.ekf.update(gps);
+
+
+    renderTrue[node.nodeId] = {x: gps.x, y: gps.y};
+   
+
+    (node as any)._sim = {
+      true: { ...sim.truePos },
+      gps,
+      ekf: {
+        x: a1,
+        y: a2
+      }
+    };
+  }
+  
 }
 
 
@@ -370,6 +517,11 @@ export const EKFCanvas: React.FC = () => {
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
   const lastMouse = useRef({ x: 0, y: 0 });
+
+  const [showRMSE, setShowRMSE] = useState(false);
+
+  const rmseHistoryRef = useRef<{ kalman: number; gps: number }[]>([]);
+
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -403,98 +555,151 @@ export const EKFCanvas: React.FC = () => {
     window.addEventListener("mousemove", handleMouseMove);
     window.addEventListener("mouseup", handleMouseUp);
 
-    return (
-
-      
-    ) => {
-      <div>
-        asd
-      </div>
+    return () => {
       canvas.removeEventListener("wheel", handleWheel);
       canvas.removeEventListener("mousedown", handleMouseDown);
       window.removeEventListener("mousemove", handleMouseMove);
       window.removeEventListener("mouseup", handleMouseUp);
-      
     };
   }, [isDragging]);
 
-useEffect(() => {
-  const canvas = canvasRef.current;
-  if (!canvas) return;
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
 
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
 
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  if (!renderLocations.length) return;
+    if (!renderLocations.length) return;
 
-  let allPoints: Vec2[] = [];
+    let allPoints: Vec2[] = [];
 
-  for (const node of renderLocations) {
-    const gps = gpsToLocal(
-      { lat: node.lat, lng: node.lng },
-      renderOrigin
-    );
+    for (const node of renderLocations) {
+      const sim = (node as any)._sim;
+      if (!sim) continue;
 
-    const kalman = gpsToLocal(
-      { lat: node.kalmanLat, lng: node.kalmanLng },
-      renderOrigin
-    );
+      allPoints.push(renderTrue[node.nodeId]);
+    }
 
-    allPoints.push(gps, kalman);
-  }
+    for (const node of renderLocations) { 
+      const gps = gpsToLocal( { lat: node.lat, lng: node.lng }, renderOrigin ); 
 
-  const center = {
-    x: allPoints.reduce((sum, p) => sum + p.x, 0) / allPoints.length,
-    y: allPoints.reduce((sum, p) => sum + p.y, 0) / allPoints.length,
-  };
+      const kalman = gpsToLocal( { lat: node.kalmanLat, lng: node.kalmanLng }, renderOrigin ); 
 
-  const canvasCenter = {
-    x: canvas.width / 2,
-    y: canvas.height / 2,
-  };
+      allPoints.push(gps, kalman); 
+    }
 
-  const toScreen = (p: Vec2) => ({
-    x: canvasCenter.x + (p.x - center.x) * zoom + pan.x,
-    y: canvasCenter.y - (p.y - center.y) * zoom + pan.y,
-  });
+   const center = { 
+    x: allPoints.reduce((sum, p) => sum + p.x, 0) / allPoints.length, 
+    y: allPoints.reduce((sum, p) => sum + p.y, 0) / allPoints.length, 
+      };
 
-  for (const node of renderLocations) {
-    const gps = gpsToLocal(
-      { lat: node.lat, lng: node.lng },
-      renderOrigin
-    );
+    const canvasCenter = {
+      x: canvas.width / 2,
+      y: canvas.height / 2,
+    };
 
-    const kalman = gpsToLocal(
-      { lat: node.kalmanLat, lng: node.kalmanLng },
-      renderOrigin
-    );
+    const toScreen = (p: Vec2) => ({
+      x: canvasCenter.x + (p.x - center.x) * zoom + pan.x,
+      y: canvasCenter.y - (p.y - center.y) * zoom + pan.y,
+    });
 
-    const gpsScreen = toScreen(gps);
-    const kalmanScreen = toScreen(kalman);
+    for (const node of renderLocations) {
+      const sim = (node as any)._sim;
+      if (!sim) continue;
 
-    //GPS
-    ctx.fillStyle = "blue";
-    ctx.beginPath();
-    ctx.arc(gpsScreen.x, gpsScreen.y, 5, 0, Math.PI * 2);
-    ctx.fill();
+      let sumSqKalman = 0;
+      let sumSqGPS = 0;
+      let count = 0;
 
-    //Kalman
-    ctx.fillStyle = "green";
-    ctx.beginPath();
-    ctx.arc(kalmanScreen.x, kalmanScreen.y, 5, 0, Math.PI * 2);
-    ctx.fill();
+      for (const node of renderLocations) {
+        const sim = (node as any)._sim;
+        if (!sim) continue;
 
-    //Line
-    ctx.strokeStyle = "red";
-    ctx.beginPath();
-    ctx.moveTo(kalmanScreen.x, kalmanScreen.y);
-    ctx.lineTo(gpsScreen.x, gpsScreen.y);
-    ctx.stroke();
-  }
+        const gps = gpsToLocal( { lat: node.lat, lng: node.lng }, renderOrigin ); 
 
-}, [zoom, pan, renderLocations]);
+        const kalman = gpsToLocal( { lat: node.kalmanLat, lng: node.kalmanLng }, renderOrigin ); 
+
+        const dxK = renderTrue[node.nodeId].x - kalman.x;
+        const dyK = renderTrue[node.nodeId].y - kalman.y;
+
+        const dxG = renderTrue[node.nodeId].x - gps.x;
+        const dyG = renderTrue[node.nodeId].y - gps.y;
+
+        sumSqKalman += dxK * dxK + dyK * dyK;
+        sumSqGPS += dxG * dxG + dyG * dyG;
+
+        count++;
+      }
+
+      if (count > 0) {
+        const rmseKalman = Math.sqrt(sumSqKalman / count);
+        const rmseGPS = Math.sqrt(sumSqGPS / count);
+
+        rmseHistoryRef.current.push({
+          kalman: rmseKalman,
+          gps: rmseGPS
+        });
+
+        if (rmseHistoryRef.current.length > 300) {
+          rmseHistoryRef.current.shift();
+        }
+      }
+
+      const gps = gpsToLocal( { lat: node.lat, lng: node.lng }, renderOrigin );
+      const kalman = gpsToLocal( { lat: node.kalmanLat, lng: node.kalmanLng }, renderOrigin );
+
+      const t = toScreen(sim.true);
+      const g = toScreen(gps);
+      const k = toScreen(kalman);
+
+      // ⚪ truth
+      ctx.fillStyle = "white";
+      ctx.beginPath();
+      ctx.arc(t.x, t.y, 4, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = "white";
+      ctx.font = "12px monospace";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+
+      ctx.fillText(
+        `${node.nodeId}`,
+        t.x - 13,
+        t.y
+      );
+
+      // 🔵 GPS
+      ctx.fillStyle = "blue";
+      ctx.beginPath();
+      ctx.arc(g.x, g.y, 4, 0, Math.PI * 2);
+      ctx.fill();
+
+      // 🟢 EKF
+      ctx.fillStyle = "green";
+      ctx.beginPath();
+      ctx.arc(k.x, k.y, 4, 0, Math.PI * 2);
+      ctx.fill();
+
+      // 🔴 GPS error
+      ctx.strokeStyle = "red";
+      ctx.beginPath();
+      ctx.moveTo(t.x, t.y);
+      ctx.lineTo(g.x, g.y);
+      ctx.stroke();
+
+      // 🟡 EKF error
+      ctx.strokeStyle = "yellow";
+      ctx.beginPath();
+      ctx.moveTo(t.x, t.y);
+      ctx.lineTo(k.x, k.y);
+      ctx.stroke();
+    }
+
+  }, [zoom, pan, renderLocations]);
   const errorHistoryRef = useRef<Record<number, number[]>>({});
   const styles = {
       container: {
@@ -602,6 +807,29 @@ useEffect(() => {
             <NotebookPen size={12} /> Set N
           </button>
         </div>
+         <div style={{ display: "flex", flexDirection: "column", gap: "4px", fontSize: "16px" }}>
+          <span>Current noise std: {sTD} </span>
+          <button
+            style={{
+              ...styles.btn,
+              backgroundColor: "transparent",
+              color: "#f1f5f9",
+              width: "auto"
+            }} onClick={()=>handleSetSTD()}>
+            <NotebookPen size={12} /> Set STD
+          </button>
+        </div>
+        <button
+            onClick={() => setShowRMSE(s => !s)}
+            style={{
+              position: "absolute",
+              top: 10,
+              right: 10,
+              zIndex: 10
+            }}
+          >
+            Toggle RMSE
+          </button>
       </div>
         <div
         style={{
@@ -638,8 +866,8 @@ useEffect(() => {
               if (!renderEKF) return null;
 
               const origin = {
-                lat: renderLocations[0].lat,
-                lng: renderLocations[0].lng,
+                lat: renderOrigin.lat,
+                lng: renderOrigin.lng,
               };
 
               const gps = gpsToLocal(
@@ -651,10 +879,24 @@ useEffect(() => {
                 { lat: node.kalmanLat, lng: node.kalmanLng },
                 origin
               );
+             
 
-              const dx = gps.x - kalman.x;
-              const dy = gps.y - kalman.y;
-              const dist = Math.sqrt(dx * dx + dy * dy);
+  
+              let dx = 0; let dy = 0; let dist = 0;
+              let dx2 = 0; let dy2 = 0; let dist2 = 0;
+              let trueX = 0; let trueY = 0;
+
+              const truePos = renderTrue[node.nodeId]
+              if (truePos) {
+                trueX = truePos.x; trueY = truePos.y
+                dx = truePos.x - gps.x;
+                dy = truePos.y - gps.y;
+                dx2 = truePos.x - kalman.x;
+                dy2 = truePos.y - kalman.y;
+                }
+
+              dist = Math.sqrt(dx * dx + dy * dy);
+              dist2 = Math.sqrt(dx2 * dx2 + dy2 * dy2);
 
               if (!errorHistoryRef.current[node.nodeId]) {
                 errorHistoryRef.current[node.nodeId] = [];
@@ -701,32 +943,113 @@ useEffect(() => {
                     <div>
                       ({gps.x.toFixed(1)}, {gps.y.toFixed(1)})
                     </div>
-
                     Kalman:
                     <div>
                       ({kalman.x.toFixed(1)}, {kalman.y.toFixed(1)})
                     </div>
+                    True Position:
+                    <div>
+                      ({trueX.toFixed(1)}, {trueY.toFixed(1)})
+                    </div> 
                   </div>
+                  <div style={{ fontSize: "13px", color: "#adbdd3", marginTop: "5px" }}>GPS diff</div>
                   <div
                     style={{
                       marginTop: "6px",
                       fontWeight: "bold",
                       color,
-                    }}
-                  >
-                    Δ {dist.toFixed(1)} m
+                    }}>Δ {dist.toFixed(1)} m
                   </div>
-                  <svg width="100%" height="50" style={{ marginTop: "6px" }}>
-                    <polyline
-                      fill="none"
-                      stroke="#38bdf8"
-                      strokeWidth="2"
-                      points={points}
-                    />
-                  </svg>
+                   <div style={{ fontSize: "13px", color: "#adbdd3", marginTop: "5px" }}>Kalman diff</div>
+                  <div
+                    style={{
+                      marginTop: "6px",
+                      fontWeight: "bold",
+                      color,
+                    }}>Δ {dist2.toFixed(1)} m
+                  </div>
                 </div>
               );
             })}
+            {showRMSE && (
+            <div
+              style={{
+                position: "absolute",
+                bottom: 10,
+                right: 10,
+                width: 300,
+                height: 150,
+                background: "rgba(0,0,0,0.8)",
+                border: "1px solid #444",
+                padding: 8
+              }}
+            >
+            <canvas
+              width={280}
+              height={120}
+              ref={(canvas) => {
+                if (!canvas) return;
+
+                const ctx = canvas.getContext("2d");
+                if (!ctx) return;
+
+                const data = rmseHistoryRef.current;
+                if (!data.length) return;
+
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                // 🔥 correct max across BOTH series
+                const max = Math.max(
+                  ...data.map(d => Math.max(d.kalman, d.gps)),
+                  1
+                );
+
+                // 🔵 GPS line
+                ctx.strokeStyle = "blue";
+                ctx.beginPath();
+
+                data.forEach((d, i) => {
+                  const x = (i / data.length) * canvas.width;
+                  const y = canvas.height - (d.gps / max) * canvas.height;
+
+                  if (i === 0) ctx.moveTo(x, y);
+                  else ctx.lineTo(x, y);
+                });
+
+                ctx.stroke();
+
+                // 🟢 Kalman line
+                ctx.strokeStyle = "lime";
+                ctx.beginPath();
+
+                data.forEach((d, i) => {
+                  const x = (i / data.length) * canvas.width;
+                  const y = canvas.height - (d.kalman / max) * canvas.height;
+
+                  if (i === 0) ctx.moveTo(x, y);
+                  else ctx.lineTo(x, y);
+                });
+
+                ctx.stroke();
+
+                // 📊 labels
+                const last = data[data.length - 1];
+
+                ctx.fillStyle = "white";
+                ctx.font = "10px monospace";
+
+                ctx.fillText(`GPS: ${last.gps.toFixed(2)} m`, 5, 12);
+                ctx.fillText(`EKF: ${last.kalman.toFixed(2)} m`, 5, 24);
+
+                // optional: improvement %
+                if (last.gps > 0) {
+                  const improvement = (1 - last.kalman / last.gps) * 100;
+                  ctx.fillText(`Δ: ${improvement.toFixed(1)}%`, 5, 36);
+                }
+              }}
+            />
+            </div>
+            )}
           </div>
         </div>
       </div>

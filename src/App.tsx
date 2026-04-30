@@ -34,7 +34,6 @@ import { getLatestPerNode, runEKFStep, NodeLocation, GlobalTransformEKF, buildRe
 import { number } from "mathjs";
 
 const PIXELS_PER_METER = 20;
-
 // Convergence tracker instance (cloud backend)
 const cloudConvergenceTracker = createRollingMeanConvergenceTracker({
 	samplePeriodMs: 1000,
@@ -293,6 +292,7 @@ const App: React.FC = () => {
 	const [packetFilter, setPacketFilter] = useState<string>("ALL");
 	const [tick, setTick] = useState(0);
 	const [isPlaying, setIsPlaying] = useState(true);
+	let time = 0
 
 	/* onst ekfRef = useRef<GlobalTransformEKF | null>(null);
 	useEffect(() => {
@@ -588,20 +588,20 @@ const App: React.FC = () => {
 
 			let dt = 0;
 
-			if (lastTimeRef.current !== null) {
-				dt = (now - lastTimeRef.current) / 1000;
-			}
-
 			lastTimeRef.current = now;
-
-			runEKFStep(
-				ekfMapRef.current,
-				locations, 
-				dt,
-				origin.lat,
-				origin.lng, 
-			);
-			//console.log(locations)
+			if ((performance.now() - time) > 1100  ) {
+			
+			time = performance.now()
+			dt = performance.now() - time
+				runEKFStep(
+					ekfMapRef.current,
+					locations, 
+					dt,
+					origin.lat,
+					origin.lng, 
+				);
+			}
+			
 		}
 	},
 	[],
