@@ -7,12 +7,13 @@ import {
 export function getLatestPerNode(data: FusedRecord[]): Record<number, any> {
     const latest: Record<number, FusedRecord> = {};
     let origin =  undefined;
+    let originNodeId = undefined;
 
     for (const item of data) {
         const existing = latest[item.nodeId];
 
         if (!existing || item.timestamp > existing.timestamp) {
-        latest[item.nodeId] = item;
+          latest[item.nodeId] = item;
         }
     }
 
@@ -25,12 +26,16 @@ export function getLatestPerNode(data: FusedRecord[]): Record<number, any> {
     for (const item of data){
         if(!item.position.lat){break}
         origin = item.position
+        originNodeId = item.nodeId
     }
 
-    return [{positions, origin}];
+    return [{positions, origin, originNodeId}];
 }
 
-let R = 25; let N = 0.01; let globalDt: number; let sTD = 5;
+let R = 25; let N = 1; let globalDt: number; let sTD = 5; 
+
+let offSetx = gaussianNoise(sTD); 
+let offSety = gaussianNoise(sTD);
 
 const handleSetR = (EKF: Record<number, GlobalTransformEKF>) => {
   const r = prompt("Enter how noisy we THINK the GPS is", "The higher, the noiser (Square the number)");
@@ -54,8 +59,9 @@ const handleSetNoise = (EKF: Record<number, GlobalTransformEKF>) => {
 const handleSetSTD = () => {
  const std = prompt("Enter how large the std for noise ACTUALLY is", "Change BEFORE initialization");
   if (std){
-    N = parseFloat(std)
-    sTD = N;
+    sTD = parseFloat(std)
+    offSetx = gaussianNoise(sTD)
+    offSety = gaussianNoise(sTD)
   }
 }
 
@@ -156,12 +162,19 @@ function scaleMatrix(A: number[][], scalar: number): number[][] {
   return A.map(row => row.map(v => v * scalar));
 }
 
-function cloneMatrix(m: number[][]): number[][] {
+function cloneMatrixQ(m: number[][]): number[][] {
   return [
     [m[0][0], m[0][1], m[0][2], m[0][3]],
     [m[1][0], m[1][1], m[1][2], m[1][3]],
     [m[2][0], m[2][1], m[2][2], m[2][3]],
     [m[3][0], m[3][1], m[3][2], m[3][3]]
+  ];
+}
+
+function cloneMatrixR(m: number[][]): number[][] {
+  return [
+    [m[0][0], m[0][1]],
+    [m[1][0], m[1][1]]
   ];
 }
 
@@ -191,20 +204,37 @@ export class GlobalTransformEKF {
   R: number[][];
 
   Q0: number[][];
+  R0: number[][];
   nis_ema: number;
-
+  qScale: number;
+  innovCovEMA: number[][];
   constructor() {
+    // [bias_x, bias_y, vel_x, vel_y]
     this.x = [0, 0, 0, 0];
 
     this.P = scaleMatrix(identity(4), 100);
+
+    /* this.Q = [
+      [0.01, 0, 0, 0],
+      [0, 0.01, 0, 0],
+      [0, 0, 0.1, 0],
+      [0, 0, 0, 0.1]
+    ]; */
     this.Q = scaleMatrix(identity(4), N);
 
     this.R = [
       [R, 0],
-      [0, R],
+      [0, R]
     ];
-    this.Q0 = cloneMatrix(this.Q);
+
+    this.Q0 = cloneMatrixQ(this.Q);
+    this.R0 = cloneMatrixR(this.R);
     this.nis_ema = 2.0;
+    this.qScale = 1.0;
+    this.innovCovEMA = [
+      [0, 0],
+      [0, 0]
+    ];
   }
 
   updateQ(Noise: number) {
@@ -219,20 +249,19 @@ export class GlobalTransformEKF {
   }
 
   predict(dt: number) {
-    const [px, py, vx, vy] = this.x;
-
-    this.x[0] = px + vx * dt;
-    this.x[1] = py + vy * dt;
-
-   const F = [
+    const F = [
       [1, 0, dt, 0],
       [0, 1, 0, dt],
       [0, 0, 1, 0],
       [0, 0, 0, 1]
     ];
 
-    this.P = add(mul(mul(F, this.P), transpose(F)), this.Q);
+    this.x = mulVec(F, this.x);
 
+    this.P = add(
+      mul(mul(F, this.P), transpose(F)),
+      this.Q
+    );
   }
 
   update(z: { x: number; y: number }) {
@@ -241,7 +270,10 @@ export class GlobalTransformEKF {
       [0, 1, 0, 0]
     ];
 
-    const hx = [this.x[0], this.x[1]];
+    const hx = [
+      this.x[0],
+      this.x[1]
+    ];
 
     const y = [
       z.x - hx[0],
@@ -251,15 +283,53 @@ export class GlobalTransformEKF {
     const S = add(
       mul(mul(H, this.P), transpose(H)),
       this.R
-    )
+    );
+
+    //Adaptive Q and R
+    const yyT = [
+      [y[0] * y[0], y[0] * y[1]],
+      [y[1] * y[0], y[1] * y[1]]
+    ];
+
+    const rBeta = 0.95;
+
+    for (let i = 0; i < 2; i++) {
+      for (let j = 0; j < 2; j++) {
+        this.innovCovEMA[i][j] =
+          rBeta * this.innovCovEMA[i][j] +
+          (1 - rBeta) * yyT[i][j];
+      }
+    }
     
+    const HPHt = mul(
+      mul(H, this.P),
+      transpose(H)
+    );
+
+    let Rest = sub(this.innovCovEMA, HPHt);
+
+    Rest[0][0] = Math.max(Rest[0][0], 1e-4);
+    Rest[1][1] = Math.max(Rest[1][1], 1e-4);
+    Rest[0][1] = 0;
+    Rest[1][0] = 0;
+
+    const rAlpha = 0.98;
+
+    for (let i = 0; i < 2; i++) {
+      for (let j = 0; j < 2; j++) {
+        this.R[i][j] =
+          rAlpha * this.R[i][j] +
+          (1 - rAlpha) * Rest[i][j];
+      }
+    } 
+
     const nis = computeNIS(y, S);
 
     this.nis_ema = 0.9 * this.nis_ema + 0.1 * nis;
 
     // thresholds for 2D
     const lower = 1.0;
-    const upper = 6.0;
+    const upper = 2.0;
 
     let scale = 1.0;
 
@@ -270,15 +340,17 @@ export class GlobalTransformEKF {
     }
 
     scale = Math.max(0.5, Math.min(5.0, scale));
+    this.qScale = 0.995 * this.qScale + 0.005 * scale;
+    this.qScale = Math.max(0.25, Math.min(10.0, this.qScale));
 
-   this.Q = [
-      [this.Q0[0][0] * scale, this.Q0[0][1] * scale, this.Q0[0][2] * scale, this.Q0[0][3] * scale],
-      [this.Q0[1][0] * scale, this.Q0[1][1] * scale, this.Q0[1][2] * scale, this.Q0[1][3] * scale],
-      [this.Q0[2][0] * scale, this.Q0[2][1] * scale, this.Q0[2][2] * scale, this.Q0[2][3] * scale],
-      [this.Q0[3][0] * scale, this.Q0[3][1] * scale, this.Q0[3][2] * scale, this.Q0[3][3] * scale]
-    ];
-    N = this.Q0[0][0];
-    console.log(N, this.Q0[0][0], scale)
+   /*  for (let i = 0; i < 4; i++) {
+      for (let j = 0; j < 4; j++) {
+        this.Q[i][j] = this.Q0[i][j] * this.qScale
+      }
+    } */
+    
+    //console.log(this.Q[0][0], this.R[0][0])
+    N = this.Q[0][0]; R = this.R[0][0];
 
     const det = S[0][0] * S[1][1] - S[0][1] * S[1][0];
     
@@ -291,18 +363,27 @@ export class GlobalTransformEKF {
       mul(this.P, transpose(H)),
       inverse2x2(S)
     );
-   
+
     const dx = mulVec(K, y);
-   
 
     for (let i = 0; i < 4; i++) {
       this.x[i] += dx[i];
     }
 
     const I = identity(4);
-    
-    this.P = mul(sub(I, mul(K, H)), this.P);
-  } 
+
+    this.P = mul(
+      sub(I, mul(K, H)),
+      this.P
+    );
+  }
+
+  getBias(): Vec2 {
+    return {
+      x: this.x[0],
+      y: this.x[1]
+    };
+  }
 }
 
 type LatLng = { lat: number; lng: number };
@@ -324,8 +405,8 @@ function gpsToLocal( point: LatLng, origin: LatLng ): Vec2 {
   const metersPerDegLng = 111_320 * Math.cos(latRad);
 
   return {
-    x: dLat * metersPerDegLng,
-    y: dLng * metersPerDegLat,
+    x: dLat * metersPerDegLat,
+    y: dLng * metersPerDegLng,
   };
 }
 
@@ -369,10 +450,13 @@ let renderOrigin: LatLng;
 let renderTrue: Record<number, {x: number, y: number}> = []
 let posChange: Record<number,{ prev: Vec2; curr: Vec2 }> = [];
 
+function gaussianNoise(std: number) {
+  return std * Math.sqrt(-2 * Math.log(Math.random())) * Math.cos(2 * Math.PI * Math.random());
+}
+
 
 const simState: Record<number, {
   truePos: Vec2;
-  velocity: Vec2;
   ekf: GlobalTransformEKF;
 }> = {};
 
@@ -381,10 +465,78 @@ export function runEKFStep(
   locations: NodeLocation[],
   dt: number,
   originLat: number,
-  originLng: number
+  originLng: number,
+  originNodeId: number
 ){
 
+  if (!ekfMap[0]) {
+    ekfMap[0] = new GlobalTransformEKF();
+  }
+
+  const ekf = ekfMap[0];
+
+  ekf.predict(dt);
+
+  const anchor = locations.find(
+    n => n.nodeId === originNodeId
+  );
+
+  if (!anchor) return;
+
+  const anchorENU = gpsToLocal({ lat: anchor.lat, lng: anchor.lng },{ lat: originLat, lng: originLng });
+
+  let sx = 0;
+  let sy = 0;
+  let count = 0;
+
   for (const node of locations) {
+
+    if (node.nodeId === originNodeId) continue;
+
+    const nodeENU = gpsToLocal({ lat: locations[node.nodeId-1].lat, lng: locations[node.nodeId-1].lng },{ lat: originLat, lng: originLng });
+    console.log(node.nodeId)
+    sx += nodeENU.x - anchorENU.x;
+    sy += nodeENU.y - anchorENU.y;
+
+    count++;
+}
+
+  if (count > 0) {
+    ekf.update({ x: sx / count, y: sy / count });
+  }
+
+  const bias = ekf.getBias();
+
+  for (const node of locations) {
+
+    if (node.lat === undefined || node.lng === undefined) continue;
+
+    const measuredENU = gpsToLocal({lat: node.lat, lng: node.lng},{lat: originLat, lng: originLng});
+
+    if (!posChange[node.nodeId]){
+        posChange[node.nodeId] = {
+          prev: {x:0,y:0}, 
+          curr: measuredENU
+        };
+      } else {
+        posChange[node.nodeId].prev = posChange[node.nodeId].curr
+        posChange[node.nodeId].curr = measuredENU
+      }
+
+    const correctedENU = {
+      x: measuredENU.x + bias.x,
+      y: measuredENU.y + bias.y
+    };
+
+    const correctedLatLng = enuToLatLng(correctedENU, { lat: originLat, lng: originLng });
+
+    node.kalmanLat = correctedLatLng.lat;
+    node.kalmanLng = correctedLatLng.lng;
+  }
+
+  renderLocations = locations;
+  renderOrigin = { lat: originLat, lng: originLng };
+/*   for (const node of locations) {
     if(node.lat) {
       if (!ekfMap[node.nodeId]) {
       ekfMap[node.nodeId] = new GlobalTransformEKF();
@@ -422,36 +574,30 @@ export function runEKFStep(
         lng: node.lng
       };
     }
-  }
+  }  */
+
 
   renderLocations = locations; 
   renderEKF = ekfMap;
   renderOrigin = { lat: originLat, lng: originLng }
 
-    // 🔊 Gaussian noise
-  function gaussianNoise(std: number) {
-    return std * Math.sqrt(-2 * Math.log(Math.random())) * Math.cos(2 * Math.PI * Math.random());
-  }
 
 
-  function generatePos (nodeId: number, noise: number) {
-
+  function generatePos (nodeId: number) {
     const ogGPS = gpsToLocal({ lat: renderLocations[nodeId].lat, lng: renderLocations[nodeId].lng } , renderOrigin)
     return {
-      x: ogGPS.x + gaussianNoise(noise),
-      y: ogGPS.y + gaussianNoise(noise)
+      x: ogGPS.x + offSetx,
+      y: ogGPS.y + offSety
     };
   }
 
   //simulate + EKF per node
   for (const node of renderLocations) {
+    const nowPos = generatePos(node.nodeId-1)
     if (!simState[node.nodeId]) {
       simState[node.nodeId] = {
-        truePos: { x: generatePos(node.nodeId-1, 10).x, y: generatePos(node.nodeId-1, 10).y }, //{ x: 1 * Math.cos(0.2 * t + node.nodeId), y: 1 * Math.sin(0.2 * t + node.nodeId) }
-        velocity: {
-          x: renderEKF[node.nodeId].x[2],
-          y: renderEKF[node.nodeId].x[3]
-        },
+        truePos: { x: nowPos.x, y: nowPos.y }, //{ x: 1 * Math.cos(0.2 * t + node.nodeId), y: 1 * Math.sin(0.2 * t + node.nodeId) }
+  
         ekf: renderEKF[node.nodeId]
       };
     }
@@ -461,22 +607,17 @@ export function runEKFStep(
 
     const a1 = posChange[node.nodeId].curr.x - posChange[node.nodeId].prev.x
     const a2 = posChange[node.nodeId].curr.y - posChange[node.nodeId].prev.y
-    sim.truePos.x += a1 + gaussianNoise(1)
-    sim.truePos.y += a2 + gaussianNoise(1)
+
+    sim.truePos.x += a1;
+    sim.truePos.y += a2;
   
-    // Noise modeling: regular noise, small continuous bias, and rare extreme spikes
     const gps = {
       x: sim.truePos.x,
       y: sim.truePos.y
     };
 
-    sim.ekf.predict(globalDt);
-    sim.ekf.update(gps);
-
-
     renderTrue[node.nodeId] = {x: gps.x, y: gps.y};
    
-
     (node as any)._sim = {
       true: { ...sim.truePos },
       gps,

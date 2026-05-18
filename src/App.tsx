@@ -570,40 +570,35 @@ const App: React.FC = () => {
 			}
 
 		const nodeLocations: Record<string, NodeLocation> = (getLatestPerNode(baselineCloud.db)[0].positions)
-		const origin = (getLatestPerNode(baselineCloud.db)[0].origin)
+		const originNode = (getLatestPerNode(baselineCloud.db)[0])
+		console.log(originNode.originNodeId)
 
-			if(origin){
-			let locations: NodeLocation[] = [];
-			for (const node of Object.entries(nodeLocations)) {
-				locations.push({nodeId: parseInt(node[0]), kalmanLat: node[1].kalmanLat, kalmanLng: node[1].kalmanLng, lat: node[1].lat, lng: node[1].lng})
+			if(originNode.origin){
+				let locations: NodeLocation[] = [];
+				for (const node of Object.entries(nodeLocations)) {
+					locations.push({nodeId: parseInt(node[0]), kalmanLat: node[1].kalmanLat, kalmanLng: node[1].kalmanLng, lat: node[1].lat, lng: node[1].lng})
+				}
+
+				const now = performance.now();
+
+				let dt = 0;
+
+				lastTimeRef.current = now;
+				if ((performance.now() - time) > 1100  ) {
+				
+				time = performance.now()
+				dt = performance.now() - time
+					runEKFStep(
+						ekfMapRef.current,
+						locations, 
+						dt,
+						originNode.origin.lat,
+						originNode.origin.lng,
+						originNode.originNodeId 
+					);
+				}
 			}
-
-			const relativePositions = buildRelativePositions(
-				locations,
-				origin.lat, 
-				origin.lng
-				);
-
-			const now = performance.now();
-
-			let dt = 0;
-
-			lastTimeRef.current = now;
-			if ((performance.now() - time) > 1100  ) {
-			
-			time = performance.now()
-			dt = performance.now() - time
-				runEKFStep(
-					ekfMapRef.current,
-					locations, 
-					dt,
-					origin.lat,
-					origin.lng, 
-				);
-			}
-			
-		}
-	},
+		},
 	[],
 	);
 
@@ -1312,7 +1307,7 @@ const App: React.FC = () => {
 					<div style={styles.panel}>
 						<span style={styles.label}>Kalman Filter</span>
 						<button
-							style={{ ...styles.btn, backgroundColor: showCloudLogs ? "#3b82f6" : "#334155" }}
+							style={{ ...styles.btn, backgroundColor: showFilterConfiguration ? "#3b82f6" : "#334155" }}
 							onClick={() => setShowFilterConfiguration(!showFilterConfiguration)}
 						>
 							<Wrench size={14} /> Filter Configuration
