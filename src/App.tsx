@@ -30,7 +30,7 @@ import { NodeConfig, NodeRole, NodeType, Packet, PacketType, VisualPacket, Wall 
 import { SimulationRunner } from "./engine/SimulationRunner";
 import type { FirmwareConfig, NeighborObservation } from "./firmware/types";
 import { createRollingMeanConvergenceTracker } from "./experiments/lib/convergence";
-import { getLatestPerNode, runEKFStep, NodeLocation, GlobalTransformEKF, buildRelativePositions, EKFCanvas } from "./kalman"
+import { getLatestPerNode, NodeLocation, updateEKFCanvasState, buildRelativePositions, EKFCanvas } from "./kalman"
 import { number } from "mathjs";
 
 const PIXELS_PER_METER = 20;
@@ -292,19 +292,7 @@ const App: React.FC = () => {
 	const [packetFilter, setPacketFilter] = useState<string>("ALL");
 	const [tick, setTick] = useState(0);
 	const [isPlaying, setIsPlaying] = useState(true);
-	let time = 0
-
-	/* onst ekfRef = useRef<GlobalTransformEKF | null>(null);
-	useEffect(() => {
-		ekfRef.current = new GlobalTransformEKF();
-		}, []);
-
-	if (!ekfRef.current) {
-	ekfRef.current = new GlobalTransformEKF();
-	}
-
-	const ekf = ekfRef.current; */
-	const ekfMapRef = useRef<Record<number, GlobalTransformEKF>>({});
+	const ekfTimeRef = useRef<number>(0);
 
 	const exportSnifferPackets = useCallback(() => {
 		const filtered = packets.filter((p) => packetFilter === "ALL" || p.type === packetFilter);
@@ -569,37 +557,33 @@ const App: React.FC = () => {
 				setCloudEventsBaseline([...baselineCloud.getEvents()]);
 			}
 
-		const nodeLocations: Record<string, NodeLocation> = (getLatestPerNode(baselineCloud.db)[0].positions)
-		const originNode = (getLatestPerNode(baselineCloud.db)[0])
-		console.log(originNode.originNodeId)
+			const nodeLocations: Record<string, NodeLocation> = (getLatestPerNode(baselineCloud.db)[0].positions)
+			const originNode = (getLatestPerNode(baselineCloud.db)[0])
 
-			if(originNode.origin){
+			if (originNode.origin) {
 				let locations: NodeLocation[] = [];
 				for (const node of Object.entries(nodeLocations)) {
-					locations.push({nodeId: parseInt(node[0]), kalmanLat: node[1].kalmanLat, kalmanLng: node[1].kalmanLng, lat: node[1].lat, lng: node[1].lng})
+					locations.push({
+						nodeId: parseInt(node[0]), 
+						kalmanLat: node[1].kalmanLat, 
+						kalmanLng: node[1].kalmanLng, 
+						lat: node[1].lat, 
+						lng: node[1].lng
+					})
 				}
 
 				const now = performance.now();
-
-				let dt = 0;
-
-				lastTimeRef.current = now;
-				if ((performance.now() - time) > 1100  ) {
-				
-				time = performance.now()
-				dt = performance.now() - time
-					runEKFStep(
-						ekfMapRef.current,
+				if ((now - ekfTimeRef.current) > 1100) {
+					ekfTimeRef.current = now;
+					updateEKFCanvasState(
 						locations, 
-						dt,
 						originNode.origin.lat,
-						originNode.origin.lng,
-						originNode.originNodeId 
+						originNode.origin.lng
 					);
 				}
 			}
 		},
-	[],
+		[],
 	);
 
 	const gameLoop = useCallback(

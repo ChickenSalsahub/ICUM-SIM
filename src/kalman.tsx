@@ -460,58 +460,26 @@ const simState: Record<number, {
   ekf: GlobalTransformEKF;
 }> = {};
 
-export function runEKFStep(
-  ekfMap: Record<number, GlobalTransformEKF>,
+export function updateEKFCanvasState(
   locations: NodeLocation[],
-  dt: number,
   originLat: number,
-  originLng: number,
-  originNodeId: number
+  originLng: number
 ){
+  renderLocations = locations;
+  renderOrigin = { lat: originLat, lng: originLng };
 
-  if (!ekfMap[0]) {
-    ekfMap[0] = new GlobalTransformEKF();
+  function generatePos(nodeId: number) {
+    const ogGPS = gpsToLocal({ lat: renderLocations[nodeId]?.lat || 0, lng: renderLocations[nodeId]?.lng || 0 }, renderOrigin);
+    return {
+      x: ogGPS.x + offSetx,
+      y: ogGPS.y + offSety
+    };
   }
 
-  const ekf = ekfMap[0];
-
-  ekf.predict(dt);
-
-  const anchor = locations.find(
-    n => n.nodeId === originNodeId
-  );
-
-  if (!anchor) return;
-
-  const anchorENU = gpsToLocal({ lat: anchor.lat, lng: anchor.lng },{ lat: originLat, lng: originLng });
-
-  let sx = 0;
-  let sy = 0;
-  let count = 0;
-
   for (const node of locations) {
-
-    if (node.nodeId === originNodeId) continue;
-
-    const nodeENU = gpsToLocal({ lat: locations[node.nodeId-1].lat, lng: locations[node.nodeId-1].lng },{ lat: originLat, lng: originLng });
-    console.log(node.nodeId)
-    sx += nodeENU.x - anchorENU.x;
-    sy += nodeENU.y - anchorENU.y;
-
-    count++;
-}
-
-  if (count > 0) {
-    ekf.update({ x: sx / count, y: sy / count });
-  }
-
-  const bias = ekf.getBias();
-
-  for (const node of locations) {
-
     if (node.lat === undefined || node.lng === undefined) continue;
 
-    const measuredENU = gpsToLocal({lat: node.lat, lng: node.lng},{lat: originLat, lng: originLng});
+    const measuredENU = gpsToLocal({lat: node.lat, lng: node.lng}, {lat: originLat, lng: originLng});
 
     if (!posChange[node.nodeId]){
         posChange[node.nodeId] = {
@@ -523,90 +491,17 @@ export function runEKFStep(
         posChange[node.nodeId].curr = measuredENU
       }
 
-    const correctedENU = {
-      x: measuredENU.x + bias.x,
-      y: measuredENU.y + bias.y
-    };
-
-    const correctedLatLng = enuToLatLng(correctedENU, { lat: originLat, lng: originLng });
-
-    node.kalmanLat = correctedLatLng.lat;
-    node.kalmanLng = correctedLatLng.lng;
-  }
-
-  renderLocations = locations;
-  renderOrigin = { lat: originLat, lng: originLng };
-/*   for (const node of locations) {
-    if(node.lat) {
-      if (!ekfMap[node.nodeId]) {
-      ekfMap[node.nodeId] = new GlobalTransformEKF();
-      }
-
-      const ekf = ekfMap[node.nodeId];
-
-      globalDt = dt;
-      ekf.predict(dt);
-
-      const enu = gpsToLocal({ lat: node.lat, lng: node.lng }, { lat: originLat, lng: originLng });
-
-      if (!posChange[node.nodeId]){
-        posChange[node.nodeId] = {
-          prev: {x:0,y:0}, 
-          curr: enu
-        };
-      } else {
-        posChange[node.nodeId].prev = posChange[node.nodeId].curr
-        posChange[node.nodeId].curr = enu
-      }
-      
-      ekf.update(enu);
-
-      const latLng = enuToLatLng(
-        { x: ekf.x[0], y: ekf.x[1] },
-        { lat: originLat, lng: originLng }
-      );
-
-      locations[node.nodeId - 1] = {
-        nodeId: node.nodeId,
-        kalmanLat: latLng.lat,
-        kalmanLng: latLng.lng,
-        lat: node.lat,
-        lng: node.lng
-      };
-    }
-  }  */
-
-
-  renderLocations = locations; 
-  renderEKF = ekfMap;
-  renderOrigin = { lat: originLat, lng: originLng }
-
-
-
-  function generatePos (nodeId: number) {
-    const ogGPS = gpsToLocal({ lat: renderLocations[nodeId].lat, lng: renderLocations[nodeId].lng } , renderOrigin)
-    return {
-      x: ogGPS.x + offSetx,
-      y: ogGPS.y + offSety
-    };
-  }
-
-  //simulate + EKF per node
-  for (const node of renderLocations) {
-    const nowPos = generatePos(node.nodeId-1)
+    const nowPos = generatePos(node.nodeId - 1);
     if (!simState[node.nodeId]) {
       simState[node.nodeId] = {
-        truePos: { x: nowPos.x, y: nowPos.y }, //{ x: 1 * Math.cos(0.2 * t + node.nodeId), y: 1 * Math.sin(0.2 * t + node.nodeId) }
-  
-        ekf: renderEKF[node.nodeId]
+        truePos: { x: nowPos.x, y: nowPos.y },
+        ekf: null as any
       };
     }
 
     const sim = simState[node.nodeId];
-
-
-    const a1 = posChange[node.nodeId].curr.x - posChange[node.nodeId].prev.x
-    const a2 = posChange[node.nodeId].curr.y - posChange[node.nodeId].prev.y
+    const a1 = posChange[node.nodeId].curr.x - posChange[node.nodeId].prev.x;
+    const a2 = posChange[node.nodeId].curr.y - posChange[node.nodeId].prev.y;
 
     sim.truePos.x += a1;
     sim.truePos.y += a2;
@@ -627,7 +522,6 @@ export function runEKFStep(
       }
     };
   }
-  
 }
 
 

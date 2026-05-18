@@ -1,4 +1,5 @@
 import { RelativePoseGraph } from "./localization/CooperativeLocalization.ts";
+import { GlobalTransformEKF, gpsToLocal, enuToLatLng } from "./localization/EKF.ts";
 
 export interface CloudBackendOptions {
 	rng?: () => number;
@@ -89,6 +90,10 @@ export class CloudBackend {
 	private lastFusionTime = 0;
 	private lastSeenByNode: Map<number, number> = new Map();
 	private readonly mode: "passive" | "fusion";
+
+	// Global EKF for GPS drift correction
+	private globalEKF: GlobalTransformEKF | null = null;
+	private lastEkfTimeMs: number = 0;
 
 	private readonly opts: Required<Omit<CloudBackendOptions, "rng" | "mode">>;
 
@@ -221,6 +226,10 @@ export class CloudBackend {
 			} else {
 				this.runPassive();
 			}
+			
+			// Run the Global EKF after fusion has produced new node positions
+			this.runGlobalAlignment(currentTime);
+			
 			this.lastFusionTime = currentTime;
 			this.pruneStaleRecords(currentTime);
 			if (this.mode === "fusion") {
@@ -580,5 +589,89 @@ export class CloudBackend {
 		this.eventCounter = 0;
 		this.lastFusionActiveIds.clear();
 		this.lastSeenByNode.clear();
+		this.globalEKF = null;
+		this.lastEkfTimeMs = 0;
+	}
+
+	private runGlobalAlignment(currentTimeMs: number) {
+		// Needs an anchor node (supernode)
+		let anchorNode = this.db.find(r => r.position.lat !== undefined && r.position.lng !== undefined);
+		if (!anchorNode) return;
+		
+		const originLat = anchorNode.position.lat!;
+		const originLng = anchorNode.position.lng!;
+		
+		if (!this.globalEKF) {
+			this.globalEKF = new GlobalTransformEKF();
+			this.lastEkfTimeMs = currentTimeMs;
+		}
+		
+		const dtSeconds = (currentTimeMs - this.lastEkfTimeMs) / 1000.0;
+		if (dtSeconds <= 0) return;
+		this.lastEkfTimeMs = currentTimeMs;
+		
+		this.globalEKF.predict(dtSeconds);
+		
+		const anchorENU = gpsToLocal({ lat: originLat, lng: originLng }, { lat: originLat, lng: originLng });
+		
+		let sx = 0;
+		let sy = 0;
+		let count = 0;
+		
+		// Map nodeIds to their latest records in the DB to form 'locations'
+		const latestRecords = new Map<number, FusedRecord>();
+		for (const record of this.db) {
+			if (!latestRecords.has(record.nodeId)) {
+				latestRecords.set(record.nodeId, record);
+			}
+		}
+		
+		for (const node of latestRecords.values()) {
+			if (node.nodeId === anchorNode.nodeId) continue;
+			if (node.position.lat === undefined || node.position.lng === undefined) continue;
+			
+			const nodeENU = gpsToLocal({ lat: node.position.lat, lng: node.position.lng }, { lat: originLat, lng: originLng });
+			// Node's position given by UWB logic (fusion x/y) vs GPS
+			// In fusion, node.position.x/y is relative.
+			// Wait, node.position.x/y is already fused relative position from the origin!
+			// If anchor is pinned at (anchorX, anchorY), the offset is the difference.
+			// Note: Fusion places anchor at some (x,y), we must translate fusion coords to origin coords.
+			// Note: Fusion places anchor at some (x,y), we must translate fusion coords to origin coords.
+			
+			// Error = (GPS ENU offset) - (UWB offset)
+			// Wait, the original code in kalman.tsx did:
+			// sx += nodeENU.x - anchorENU.x; ... and passed it to ekf.update().
+			// Actually, it passed the AVERAGE of the GPS offsets to the EKF, which means the EKF just tracks the centroid of the GPS vs centroid of UWB.
+			// Wait, if UWB coords are already used as the reference, `kalman.tsx` original logic was:
+			// sx += nodeENU.x - anchorENU.x
+			// Then EKF update: ekf.update({ x: sx / count, y: sy / count })
+			// This means EKF state `x` tracks the GPS drift of the whole constellation relative to anchor!
+			sx += nodeENU.x - anchorENU.x;
+			sy += nodeENU.y - anchorENU.y;
+			count++;
+		}
+		
+		if (count > 0) {
+			this.globalEKF.update({ x: sx / count, y: sy / count });
+		}
+		
+		const bias = this.globalEKF.getBias();
+		
+		for (const node of latestRecords.values()) {
+			if (node.position.lat === undefined || node.position.lng === undefined) continue;
+			
+			const measuredENU = gpsToLocal({ lat: node.position.lat, lng: node.position.lng }, { lat: originLat, lng: originLng });
+			
+			const correctedENU = {
+				x: measuredENU.x + bias.x,
+				y: measuredENU.y + bias.y
+			};
+			
+			const correctedLatLng = enuToLatLng(correctedENU, { lat: originLat, lng: originLng });
+			
+			// Store in db so it's accessible
+			(node.position as any).kalmanLat = correctedLatLng.lat;
+			(node.position as any).kalmanLng = correctedLatLng.lng;
+		}
 	}
 }
