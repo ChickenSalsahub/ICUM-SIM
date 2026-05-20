@@ -5,6 +5,8 @@ import { EXPERIMENT_WORLD_BOUNDS_M } from "./lib/types.ts";
 import { runExperimentAScenariosWithOptions } from "./experiments/experimentA.ts";
 import { runExperimentB, runExperimentBRaw, runExperimentBSummary } from "./experiments/experimentB.ts";
 import { runExperimentCScenarios } from "./experiments/experimentC.ts";
+import { runExperimentKalman } from "./experiments/experimentKalman.ts";
+import { runExperimentKalmanAdaptive } from "./experiments/experimentKalmanAdaptive.ts";
 // import { runExperimentDScenarios } from "./experiments/experimentD.ts";
 // import { runExperimentE } from "./experiments/experimentE.ts";
 
@@ -39,134 +41,35 @@ function txPerNodePerMin(totalTx: number, nodeCount: number, timeSeconds: number
 export function main() {
 	cleanupLegacyOutputs();
 
-	console.log(
-		`World bounds enabled: x=[${EXPERIMENT_WORLD_BOUNDS_M.minX}, ${EXPERIMENT_WORLD_BOUNDS_M.maxX}] y=[${EXPERIMENT_WORLD_BOUNDS_M.minY}, ${EXPERIMENT_WORLD_BOUNDS_M.maxY}]`,
-	);
 
-	// Experiment A: compare baseline periodic vs ETM across a few noise levels.
+
+	console.log("Starting Experiment Kalman...");
 	{
-		const noiseSigmasA = [0, 0.1, 0.5];
-		const allRows: any[] = [];
-
-		for (const uwbNoiseSigma of noiseSigmasA) {
-			const rows = runExperimentAScenariosWithOptions({ uwbNoiseSigma });
-			for (const r of rows) {
-				allRows.push({ ...r, uwbNoiseSigma });
-			}
-		}
-
+		const R = 25;
+		const Q = 1;
+		const std = 10;
+		const n = 5;
+		const rows = runExperimentKalman(R, Q, std, n);
 		writePublicCsv(
-			"experiments_A_all.csv",
-			"scenario,noise_sigma,time_s,baseline_tx_total,baseline_tx_per_node_per_min,baseline_rmse_aligned_m,baseline_mae_aligned_m,icum_tx_total,icum_tx_per_node_per_min,icum_rmse_aligned_m,icum_mae_aligned_m\n",
-			allRows.map((r) =>
-				[
-					r.scenario,
-					r.uwbNoiseSigma,
-					r.timeSeconds,
-					r.baselineTx,
-					txPerNodePerMin(r.baselineTx, 10, r.timeSeconds),
-					r.baselineRmseAligned,
-					r.baselineMaeAligned,
-					r.etmTx,
-					txPerNodePerMin(r.etmTx, 10, r.timeSeconds),
-					r.etmRmseAligned,
-					r.etmMaeAligned,
-				].join(","),
-			),
+			`experiments_kalman.csv`,
+			"time_s,rmse_gps_m,rmse_ekf_m,rmse_ekf_tuned_m,r_untuned,q_untuned,r_tuned,q_tuned,std,n\n",
+			rows.map((r) => [r.timeSeconds, r.rmseGps, r.rmseEkf, r.rmseEkfTuned, R, Q, std*std, 0.01, std, n].join(","))
 		);
 	}
 
-	console.log("Starting Experiment B...");
-	const b = runExperimentB();
-	console.log("Finished b (aggregated)");
-	const bRaw = runExperimentBRaw();
-	console.log("Finished bRaw");
-	const bSummary = runExperimentBSummary();
-	console.log("Finished bSummary");
-
-	// Experiment B (clean): anchor-free metrics only.
-	const headerBClean = "node_count,uwb_sigma_m,rmse_aligned_m,mae_aligned_m,pairwise_dist_mae_m\n";
-	writePublicCsv(
-		"experiments_B_clean.csv",
-		headerBClean,
-		b.map((r) => [r.nodeCount, r.noiseSigma, r.rmseAligned, r.maeAligned, r.pairwiseDistMae].join(",")),
-	);
-
-	const headerBRawClean = "node_count,uwb_sigma_m,seed,rmse_aligned_m,mae_aligned_m,pairwise_dist_mae_m\n";
-	writePublicCsv(
-		"experiments_B_raw_clean.csv",
-		headerBRawClean,
-		bRaw.map((r) => [r.nodeCount, r.noiseSigma, r.seed, r.rmseAligned, r.maeAligned, r.pairwiseDistMae].join(",")),
-	);
-
-	// Cleaner summary: median + IQR only for the anchor-free metrics most used in the report.
-	const headerBSummaryClean =
-		"node_count,uwb_sigma_m,n_seeds,rmse_aligned_median_m,rmse_aligned_p25_m,rmse_aligned_p75_m,mae_aligned_median_m,mae_aligned_p25_m,mae_aligned_p75_m,pairwise_dist_mae_median_m,pairwise_dist_mae_p25_m,pairwise_dist_mae_p75_m\n";
-	writePublicCsv(
-		"experiments_B_summary_clean.csv",
-		headerBSummaryClean,
-		bSummary.map((r) =>
-			[
-				r.nodeCount,
-				r.noiseSigma,
-				r.n,
-				r.rmseAligned_median,
-				r.rmseAligned_p25,
-				r.rmseAligned_p75,
-				r.maeAligned_median,
-				r.maeAligned_p25,
-				r.maeAligned_p75,
-				r.pairwiseDistMae_median,
-				r.pairwiseDistMae_p25,
-				r.pairwiseDistMae_p75,
-			].join(","),
-		),
-	);
-
+	console.log("Starting Experiment Kalman Adaptive...");
 	{
-		const rows = runExperimentCScenarios();
+		const R = 25;
+		const Q = 1;
+		const std = 10;
+		const n = 5;
+		const rows = runExperimentKalmanAdaptive(R, Q, std, n);
 		writePublicCsv(
-			`experiments_C_all.csv`,
-			"scenario,time_s,node_count,tx_per_node_per_min,rmse_aligned_m\n",
-			rows.map((r) => [r.scenario, r.timeSeconds, r.nodes, r.txPerNodePerMin, r.rmse].join(",")),
+			`experiments_kalman_adaptive.csv`,
+			"time_s,rmse_gps_m,rmse_kalman_m,rmse_adaptive_m,r_fixed,q_fixed,r_adaptive_init,q_adaptive_init,std,n\n",
+			rows.map((r) => [r.timeSeconds, r.rmseGps, r.rmseKalman, r.rmseAdaptive, std*std, 0.01, R, Q, std, n].join(","))
 		);
 	}
-
-	// {
-	// 	const rows = runExperimentDScenarios();
-	// 	writePublicCsv(
-	// 		`experiments_D_all.csv`,
-	// 		"scenario,time_s,node_count,cloud_rmse_m,cloud_coverage_nodes\n",
-	// 		rows.map((r) =>
-	// 			[
-	// 				r.scenario,
-	// 				r.timeSeconds,
-	// 				r.nodes,
-	// 				r.cloudRmse,
-	// 				r.cloudCoverage,
-	// 			].join(",")
-	// 		)
-	// 	);
-	// }
-
-	// {
-	// 	const rows = runExperimentE();
-	// 	writePublicCsv(
-	// 		`experiments_E_all.csv`,
-	// 		"scenario,policy,seed,time_s,tx_total,tx_per_node_per_min,rmse_aligned_m\n",
-	// 		rows.map((r) =>
-	// 			[
-	// 				r.scenario,
-	// 				r.policy,
-	// 				r.seed,
-	// 				r.timeSeconds,
-	// 				r.txTotal,
-	// 				txPerNodePerMin(r.txTotal, 10, r.timeSeconds),
-	// 				r.rmse,
-	// 			].join(",")
-	// 		)
-	// 	);
-	// }
 }
 const isMain = () => import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain()) {

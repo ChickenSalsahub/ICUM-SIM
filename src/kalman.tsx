@@ -349,7 +349,7 @@ export class GlobalTransformEKF {
       }
     } */
     
-    //console.log(this.Q[0][0], this.R[0][0])
+    console.log(this.Q[0][0], this.R[0][0])
     N = this.Q[0][0]; R = this.R[0][0];
 
     const det = S[0][0] * S[1][1] - S[0][1] * S[1][0];
@@ -465,8 +465,9 @@ export function updateEKFCanvasState(
   originLat: number,
   originLng: number
 ){
-  renderLocations = locations;
-  renderOrigin = { lat: originLat, lng: originLng };
+  renderLocations = locations; 
+  //renderEKF = ekfMap;
+  renderOrigin = { lat: originLat, lng: originLng }
 
   function generatePos(nodeId: number) {
     const ogGPS = gpsToLocal({ lat: renderLocations[nodeId]?.lat || 0, lng: renderLocations[nodeId]?.lng || 0 }, renderOrigin);
