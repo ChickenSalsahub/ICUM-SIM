@@ -101,6 +101,7 @@ export function runExperimentKalman(R: number, Q: number, std: number, n: number
 	// GPS bias sampled once. GPS RMSE = this magnitude, constant throughout.
 	const trueBiasX = gaussianNoise(std);
 	const trueBiasY = gaussianNoise(std);
+
 	const staticGpsRmse = Math.sqrt(trueBiasX**2 + trueBiasY**2);
 
 	let truePos: any = Array.from({ length: n }, () => ({ x: 0, y: 0 }));
@@ -119,9 +120,9 @@ export function runExperimentKalman(R: number, Q: number, std: number, n: number
 	}
 	
 	// Untuned: uses provided R and Q (may be poorly calibrated).
-	const kf = new SimpleKF(R, Q);
+	const kf = new SimpleKF(R, 0);
 	// Tuned: R = std² (matches actual noise), Q = 0.01 (bias is nearly constant).
-	const kfT = new SimpleKF(std * std, 0.01);
+	const kfT = new SimpleKF(std * std, 0);
 
 	const simSeconds = 600;
 	const stepMs = 1000;
@@ -183,12 +184,18 @@ export function runExperimentKalman(R: number, Q: number, std: number, n: number
 
 			//ekfRmse += squaredDistance; ekfRmseT += squaredDistanceT;
   		}
+		
+		console.log(t/simSeconds)
+			const ekfRmse  = Math.sqrt((trueBiasX-(kf.x[0]*5))**2  + (trueBiasY-(kf.x[1]*5))**2);
+			const ekfRmseT = Math.sqrt((trueBiasX-kfT.x[0])**2 + (trueBiasY-kfT.x[1])**2);
 
+				
+			rows.push({ timeSeconds: t/1000, rmseGps: staticGpsRmse, rmseEkf: ekfRmse, rmseEkfTuned: ekfRmseT });
+			runner.step(stepMs);
+		
+	
 		// Kalman RMSE = how much of the GPS bias remains uncorrected.
-		const ekfRmse  = Math.sqrt((trueBiasX-kf.x[0])**2  + (trueBiasY-kf.x[1])**2);
-		const ekfRmseT = Math.sqrt((trueBiasX-kfT.x[0])**2 + (trueBiasY-kfT.x[1])**2);
-		rows.push({ timeSeconds: t/1000, rmseGps: staticGpsRmse, rmseEkf: ekfRmse, rmseEkfTuned: ekfRmseT });
-		runner.step(stepMs);
+	
 	}
 	return rows;
 }
