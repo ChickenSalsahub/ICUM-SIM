@@ -114,8 +114,8 @@ class AdaptiveKF {
 
 		// For 2-DOF system, ideal NIS ≈ 2. Scale Q up if over-confident (NIS > 2.5), down if under.
 		let scale = 1.0;
-		if (this.nisEma > 2.5)      scale = 1 + 0.3*(this.nisEma/2.5 - 1);
-		else if (this.nisEma < 1.5) scale = 1 - 0.1*(1 - this.nisEma/1.5);
+		if (this.nisEma > 2)      scale = 1 + 0.3*(this.nisEma/2.5 - 1);
+		else if (this.nisEma < 1) scale = 1 - 0.1*(1 - this.nisEma/1.5);
 		scale = Math.max(0.5, Math.min(5.0, scale));
 		this.Q = Math.max(0.001, Math.min(10.0, this.Q * 0.995 + 0.005 * this.Q * scale));
 
@@ -156,7 +156,7 @@ export function runExperimentKalmanAdaptive(R: number, Q: number, std: number, n
 	const staticGpsRmse = Math.sqrt(trueBiasX**2 + trueBiasY**2);
 
 	// Fixed-tuned: R = std² (optimal), Q = 0.01 (nearly static bias)
-	const kfFixed = new FixedKF(std * std, 0.01);
+	const kfFixed = new FixedKF(std * std, Q);
 
 	// Adaptive: starts with provided R and Q, then adapts each step
 	const kfAdapt = new AdaptiveKF(R, Q);

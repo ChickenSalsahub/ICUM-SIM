@@ -45,22 +45,25 @@ export function main() {
 
 	console.log("Starting Experiment Kalman...");
 	{
-		const R = 25;
+		const R = 100;
 		const Q = 1;
-		const std = 10;
-		const n = 5;
-		const rows = runExperimentKalman(R, Q, std, n);
-		writePublicCsv(
-			`experiments_kalman.csv`,
-			"time_s,rmse_gps_m,rmse_ekf_m,rmse_ekf_tuned_m,r_untuned,q_untuned,r_tuned,q_tuned,std,n\n",
-			rows.map((r) => [r.timeSeconds, r.rmseGps, r.rmseEkf, r.rmseEkfTuned, R, Q, std*std, 0.01, std, n].join(","))
-		);
+		const std = 20;
+		const nodes = 20;
+			for(let n = 0; n<=5; n++) {
+			const rows = runExperimentKalman(R, Q, std, nodes);
+
+			writePublicCsv(
+				`experiments_kalman[${n}].csv`,
+				"time_s,rmse_gps_m,rmse_ekf_m,rmse_ekf_tuned_m,r_untuned,q_untuned,r_tuned,q_tuned,std,n\n",
+				rows.map((r) => [r.timeSeconds, r.rmseGps, r.rmseEkf, r.rmseEkfTuned, R, Q, std*std, 0.01, std, n].join(","))
+			);
+		}
 	}
 
 	console.log("Starting Experiment Kalman Adaptive...");
 	{
-		const R = 25;
-		const Q = 1;
+		const R = 10;
+		const Q = 0.01;
 		const std = 10;
 		const n = 5;
 		const rows = runExperimentKalmanAdaptive(R, Q, std, n);

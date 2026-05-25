@@ -35,8 +35,8 @@ export function getCliSeed(defaultSeed: number): number {
 export function makeSeed(count: number, rng: RngFn): SeededNode[] {
 	return Array.from({ length: count }).map((_, idx) => ({
 		id: idx + 1,
-		x: rng() * EXPERIMENT_AREA_SIZE_M.width,
-		y: rng() * EXPERIMENT_AREA_SIZE_M.height,
+		x: rng() * EXPERIMENT_AREA_SIZE_M.width*0.8 + EXPERIMENT_AREA_SIZE_M.width*0.1,
+		y: rng() * EXPERIMENT_AREA_SIZE_M.height*0.8 + EXPERIMENT_AREA_SIZE_M.height*0.1,
 	}));
 }
 

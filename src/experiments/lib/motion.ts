@@ -51,7 +51,7 @@ export function applyMotionScenario(runner: SimulationRunner, scenario: MotionSc
 	if (scenario === "few_moving") {
 		movingCount = Math.max(1, Math.floor(candidates.length * 0.3));
 	} else if (scenario === "many_moving") {
-		movingCount = Math.max(1, Math.floor(candidates.length * 0.7));
+		movingCount = Math.max(1, Math.floor(candidates.length-1));
 	}
 	
 	const movingIds = candidates.slice(0, movingCount);
