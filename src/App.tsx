@@ -1159,8 +1159,7 @@ const App: React.FC = () => {
 		}
 		setContextMenu(null);
 	};
-
-
+	
 	const handleSetBatteryLife = () => {
 		if (!contextMenu) return;
 		const pctStr = prompt("Enter battery percentage (0-100):");

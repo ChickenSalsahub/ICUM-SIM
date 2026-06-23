@@ -203,8 +203,8 @@ export class GlobalTransformEKF {
   Q: number[][];
   R: number[][];
 
-  Q0: number[][];
-  R0: number[][];
+  //Q0: number[][];
+  //R0: number[][];
   nis_ema: number;
   qScale: number;
   innovCovEMA: number[][];
@@ -227,8 +227,8 @@ export class GlobalTransformEKF {
       [0, R]
     ];
 
-    this.Q0 = cloneMatrixQ(this.Q);
-    this.R0 = cloneMatrixR(this.R);
+    //this.Q0 = cloneMatrixQ(this.Q);
+   // this.R0 = cloneMatrixR(this.R);
     this.nis_ema = 2.0;
     this.qScale = 1.0;
     this.innovCovEMA = [
@@ -343,11 +343,11 @@ export class GlobalTransformEKF {
     this.qScale = 0.995 * this.qScale + 0.005 * scale;
     this.qScale = Math.max(0.25, Math.min(10.0, this.qScale));
 
-   /*  for (let i = 0; i < 4; i++) {
+   for (let i = 0; i < 4; i++) {
       for (let j = 0; j < 4; j++) {
-        this.Q[i][j] = this.Q0[i][j] * this.qScale
+        this.Q[i][j] = this.Q[i][j] * this.qScale
       }
-    } */
+    } 
     
     //console.log(this.Q[0][0], this.R[0][0])
     N = this.Q[0][0]; R = this.R[0][0];
@@ -493,8 +493,7 @@ export function runEKFStep(
 
     if (node.nodeId === originNodeId) continue;
 
-    const nodeENU = gpsToLocal({ lat: locations[node.nodeId-1].lat, lng: locations[node.nodeId-1].lng },{ lat: originLat, lng: originLng });
-    console.log(node.nodeId)
+    const nodeENU = gpsToLocal({ lat: node.lat, lng: node.lng }, { lat: originLat, lng: originLng });
     sx += nodeENU.x - anchorENU.x;
     sy += nodeENU.y - anchorENU.y;
 
@@ -515,12 +514,12 @@ export function runEKFStep(
 
     if (!posChange[node.nodeId]){
         posChange[node.nodeId] = {
-          prev: {x:0,y:0}, 
+          prev: measuredENU,
           curr: measuredENU
         };
       } else {
-        posChange[node.nodeId].prev = posChange[node.nodeId].curr
-        posChange[node.nodeId].curr = measuredENU
+        posChange[node.nodeId].prev = posChange[node.nodeId].curr;
+        posChange[node.nodeId].curr = measuredENU;
       }
 
     const correctedENU = {
@@ -583,17 +582,14 @@ export function runEKFStep(
 
 
 
-  function generatePos (nodeId: number) {
-    const ogGPS = gpsToLocal({ lat: renderLocations[nodeId].lat, lng: renderLocations[nodeId].lng } , renderOrigin)
-    return {
-      x: ogGPS.x + offSetx,
-      y: ogGPS.y + offSety
-    };
-  }
+ function generatePos(node: NodeLocation) {
+  const ogGPS = gpsToLocal({ lat: node.lat, lng: node.lng }, renderOrigin);
+  return { x: ogGPS.x + offSetx, y: ogGPS.y + offSety };
+}
 
   //simulate + EKF per node
   for (const node of renderLocations) {
-    const nowPos = generatePos(node.nodeId-1)
+    const nowPos = generatePos(node);
     if (!simState[node.nodeId]) {
       simState[node.nodeId] = {
         truePos: { x: nowPos.x, y: nowPos.y }, //{ x: 1 * Math.cos(0.2 * t + node.nodeId), y: 1 * Math.sin(0.2 * t + node.nodeId) }
